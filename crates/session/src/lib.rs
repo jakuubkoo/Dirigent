@@ -3,6 +3,8 @@
 pub mod keys;
 
 use std::io::{Read, Write};
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
 
@@ -93,29 +95,41 @@ impl EventListener for Listener {
 
 pub struct Session {
     pub term: Arc<FairMutex<Term<Listener>>>,
-    /// Receives one message per batch of new output (bounded(1): pending wakeups coalesce). Disconnects on exit.
+    /// Visible session: one message per batch of new output (bounded(1): pending wakeups coalesce).
+    /// Hidden session: one message when it first gets unread output, then silence until shown again.
+    /// Closed when the shell exits.
     pub wakeups: Receiver<()>,
     pub title: Arc<Mutex<Option<String>>>,
+    pub cwd: PathBuf,
+    flags: Arc<Flags>,
     writer: Writer,
     master: Box<dyn MasterPty + Send>,
-    child: Box<dyn Child + Send + Sync>,
+    /// Taken by whoever ends the process: the reader thread on EOF (reaps), or Drop (kills + reaps).
+    child: Arc<Mutex<Option<Box<dyn Child + Send + Sync>>>>,
     size: Arc<Mutex<Size>>,
 }
 
+#[derive(Default)]
+struct Flags {
+    visible: AtomicBool,
+    unread: AtomicBool,
+    exited: AtomicBool,
+    exit_code: Mutex<Option<u32>>,
+}
+
 impl Session {
-    /// Spawns the user's default shell.
-    pub fn spawn(size: Size) -> std::io::Result<Self> {
-        Self::spawn_command(CommandBuilder::new_default_prog(), size)
+    /// Spawns the user's default shell in `cwd`.
+    pub fn spawn(cwd: &Path, size: Size) -> std::io::Result<Self> {
+        Self::spawn_command(CommandBuilder::new_default_prog(), cwd, size)
     }
 
-    pub fn spawn_command(mut cmd: CommandBuilder, size: Size) -> std::io::Result<Self> {
+    // ponytail: one reader thread per session; fine for tens of sessions, switch to one poll(2) thread for hundreds.
+    pub fn spawn_command(mut cmd: CommandBuilder, cwd: &Path, size: Size) -> std::io::Result<Self> {
         let pair = native_pty_system().openpty(size.pty()).map_err(io_err)?;
         cmd.env("TERM", "xterm-256color");
         cmd.env("COLORTERM", "truecolor");
-        if let Ok(cwd) = std::env::current_dir() {
-            cmd.cwd(cwd);
-        }
-        let child = pair.slave.spawn_command(cmd).map_err(io_err)?;
+        cmd.cwd(cwd);
+        let child = Arc::new(Mutex::new(Some(pair.slave.spawn_command(cmd).map_err(io_err)?)));
         drop(pair.slave); // otherwise the reader never sees EOF
         let mut reader = pair.master.try_clone_reader().map_err(io_err)?;
         let writer: Writer = Arc::new(Mutex::new(pair.master.take_writer().map_err(io_err)?));
@@ -124,9 +138,10 @@ impl Session {
         let title = Arc::new(Mutex::new(None));
         let listener = Listener { writer: writer.clone(), size: size_shared.clone(), title: title.clone() };
         let term = Arc::new(FairMutex::new(Term::new(Config::default(), &size, listener)));
+        let flags = Arc::new(Flags::default());
 
         let (tx, wakeups) = async_channel::bounded(1);
-        let term2 = term.clone();
+        let (term2, flags2, child2) = (term.clone(), flags.clone(), child.clone());
         thread::Builder::new().name("pty-reader".into()).spawn(move || {
             let mut parser: Processor = Processor::new();
             let mut buf = vec![0u8; 64 * 1024];
@@ -137,14 +152,35 @@ impl Session {
                 };
                 // Lock held only while parsing this chunk, never while the UI shapes/paints.
                 parser.advance(&mut *term2.lock(), &buf[..n]);
-                match tx.try_send(()) {
-                    Ok(()) | Err(TrySendError::Full(())) => {}
-                    Err(TrySendError::Closed(())) => break,
+                // Hidden sessions wake the UI only on the unread flip, so background floods cost the UI nothing.
+                if flags2.visible.load(Ordering::Acquire) || !flags2.unread.swap(true, Ordering::AcqRel) {
+                    match tx.try_send(()) {
+                        Ok(()) | Err(TrySendError::Full(())) => {}
+                        Err(TrySendError::Closed(())) => break,
+                    }
                 }
             }
+            // Reap here so exited background sessions don't linger as zombies. Taken out of the lock first:
+            // Drop must never wait on it.
+            let child = child2.lock().unwrap().take();
+            if let Some(mut child) = child {
+                *flags2.exit_code.lock().unwrap() = child.wait().ok().map(|s| s.exit_code());
+            }
+            flags2.exited.store(true, Ordering::Release);
+            // dropping `tx` closes the channel = exit notification
         })?;
 
-        Ok(Self { term, wakeups, title, writer, master: pair.master, child, size: size_shared })
+        Ok(Self {
+            term,
+            wakeups,
+            title,
+            cwd: cwd.to_path_buf(),
+            flags,
+            writer,
+            master: pair.master,
+            child,
+            size: size_shared,
+        })
     }
 
     pub fn write(&self, bytes: &[u8]) {
@@ -152,16 +188,17 @@ impl Session {
         let _ = w.write_all(bytes).and_then(|_| w.flush());
     }
 
-    /// Resizes PTY and grid; no-op when nothing changed.
-    pub fn resize(&self, new: Size) {
+    /// Resizes PTY and grid; returns false (no-op) when nothing changed.
+    pub fn resize(&self, new: Size) -> bool {
         let mut cur = self.size.lock().unwrap();
         if *cur == new || new.cols == 0 || new.rows == 0 {
-            return;
+            return false;
         }
         *cur = new;
         drop(cur);
         self.term.lock().resize(new);
         let _ = self.master.resize(new.pty());
+        true
     }
 
     pub fn size(&self) -> Size {
@@ -176,11 +213,46 @@ impl Session {
     pub fn scroll_to_bottom(&self) {
         self.term.lock().scroll_display(Scroll::Bottom);
     }
+
+    /// Showing a session clears its unread flag.
+    pub fn set_visible(&self, visible: bool) {
+        self.flags.visible.store(visible, Ordering::Release);
+        if visible {
+            self.flags.unread.store(false, Ordering::Release);
+        }
+    }
+
+    pub fn is_visible(&self) -> bool {
+        self.flags.visible.load(Ordering::Acquire)
+    }
+
+    pub fn is_unread(&self) -> bool {
+        self.flags.unread.load(Ordering::Acquire)
+    }
+
+    pub fn is_exited(&self) -> bool {
+        self.flags.exited.load(Ordering::Acquire)
+    }
+
+    /// Exit code once the shell has exited.
+    pub fn exit_code(&self) -> Option<u32> {
+        *self.flags.exit_code.lock().unwrap()
+    }
+
+    pub fn pid(&self) -> Option<u32> {
+        self.child.lock().unwrap().as_ref()?.process_id()
+    }
 }
 
 impl Drop for Session {
     fn drop(&mut self) {
-        let _ = self.child.kill();
+        // kill() = SIGHUP + up to ~200 ms of polling + SIGKILL: never on the UI thread. wait() reaps the zombie.
+        if let Some(mut child) = self.child.lock().unwrap().take() {
+            let _ = thread::Builder::new().name("pty-reaper".into()).spawn(move || {
+                let _ = child.kill();
+                let _ = child.wait();
+            });
+        }
     }
 }
 
@@ -191,26 +263,77 @@ fn io_err(e: impl std::fmt::Display) -> std::io::Error {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::time::Duration;
+    use std::time::{Duration, Instant};
+
+    const SIZE: Size = Size { cols: 40, rows: 5, cell_width: 8, cell_height: 16 };
 
     fn grid_text(s: &Session) -> String {
         let term = s.term.lock();
         term.renderable_content().display_iter.map(|c| c.c).collect()
     }
 
-    #[test]
-    fn output_reaches_grid_and_resize_applies() {
+    fn sh(script: &str) -> CommandBuilder {
         let mut cmd = CommandBuilder::new("sh");
-        cmd.args(["-c", "printf 'hi-%s' \"$COLORTERM\"; sleep 2"]);
-        let s = Session::spawn_command(cmd, Size { cols: 40, rows: 5, cell_width: 8, cell_height: 16 }).unwrap();
-        let deadline = std::time::Instant::now() + Duration::from_secs(5);
-        while !grid_text(&s).contains("hi-truecolor") {
-            assert!(std::time::Instant::now() < deadline, "got: {:?}", grid_text(&s));
-            std::thread::sleep(Duration::from_millis(20));
+        cmd.args(["-c", script]);
+        cmd
+    }
+
+    fn wait_until(what: &str, mut f: impl FnMut() -> bool) {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while !f() {
+            assert!(Instant::now() < deadline, "timed out waiting for {what}");
+            thread::sleep(Duration::from_millis(20));
         }
-        assert!(s.wakeups.try_recv().is_ok(), "reader must signal a wakeup");
-        s.resize(Size { cols: 20, rows: 3, cell_width: 8, cell_height: 16 });
+    }
+
+    #[test]
+    fn output_cwd_and_resize() {
+        let dir = std::env::temp_dir();
+        let s = Session::spawn_command(sh("printf '%s-%s' \"$COLORTERM\" \"$PWD\"; sleep 2"), &dir, SIZE).unwrap();
+        s.set_visible(true);
+        let want = format!("truecolor-{}", dir.display().to_string().trim_end_matches('/'));
+        wait_until("output", || grid_text(&s).contains(&want[..want.len().min(38)]));
+        assert!(s.wakeups.try_recv().is_ok(), "visible session must signal a wakeup");
+        assert!(s.resize(Size { cols: 20, rows: 3, ..SIZE }));
+        assert!(!s.resize(Size { cols: 20, rows: 3, ..SIZE }), "same size is a no-op");
         let term = s.term.lock();
         assert_eq!((term.columns(), term.screen_lines()), (20, 3));
+    }
+
+    #[test]
+    fn hidden_flood_wakes_once() {
+        let s = Session::spawn_command(sh("sleep 0.2; exec yes"), Path::new("/"), SIZE).unwrap();
+        wait_until("unread", || s.is_unread());
+        assert!(s.wakeups.try_recv().is_ok());
+        thread::sleep(Duration::from_millis(300)); // flood continues
+        assert!(s.wakeups.try_recv().is_err(), "hidden session must not wake again");
+        s.set_visible(true);
+        assert!(!s.is_unread());
+    }
+
+    #[test]
+    fn exit_is_reported_with_code() {
+        let s = Session::spawn_command(sh("exit 3"), Path::new("/"), SIZE).unwrap();
+        let pid = s.pid().unwrap();
+        wait_until("exit", || s.is_exited() && s.wakeups.is_closed());
+        assert_eq!(s.exit_code(), Some(3));
+        assert!(!Path::new(&format!("/proc/{pid}")).exists(), "exited shell must be reaped, not a zombie");
+    }
+
+    #[test]
+    fn drop_kills_shell_and_foreground_child() {
+        let s = Session::spawn_command(sh("sleep 1000; true"), Path::new("/"), SIZE).unwrap();
+        let pid = s.pid().unwrap();
+        let child_pid = || {
+            std::fs::read_to_string(format!("/proc/{pid}/task/{pid}/children")).unwrap_or_default().trim().to_string()
+        };
+        wait_until("sleep child", || !child_pid().is_empty());
+        let sleep_pid = child_pid();
+        let started = Instant::now();
+        drop(s);
+        assert!(started.elapsed() < Duration::from_millis(20), "drop must not block");
+        let gone = |p: &str| !Path::new(&format!("/proc/{p}")).exists();
+        wait_until("shell reaped", || gone(&pid.to_string()));
+        wait_until("sleep killed", || gone(&sleep_pid));
     }
 }

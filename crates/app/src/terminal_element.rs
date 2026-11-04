@@ -2,8 +2,6 @@
 //! segments/rects; shaping and painting happen after it is released.
 
 use std::rc::Rc;
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{LazyLock, Mutex};
 use std::time::Instant;
 
 use gpui::{
@@ -15,7 +13,7 @@ use session::alacritty_terminal::grid::Dimensions;
 use session::alacritty_terminal::term::cell::Flags;
 use session::alacritty_terminal::term::color::Colors;
 use session::alacritty_terminal::vte::ansi::{Color, CursorShape, NamedColor};
-use session::{Session, Size};
+use session::Session;
 
 pub mod palette {
     use gpui::Rgba;
@@ -45,7 +43,7 @@ const FONT_SIZE: f32 = 14.;
 pub struct Metrics {
     font: Font,
     font_size: Pixels,
-    cell_width: Pixels,
+    pub cell_width: Pixels,
     pub line_height: Pixels,
 }
 
@@ -170,15 +168,6 @@ impl Element for TerminalElement {
     ) -> Prepainted {
         let started = Instant::now();
         let m = &self.m;
-        let cols = (bounds.size.width / m.cell_width).floor().max(1.) as u16;
-        let rows = (bounds.size.height / m.line_height).floor().max(1.) as u16;
-        self.session.resize(Size {
-            cols,
-            rows,
-            cell_width: f32::from(m.cell_width) as u16,
-            cell_height: f32::from(m.line_height) as u16,
-        });
-
         let mut rects: Vec<(usize, usize, usize, Hsla)> = Vec::new();
         let mut segs: Vec<Segment> = Vec::new();
         let mut cursor = None;
@@ -309,31 +298,6 @@ impl Element for TerminalElement {
         if let Some(c) = p.cursor {
             window.paint_quad(fill(c, palette::CURSOR));
         }
-        perf::frame(p.started);
-    }
-}
-
-/// `AGENT_IDE_PERF=1`: prints frames/s and average prepaint+paint time once per second of activity.
-mod perf {
-    use super::*;
-    static ENABLED: LazyLock<bool> = LazyLock::new(|| std::env::var_os("AGENT_IDE_PERF").is_some());
-    static FRAMES: AtomicU64 = AtomicU64::new(0);
-    static NANOS: AtomicU64 = AtomicU64::new(0);
-    static WINDOW: Mutex<Option<Instant>> = Mutex::new(None);
-
-    pub fn frame(started: Instant) {
-        if !*ENABLED {
-            return;
-        }
-        let f = FRAMES.fetch_add(1, Ordering::Relaxed) + 1;
-        let n = NANOS.fetch_add(started.elapsed().as_nanos() as u64, Ordering::Relaxed);
-        let mut w = WINDOW.lock().unwrap();
-        let since = *w.get_or_insert_with(Instant::now);
-        if since.elapsed().as_secs_f32() >= 1. {
-            eprintln!("[perf] {f} frames/s, avg render {:.2} ms", n as f64 / f as f64 / 1e6);
-            FRAMES.store(0, Ordering::Relaxed);
-            NANOS.store(0, Ordering::Relaxed);
-            *w = Some(Instant::now());
-        }
+        crate::perf::term_paint(p.started);
     }
 }
