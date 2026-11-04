@@ -86,3 +86,10 @@ pub fn switch_started() {
 pub fn event(what: &str) {
     verbose(what);
 }
+
+/// Verbose-only event whose text is built lazily (safe to call from any thread).
+pub fn event_with(f: impl FnOnce() -> String) {
+    if *VERBOSE {
+        verbose(&f());
+    }
+}

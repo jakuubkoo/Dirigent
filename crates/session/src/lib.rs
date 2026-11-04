@@ -118,9 +118,13 @@ struct Flags {
 }
 
 impl Session {
-    /// Spawns the user's default shell in `cwd`.
-    pub fn spawn(cwd: &Path, size: Size) -> std::io::Result<Self> {
-        Self::spawn_command(CommandBuilder::new_default_prog(), cwd, size)
+    /// Spawns the user's default shell (as a login shell) in `cwd` with extra environment variables.
+    pub fn spawn(cwd: &Path, size: Size, env: &[(String, String)]) -> std::io::Result<Self> {
+        let mut cmd = CommandBuilder::new_default_prog();
+        for (k, v) in env {
+            cmd.env(k, v);
+        }
+        Self::spawn_command(cmd, cwd, size)
     }
 
     // ponytail: one reader thread per session; fine for tens of sessions, switch to one poll(2) thread for hundreds.

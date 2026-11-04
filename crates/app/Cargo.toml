@@ -8,3 +8,6 @@ license.workspace = true
 gpui.workspace = true
 gpui_platform.workspace = true
 session.workspace = true
+hook.workspace = true
+serde_json = "1"
+async-channel = "2.5"

@@ -9,6 +9,7 @@ use gpui::{
 };
 use session::{Session, Size};
 
+use crate::agent::{self, Hub};
 use crate::line_edit::{Edit, LineEdit};
 use crate::window_chrome::{self, Chrome};
 use crate::terminal_element::{Metrics, palette};
@@ -17,7 +18,7 @@ use crate::terminal_view::{PADDING, TerminalView};
 actions!(
     agent_ide,
     [
-        NewSession, CloseSession, NextSession, PrevSession, Rename, ToggleSidebar,
+        NewSession, CloseSession, NextSession, PrevSession, Rename, ToggleSidebar, NextNeedsYou,
         Activate1, Activate2, Activate3, Activate4, Activate5, Activate6, Activate7, Activate8, Activate9
     ]
 );
@@ -36,6 +37,10 @@ mod colors {
     pub const DIVIDER: u32 = 0x26262e;
     pub const DIVIDER_HOVER: u32 = 0x4a4a58;
     pub const MODAL: u32 = 0x24242c;
+    pub const WORKING: u32 = 0x5fa2e6;
+    pub const NEEDS_YOU: u32 = 0xf0a030;
+    pub const DONE: u32 = 0x8cc265;
+    pub const BAR_BG: u32 = 0x2b2b35;
     pub const INPUT: u32 = 0x1a1a20;
 }
 
@@ -79,6 +84,14 @@ pub struct Workspace {
     /// Left button went down on the title bar; the first move with it held starts a compositor move.
     title_pressed: bool,
     window_title: String,
+    /// Claude Code hooks/statusLine receiver; None if the runtime dir/socket couldn't be set up.
+    agents: Option<Hub>,
+    _agent_task: Option<Task<()>>,
+    /// Re-renders the limits countdown at the next minute boundary; only while limits are known and the window is
+    /// visible.
+    _minute: Option<Task<()>>,
+    window_visible: bool,
+    _subscriptions: Vec<gpui::Subscription>,
 }
 
 impl Workspace {
@@ -102,8 +115,40 @@ impl Workspace {
             _cycle: None,
             title_pressed: false,
             window_title: String::new(),
+            agents: None,
+            _agent_task: None,
+            _minute: None,
+            window_visible: true,
+            _subscriptions: Vec::new(),
             metrics,
         };
+        match Hub::start() {
+            Ok(hub) => {
+                let rx = hub.changes.clone();
+                this._agent_task = Some(cx.spawn(async move |this, cx| {
+                    while rx.recv().await.is_ok() {
+                        crate::perf::event("agent state change");
+                        if this.update(cx, |w, cx| w.agents_changed(cx)).is_err() {
+                            return;
+                        }
+                    }
+                }));
+                let dir = hub.dir.clone();
+                this._subscriptions.push(cx.on_app_quit(move |_, _| {
+                    let _ = std::fs::remove_dir_all(&dir);
+                    async {}
+                }));
+                this.agents = Some(hub);
+            }
+            Err(e) => eprintln!("agent-ide: Claude Code integration disabled: {e}"),
+        }
+        this._subscriptions.push(cx.observe_window_visibility(window, |w, visibility, _, cx| {
+            w.window_visible = visibility == gpui::WindowVisibility::Visible;
+            if !w.window_visible {
+                w._minute = None; // no countdown ticks while nobody can see them
+            }
+            cx.notify();
+        }));
         this.applied = this.grid_size(window);
 
         // Perf harness: one session per line of AGENT_IDE_RUN, the line typed into it.
@@ -183,12 +228,19 @@ impl Workspace {
     fn spawn_tab(&mut self, dir: &Path, window: &mut Window, cx: &mut Context<Self>) {
         let id = self.next_id;
         self.next_id += 1;
-        let view = self.new_view(dir, window, cx);
+        let view = self.new_view(id, dir, window, cx);
         self.tabs.push(Tab { id, name: format!("Session {id}"), view });
     }
 
-    fn new_view(&mut self, dir: &Path, _: &mut Window, cx: &mut Context<Self>) -> Entity<TerminalView> {
-        let session = Session::spawn(dir, self.applied).expect("spawn shell");
+    fn new_view(&mut self, id: usize, dir: &Path, _: &mut Window, cx: &mut Context<Self>) -> Entity<TerminalView> {
+        let env = match &self.agents {
+            Some(hub) => hub.session_env(id as u32).unwrap_or_else(|e| {
+                eprintln!("agent-ide: no Claude Code hooks for session {id}: {e}");
+                Vec::new()
+            }),
+            None => Vec::new(),
+        };
+        let session = Session::spawn(dir, self.applied, &env).expect("spawn shell");
         let (metrics, ws) = (self.metrics.clone(), cx.entity().downgrade());
         cx.new(|cx| TerminalView::new(session, metrics, ws, cx))
     }
@@ -200,6 +252,9 @@ impl Workspace {
             old.view.read(cx).session.set_visible(false);
         }
         new.view.read(cx).session.set_visible(true);
+        if let Some(hub) = &self.agents {
+            hub.board.lock().unwrap().mark_seen(new.id as u32);
+        }
         // It may have output since its cached frame was recorded.
         new.view.update(cx, |_, cx| cx.notify());
         if self.modal.is_none() {
@@ -221,7 +276,10 @@ impl Workspace {
             return;
         }
         // Dropping the view drops the Session, which kills + reaps the shell on its own thread.
-        self.tabs.remove(self.active);
+        let tab = self.tabs.remove(self.active);
+        if let Some(hub) = &self.agents {
+            hub.remove_tab(tab.id as u32);
+        }
         self.modal = None;
         if self.tabs.is_empty() {
             self.active = 0;
@@ -236,8 +294,11 @@ impl Workspace {
 
     pub fn restart(&mut self, view_id: EntityId, window: &mut Window, cx: &mut Context<Self>) {
         let Some(i) = self.tabs.iter().position(|t| t.view.entity_id() == view_id) else { return };
-        let dir = self.tabs[i].view.read(cx).session.cwd.clone();
-        self.tabs[i].view = self.new_view(&dir, window, cx);
+        let (id, dir) = (self.tabs[i].id, self.tabs[i].view.read(cx).session.cwd.clone());
+        if let Some(hub) = &self.agents {
+            hub.board.lock().unwrap().tabs.remove(&(id as u32));
+        }
+        self.tabs[i].view = self.new_view(id, &dir, window, cx);
         if i == self.active {
             self.active = usize::MAX;
             self.activate(i, window, cx);
@@ -314,25 +375,49 @@ impl Workspace {
     }
 
     fn sidebar(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
+        let board = self.agents.as_ref().map(|h| h.board.lock().unwrap());
         let rows = self.tabs.iter().enumerate().map(|(i, tab)| {
             let session = &tab.view.read(cx).session;
             let (unread, exited) = (session.is_unread(), session.is_exited());
             let cwd = tilde(&session.cwd);
             let active = i == self.active;
+            let agent = match &board {
+                Some(b) if !exited => b.get(tab.id as u32),
+                _ => agent::Agent::default(),
+            };
             let name: SharedString = match &self.modal {
                 Some(Modal::Rename { tab: r, edit }) if *r == i => {
                     return div().id(("tab", tab.id)).px_2().py_1().child(text_field(edit)).into_any_element();
                 }
                 _ => tab.name.clone().into(),
             };
+            let needs_you = agent.state == agent::State::NeedsYou;
+            let badge = match agent.state {
+                agent::State::NoAgent => None,
+                agent::State::Ready => Some(("claude", colors::DIM)),
+                agent::State::Working => Some(("working", colors::WORKING)),
+                agent::State::NeedsYou => Some(("needs you", colors::NEEDS_YOU)),
+                agent::State::Done => Some(("done", colors::DONE)),
+            };
+            let model_line = (agent.state != agent::State::NoAgent).then(|| {
+                let mut parts = vec![agent.model.clone().unwrap_or_else(|| "claude".into())];
+                if let Some(p) = agent.context_pct {
+                    parts.push(format!("ctx {p}%"));
+                }
+                parts.join(" · ")
+            });
             div()
                 .id(("tab", tab.id))
                 .flex()
                 .items_center()
                 .gap_2()
-                .px_3()
+                .pl(px(9.))
+                .pr_3()
                 .py_1()
                 .cursor_pointer()
+                // Needs you stands out: amber accent bar on the left edge (transparent otherwise, no layout shift).
+                .border_l(px(3.))
+                .border_color(if needs_you { rgb(colors::NEEDS_YOU).into() } else { gpui::transparent_black() })
                 .when(active, |d| d.bg(rgb(colors::ROW_ACTIVE)))
                 .when(!active, |d| d.hover(|s| s.bg(rgb(colors::ROW_HOVER))))
                 .on_click(cx.listener(move |w, e: &ClickEvent, window, cx| {
@@ -348,8 +433,25 @@ impl Workspace {
                         .flex_col()
                         .flex_1()
                         .overflow_hidden()
-                        .child(div().text_sm().truncate().child(name))
-                        .child(div().text_xs().truncate().text_color(rgb(colors::DIM)).child(cwd)),
+                        .child(
+                            div()
+                                .flex()
+                                .items_center()
+                                .gap_2()
+                                .child(div().flex_1().text_sm().truncate().child(name))
+                                .children(badge.map(|(label, color)| {
+                                    div()
+                                        .flex_none()
+                                        .text_xs()
+                                        .text_color(rgb(color))
+                                        .when(needs_you || agent.unseen, |d| d.font_weight(gpui::FontWeight::BOLD))
+                                        .child(label)
+                                })),
+                        )
+                        .child(div().text_xs().truncate().text_color(rgb(colors::DIM)).child(cwd))
+                        .children(
+                            model_line.map(|m| div().text_xs().truncate().text_color(rgb(colors::DIM)).child(m)),
+                        ),
                 )
                 .when(exited, |d| {
                     d.child(div().text_xs().text_color(rgb(colors::EXITED)).child("exited")).child(
@@ -367,10 +469,14 @@ impl Workspace {
                             })),
                     )
                 })
-                .when(unread && !active && !exited, |d| d.child(div().size(px(7.)).rounded_full().bg(rgb(colors::DOT))))
+                .when(unread && !active && !exited && badge.is_none(), |d| {
+                    d.child(div().size(px(7.)).rounded_full().bg(rgb(colors::DOT)))
+                })
                 .into_any_element()
         });
         let rows: Vec<_> = rows.collect();
+        let limits = board.as_ref().map(|b| (b.five_hour, b.seven_day));
+        drop(board);
 
         let header = div()
             .flex()
@@ -381,6 +487,23 @@ impl Workspace {
             .child(icon_button("new", "+").on_click(cx.listener(|w, _: &ClickEvent, window, cx| w.open_new_session(window, cx))))
             .child(icon_button("collapse", "‹").on_click(cx.listener(|w, _: &ClickEvent, _, cx| w.toggle_sidebar(cx))));
 
+        let now = now_secs();
+        let footer = match limits {
+            Some((five, seven)) if five.is_some() || seven.is_some() => Some(
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap_2()
+                    .px_3()
+                    .py_2()
+                    .border_t_1()
+                    .border_color(rgb(colors::DIVIDER))
+                    .child(limit_row("5h limit", five, now))
+                    .child(limit_row("Weekly limit", seven, now)),
+            ),
+            _ => None,
+        };
+
         div()
             .flex()
             .flex_col()
@@ -390,6 +513,57 @@ impl Workspace {
             .bg(rgb(colors::SIDEBAR))
             .child(header)
             .child(div().id("tabs").flex_1().overflow_y_scroll().children(rows))
+            .children(footer)
+    }
+
+    /// Agent states/limits changed (listener thread). The tab being looked at is never "unseen".
+    fn agents_changed(&mut self, cx: &mut Context<Self>) {
+        if let (Some(hub), Some(tab)) = (&self.agents, self.tabs.get(self.active)) {
+            hub.board.lock().unwrap().mark_seen(tab.id as u32);
+        }
+        cx.notify();
+    }
+
+    fn needs_you_count(&self) -> usize {
+        let Some(hub) = &self.agents else { return 0 };
+        let board = hub.board.lock().unwrap();
+        self.tabs.iter().filter(|t| board.get(t.id as u32).state == agent::State::NeedsYou).count()
+    }
+
+    /// Jumps to the next session that needs you; if none, the next finished one you haven't seen.
+    fn next_needs_you(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(hub) = &self.agents else { return };
+        let n = self.tabs.len();
+        let target = {
+            let board = hub.board.lock().unwrap();
+            let order = (1..=n).map(|k| (self.active + k) % n);
+            let find = |pred: &dyn Fn(&agent::Agent) -> bool| {
+                order.clone().find(|&i| pred(&board.get(self.tabs[i].id as u32)))
+            };
+            find(&|a| a.state == agent::State::NeedsYou).or_else(|| find(&|a| a.unseen))
+        };
+        if let Some(i) = target {
+            self.activate(i, window, cx);
+        }
+    }
+
+    /// Keeps the limits countdown fresh: one wakeup per minute boundary, only while it's shown and visible.
+    fn arm_minute_timer(&mut self, cx: &mut Context<Self>) {
+        let known = self.agents.as_ref().is_some_and(|h| {
+            let b = h.board.lock().unwrap();
+            b.five_hour.is_some() || b.seven_day.is_some()
+        });
+        if !known || !self.window_visible || !self.sidebar_open || self._minute.is_some() {
+            return;
+        }
+        let wait = 60 - now_secs().rem_euclid(60) as u64;
+        self._minute = Some(cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(Duration::from_secs(wait)).await;
+            let _ = this.update(cx, |w, cx| {
+                w._minute = None;
+                cx.notify();
+            });
+        }));
     }
 
     fn toggle_sidebar(&mut self, cx: &mut Context<Self>) {
@@ -425,6 +599,7 @@ impl Render for Workspace {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         crate::perf::root_render();
         self.schedule_resize(window, cx);
+        self.arm_minute_timer(cx);
 
         let terminal = match self.tabs.get(self.active) {
             Some(tab) => tab.view.clone().cached(StyleRefinement::default().size_full()).into_any_element(),
@@ -466,10 +641,15 @@ impl Render for Workspace {
         };
 
         let chrome = Chrome::of(window);
-        let title = match self.tabs.get(self.active) {
+        let mut title = match self.tabs.get(self.active) {
             Some(tab) => format!("{} — agent-ide", tab.name),
             None => "agent-ide".to_string(),
         };
+        match self.needs_you_count() {
+            0 => {}
+            1 => title.push_str(" · 1 needs you"),
+            n => title.push_str(&format!(" · {n} need you")),
+        }
         if title != self.window_title {
             window.set_window_title(&title);
             self.window_title = title.clone();
@@ -524,6 +704,7 @@ impl Render for Workspace {
             .on_action(cx.listener(|w, _: &PrevSession, window, cx| w.cycle(-1, window, cx)))
             .on_action(cx.listener(|w, _: &Rename, window, cx| w.start_rename(w.active, window, cx)))
             .on_action(cx.listener(|w, _: &ToggleSidebar, _, cx| w.toggle_sidebar(cx)))
+            .on_action(cx.listener(|w, _: &NextNeedsYou, window, cx| w.next_needs_you(window, cx)))
             .on_action(cx.listener(|w, _: &Activate1, window, cx| w.activate(0, window, cx)))
             .on_action(cx.listener(|w, _: &Activate2, window, cx| w.activate(1, window, cx)))
             .on_action(cx.listener(|w, _: &Activate3, window, cx| w.activate(2, window, cx)))
@@ -607,5 +788,61 @@ fn untilde(s: &str) -> PathBuf {
     match s.strip_prefix('~') {
         Some(rest) if rest.is_empty() || rest.starts_with('/') => home().join(rest.trim_start_matches('/')),
         _ => PathBuf::from(s),
+    }
+}
+
+fn now_secs() -> i64 {
+    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs() as i64)
+}
+
+/// "2 h 14 m", "3 d 4 h", "14 m"; minute granularity (the countdown re-renders once a minute).
+fn fmt_remaining(secs: i64) -> String {
+    let m = (secs.max(0) + 59) / 60;
+    let (d, h, m) = (m / 1440, m / 60 % 24, m % 60);
+    match (d, h) {
+        (0, 0) => format!("{m} m"),
+        (0, _) => format!("{h} h {m} m"),
+        _ => format!("{d} d {h} h"),
+    }
+}
+
+fn limit_row(label: &'static str, limit: Option<hook::Limit>, now: i64) -> impl IntoElement {
+    let (pct, detail) = match limit {
+        Some(l) if l.resets_at > now => (l.used_pct, format!("{:.0}% · resets in {}", l.used_pct, fmt_remaining(l.resets_at - now))),
+        Some(_) => (0., "reset".to_string()),
+        None => (0., "—".to_string()),
+    };
+    let color = if pct >= 90. { colors::EXITED } else if pct >= 70. { colors::NEEDS_YOU } else { colors::WORKING };
+    div()
+        .flex()
+        .flex_col()
+        .gap_1()
+        .child(
+            div()
+                .flex()
+                .text_xs()
+                .child(div().flex_1().child(label))
+                .child(div().text_color(rgb(colors::DIM)).child(detail)),
+        )
+        .child(
+            div()
+                .h(px(3.))
+                .w_full()
+                .rounded_full()
+                .bg(rgb(colors::BAR_BG))
+                .child(div().h_full().rounded_full().bg(rgb(color)).w(gpui::relative(pct.clamp(0., 100.) / 100.))),
+        )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::fmt_remaining;
+
+    #[test]
+    fn remaining() {
+        assert_eq!(fmt_remaining(0), "0 m");
+        assert_eq!(fmt_remaining(61), "2 m");
+        assert_eq!(fmt_remaining(2 * 3600 + 14 * 60), "2 h 14 m");
+        assert_eq!(fmt_remaining(3 * 86400 + 4 * 3600), "3 d 4 h");
     }
 }

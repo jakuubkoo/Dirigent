@@ -1,3 +1,4 @@
+mod agent;
 mod line_edit;
 mod perf;
 mod terminal_element;
@@ -18,6 +19,7 @@ fn main() {
             KeyBinding::new("ctrl-shift-tab", PrevSession, ctx),
             KeyBinding::new("f2", Rename, ctx),
             KeyBinding::new("ctrl-shift-b", ToggleSidebar, ctx),
+            KeyBinding::new("ctrl-shift-j", NextNeedsYou, ctx),
             KeyBinding::new("ctrl-1", Activate1, ctx),
             KeyBinding::new("ctrl-2", Activate2, ctx),
             KeyBinding::new("ctrl-3", Activate3, ctx),

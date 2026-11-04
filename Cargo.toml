@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["crates/session", "crates/app"]
+members = ["crates/session", "crates/app", "crates/hook"]
 
 [workspace.package]
 edition = "2024"
@@ -13,6 +13,7 @@ gpui_platform = { git = "https://github.com/zed-industries/zed", rev = "c7bea343
 alacritty_terminal = "=0.26.0"
 portable-pty = "=0.9.0"
 session = { path = "crates/session" }
+hook = { path = "crates/hook" }
 
 # Cargo ignores a dependency's [patch]: these mirror Zed's root Cargo.toml at the pinned rev.
 [patch.crates-io]
