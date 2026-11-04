@@ -2,9 +2,10 @@ mod line_edit;
 mod perf;
 mod terminal_element;
 mod terminal_view;
+mod window_chrome;
 mod workspace;
 
-use gpui::{App, Bounds, KeyBinding, WindowBounds, WindowOptions, prelude::*, px, size};
+use gpui::{App, Bounds, KeyBinding, WindowBounds, WindowDecorations, WindowOptions, prelude::*, px, size};
 use workspace::*;
 
 fn main() {
@@ -29,7 +30,14 @@ fn main() {
         ]);
         let bounds = Bounds::centered(None, size(px(1200.), px(750.)), cx);
         cx.open_window(
-            WindowOptions { window_bounds: Some(WindowBounds::Windowed(bounds)), ..Default::default() },
+            WindowOptions {
+                window_bounds: Some(WindowBounds::Windowed(bounds)),
+                // Server-side where the platform has them (X11, KDE); GNOME Wayland falls back to client-side and
+                // the workspace draws its own title bar (window_chrome.rs).
+                window_decorations: Some(WindowDecorations::Server),
+                app_id: Some("agent-ide".into()),
+                ..Default::default()
+            },
             |window, cx| cx.new(|cx| Workspace::new(window, cx)),
         )
         .expect("open window");

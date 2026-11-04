@@ -10,6 +10,7 @@ use gpui::{
 use session::{Session, Size};
 
 use crate::line_edit::{Edit, LineEdit};
+use crate::window_chrome::{self, Chrome};
 use crate::terminal_element::{Metrics, palette};
 use crate::terminal_view::{PADDING, TerminalView};
 
@@ -75,6 +76,9 @@ pub struct Workspace {
     last_dir: PathBuf,
     modal: Option<Modal>,
     _cycle: Option<Task<()>>,
+    /// Left button went down on the title bar; the first move with it held starts a compositor move.
+    title_pressed: bool,
+    window_title: String,
 }
 
 impl Workspace {
@@ -96,6 +100,8 @@ impl Workspace {
             last_dir,
             modal: None,
             _cycle: None,
+            title_pressed: false,
+            window_title: String::new(),
             metrics,
         };
         this.applied = this.grid_size(window);
@@ -129,8 +135,9 @@ impl Workspace {
         let vp = window.viewport_size();
         let side = if self.sidebar_open { self.sidebar_width + px(DIVIDER) } else { px(COLLAPSED) };
         let m = &self.metrics;
-        let w = vp.width - side - px(PADDING);
-        let h = vp.height - px(PADDING);
+        let chrome = Chrome::of(window);
+        let w = vp.width - side - px(PADDING) - chrome.horizontal();
+        let h = vp.height - px(PADDING) - chrome.vertical();
         Size {
             cols: (w / m.cell_width).floor().max(2.) as u16,
             rows: (h / m.line_height).floor().max(1.) as u16,
@@ -458,14 +465,58 @@ impl Render for Workspace {
                 .into_any_element()
         };
 
+        let chrome = Chrome::of(window);
+        let title = match self.tabs.get(self.active) {
+            Some(tab) => format!("{} — agent-ide", tab.name),
+            None => "agent-ide".to_string(),
+        };
+        if title != self.window_title {
+            window.set_window_title(&title);
+            self.window_title = title.clone();
+        }
+        let title_bar = chrome.csd.then(|| {
+            window_chrome::title_bar(
+                title,
+                window,
+                rgb(colors::SIDEBAR).into(),
+                rgb(colors::DIM).into(),
+                rgb(colors::ROW_HOVER).into(),
+            )
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|w, e: &gpui::MouseDownEvent, window, _| {
+                    if e.click_count == 2 {
+                        w.title_pressed = false;
+                        window.zoom_window();
+                    } else {
+                        w.title_pressed = true;
+                    }
+                }),
+            )
+            .on_mouse_move(cx.listener(|w, e: &gpui::MouseMoveEvent, window, _| {
+                if w.title_pressed && e.pressed_button == Some(MouseButton::Left) {
+                    w.title_pressed = false;
+                    window.start_window_move();
+                }
+            }))
+            .on_mouse_up(MouseButton::Left, cx.listener(|w, _, _, _| w.title_pressed = false))
+            .on_click(|e, window, _| {
+                if e.is_right_click() {
+                    window.show_window_menu(e.position());
+                }
+            })
+        });
+
         div()
             .key_context("Workspace")
             .track_focus(&self.focus)
             .relative()
             .flex()
+            .flex_col()
             .size_full()
             .bg(palette::BG)
             .text_color(palette::FG)
+            .when(chrome.border > px(0.), |d| d.border(chrome.border).border_color(rgb(colors::DIVIDER_HOVER)))
             .on_key_down(cx.listener(Self::modal_key))
             .on_action(cx.listener(|w, _: &NewSession, window, cx| w.open_new_session(window, cx)))
             .on_action(cx.listener(|w, _: &CloseSession, window, cx| w.close_active(window, cx)))
@@ -490,9 +541,18 @@ impl Render for Workspace {
             }))
             .on_drop::<SidebarDrag>(cx.listener(|w, _, _, cx| w.end_drag(cx)))
             .on_mouse_up(MouseButton::Left, cx.listener(|w, _, _, cx| w.end_drag(cx)))
-            .child(side)
-            .child(div().flex_1().h_full().overflow_hidden().child(terminal))
+            .children(title_bar)
+            .child(
+                div()
+                    .flex()
+                    .flex_1()
+                    .min_h_0()
+                    .w_full()
+                    .child(side)
+                    .child(div().flex_1().h_full().overflow_hidden().child(terminal)),
+            )
             .children(self.modal_view())
+            .when(chrome.csd, |d| d.children(window_chrome::resize_handles(chrome.tiling)))
     }
 }
 
