@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["crates/session", "crates/app", "crates/hook"]
+members = ["crates/session", "crates/app", "crates/hook", "crates/git"]
 
 [workspace.package]
 edition = "2024"
@@ -12,8 +12,11 @@ gpui = { git = "https://github.com/zed-industries/zed", rev = "c7bea343838f42b4c
 gpui_platform = { git = "https://github.com/zed-industries/zed", rev = "c7bea343838f42b4c14151393e41f0bbe033c95e", features = ["wayland", "x11"] }
 alacritty_terminal = "=0.26.0"
 portable-pty = "=0.9.0"
+# Version of the Zed fork patched in below (Zed watches its worktrees with it too).
+notify = "=9.0.0-rc.4"
 session = { path = "crates/session" }
 hook = { path = "crates/hook" }
+git = { path = "crates/git" }
 
 # Cargo ignores a dependency's [patch]: these mirror Zed's root Cargo.toml at the pinned rev.
 [patch.crates-io]
@@ -21,6 +24,8 @@ async-process = { git = "https://github.com/zed-industries/async-process.git", r
 async-task = { git = "https://github.com/zed-industries/async-task.git", rev = "015845a19fc31752c02367567d3b8900a406f9da" }
 calloop = { git = "https://github.com/zed-industries/calloop", rev = "3759371fee14c40066d64777e2a36b6ffcc22590" }
 khronos-egl = { git = "https://github.com/zed-industries/khronos-egl", rev = "42214b36347b108fd9630ca6254b96dde59e04fe" }
+notify = { git = "https://github.com/zed-industries/notify", rev = "d842f16b2716bd60f09caf3ae3a894237ab38f54" }
+notify-types = { git = "https://github.com/zed-industries/notify", rev = "d842f16b2716bd60f09caf3ae3a894237ab38f54" }
 
 [profile.release]
 lto = "thin"

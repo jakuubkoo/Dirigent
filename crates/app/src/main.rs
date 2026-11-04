@@ -1,7 +1,9 @@
 mod agent;
+mod git_panel;
 mod line_edit;
 mod perf;
 mod persist;
+mod scrollbar;
 mod terminal_element;
 mod terminal_view;
 mod window_chrome;
@@ -26,6 +28,7 @@ fn main() {
             KeyBinding::new("ctrl-shift-b", ToggleSidebar, ctx),
             KeyBinding::new("ctrl-shift-j", NextNeedsYou, ctx),
             KeyBinding::new("ctrl-shift-r", ResumeAll, ctx),
+            KeyBinding::new("ctrl-shift-g", ToggleGitPanel, ctx),
             KeyBinding::new("ctrl-1", Activate1, ctx),
             KeyBinding::new("ctrl-2", Activate2, ctx),
             KeyBinding::new("ctrl-3", Activate3, ctx),

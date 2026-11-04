@@ -11,7 +11,8 @@ pub struct Msg {
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 pub enum Kind {
-    Hook { event: String, notification_type: Option<String>, session_id: Option<String> },
+    /// `cwd`: Claude Code's working directory (every payload has it).
+    Hook { event: String, notification_type: Option<String>, session_id: Option<String>, cwd: Option<String> },
     /// The arguments `claude` was started with in this tab (sent by the shim before it execs claude).
     Argv { args: Vec<String> },
     Status { model: Option<String>, context_pct: Option<f32>, five_hour: Option<Limit>, seven_day: Option<Limit> },
@@ -33,6 +34,7 @@ pub fn parse(mode: &str, json: &str) -> Option<Kind> {
             event: s(&v["hook_event_name"])?,
             notification_type: s(&v["notification_type"]),
             session_id: s(&v["session_id"]),
+            cwd: s(&v["cwd"]),
         }),
         "status" => {
             let limit = |w: &Value| {
@@ -141,10 +143,11 @@ mod tests {
     #[test]
     fn hooks_from_real_claude() {
         for e in ["SessionStart", "UserPromptSubmit", "Stop", "SessionEnd"] {
-            let Some(Kind::Hook { event, session_id, .. }) = parse("hook", &fixture(&format!("hook_{e}"))) else {
+            let Some(Kind::Hook { event, session_id, cwd, .. }) = parse("hook", &fixture(&format!("hook_{e}"))) else {
                 panic!("{e}")
             };
             assert_eq!(event, e);
+            assert_eq!(cwd.as_deref(), Some("/home/user/project"));
             assert_eq!(session_id.as_deref(), Some("00000000-0000-4000-8000-000000000003"));
         }
     }
@@ -243,6 +246,7 @@ mod tests {
             event: "Notification".into(),
             notification_type: Some("permission_prompt".into()),
             session_id: Some("x".into()),
+            cwd: None,
         };
         assert_eq!(parse("hook", json), Some(want));
     }

@@ -1,6 +1,7 @@
 //! One agent session: a PTY running a shell plus its terminal state. No UI dependencies.
 
 pub mod keys;
+pub mod osc7;
 
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
@@ -15,7 +16,8 @@ use alacritty_terminal::grid::{Dimensions, Scroll};
 use alacritty_terminal::sync::FairMutex;
 use alacritty_terminal::term::Config;
 use alacritty_terminal::vte::ansi::{Processor, Rgb};
-use portable_pty::{Child, CommandBuilder, MasterPty, PtySize, native_pty_system};
+pub use portable_pty::CommandBuilder;
+use portable_pty::{Child, MasterPty, PtySize, native_pty_system};
 
 pub use alacritty_terminal;
 
@@ -100,7 +102,6 @@ pub struct Session {
     /// Closed when the shell exits.
     pub wakeups: Receiver<()>,
     pub title: Arc<Mutex<Option<String>>>,
-    pub cwd: PathBuf,
     flags: Arc<Flags>,
     writer: Writer,
     master: Box<dyn MasterPty + Send>,
@@ -115,6 +116,9 @@ struct Flags {
     unread: AtomicBool,
     exited: AtomicBool,
     exit_code: Mutex<Option<u32>>,
+    /// Last directory the shell reported (OSC 7); `cwd_changed` until the UI takes it.
+    cwd: Mutex<Option<PathBuf>>,
+    cwd_changed: AtomicBool,
 }
 
 impl Session {
@@ -149,15 +153,27 @@ impl Session {
         thread::Builder::new().name("pty-reader".into()).spawn(move || {
             let mut parser: Processor = Processor::new();
             let mut buf = vec![0u8; 64 * 1024];
+            let (mut scanner, host) = (osc7::Scanner::default(), osc7::hostname());
             loop {
                 let n = match reader.read(&mut buf) {
                     Ok(0) | Err(_) => break, // EOF / EIO when the shell exits
                     Ok(n) => n,
                 };
+                // The shell's prompt hook reports its cwd every prompt; only a real change wakes the UI, hidden or not.
+                let moved = scanner.scan(&buf[..n]).and_then(|p| osc7::parse(&p, &host)).is_some_and(|dir| {
+                    let mut cwd = flags2.cwd.lock().unwrap();
+                    let changed = cwd.as_ref() != Some(&dir);
+                    if changed {
+                        *cwd = Some(dir);
+                        flags2.cwd_changed.store(true, Ordering::Release);
+                    }
+                    changed
+                });
                 // Lock held only while parsing this chunk, never while the UI shapes/paints.
                 parser.advance(&mut *term2.lock(), &buf[..n]);
                 // Hidden sessions wake the UI only on the unread flip, so background floods cost the UI nothing.
-                if flags2.visible.load(Ordering::Acquire) || !flags2.unread.swap(true, Ordering::AcqRel) {
+                let wake = flags2.visible.load(Ordering::Acquire) || !flags2.unread.swap(true, Ordering::AcqRel);
+                if wake || moved {
                     match tx.try_send(()) {
                         Ok(()) | Err(TrySendError::Full(())) => {}
                         Err(TrySendError::Closed(())) => break,
@@ -178,7 +194,6 @@ impl Session {
             term,
             wakeups,
             title,
-            cwd: cwd.to_path_buf(),
             flags,
             writer,
             master: pair.master,
@@ -241,6 +256,14 @@ impl Session {
     /// Exit code once the shell has exited.
     pub fn exit_code(&self) -> Option<u32> {
         *self.flags.exit_code.lock().unwrap()
+    }
+
+    /// The shell's new directory if it reported a different one (OSC 7) since the last call.
+    pub fn take_cwd_change(&self) -> Option<PathBuf> {
+        if !self.flags.cwd_changed.swap(false, Ordering::AcqRel) {
+            return None;
+        }
+        self.flags.cwd.lock().unwrap().clone()
     }
 
     pub fn pid(&self) -> Option<u32> {
@@ -313,6 +336,22 @@ mod tests {
         assert!(s.wakeups.try_recv().is_err(), "hidden session must not wake again");
         s.set_visible(true);
         assert!(!s.is_unread());
+    }
+
+    #[test]
+    fn shell_cwd_reports_wake_once_per_change() {
+        // Like the zsh precmd hook: the same dir reported twice (BEL, then ST), then a new one.
+        let script = r#"printf '\033]7;file://%s/tmp\a' "$(cat /proc/sys/kernel/hostname)"; sleep 0.3
+            printf '\033]7;file:///tmp\033\\'; sleep 0.3; printf '\033]7;file:///var\a'; sleep 2"#;
+        let s = Session::spawn_command(sh(script), Path::new("/"), SIZE).unwrap();
+        wait_until("first cwd", || s.wakeups.try_recv().is_ok() && s.flags.cwd.lock().unwrap().is_some());
+        assert_eq!(s.take_cwd_change(), Some(PathBuf::from("/tmp")));
+        wait_until("second cwd", || {
+            let _ = s.wakeups.try_recv();
+            s.flags.cwd.lock().unwrap().as_deref() == Some(Path::new("/var"))
+        });
+        assert_eq!(s.take_cwd_change(), Some(PathBuf::from("/var")), "the repeated /tmp was not a change");
+        assert_eq!(s.take_cwd_change(), None);
     }
 
     #[test]

@@ -35,6 +35,8 @@ pub struct Agent {
     started: bool,
     /// `claude --resume <id>` failed: SessionEnd without any SessionStart (verified on 2.1.318).
     pub resume_failed: Option<String>,
+    /// Claude Code's working directory, from its last hook (None when no claude runs).
+    pub cwd: Option<PathBuf>,
 }
 
 #[derive(Default, Debug)]
@@ -56,7 +58,10 @@ impl Board {
                 agent.args = Some(args);
                 agent.started = false;
             }
-            Kind::Hook { event, notification_type, session_id } => {
+            Kind::Hook { event, notification_type, session_id, cwd } => {
+                if let Some(cwd) = cwd {
+                    agent.cwd = Some(cwd.into());
+                }
                 if event == "SessionStart" {
                     agent.started = true;
                     if session_id.is_some() {
@@ -305,6 +310,10 @@ const ZSHRC: &str = r#"# agent-ide wrapper
 ZDOTDIR=$AGENT_IDE_ZDOTDIR_ORIG
 [[ -f $ZDOTDIR/.zshrc ]] && builtin source $ZDOTDIR/.zshrc
 path=($AGENT_IDE_BIN ${path:#$AGENT_IDE_BIN})
+# Report the cwd at every prompt (OSC 7) so the app follows `cd`; `%` is escaped for the file:// URL.
+__agent_ide_osc7() { builtin print -rn -- $'\e]7;file://'"${HOST}${PWD//\%/%25}"$'\e\\' }
+typeset -ga precmd_functions
+precmd_functions=(${precmd_functions:#__agent_ide_osc7} __agent_ide_osc7)
 if [[ -o login ]]; then
   ZDOTDIR=$AGENT_IDE_ZDOTDIR
 elif [[ -n $AGENT_IDE_ZDOTDIR_WAS_UNSET && $AGENT_IDE_ZDOTDIR_ORIG == $HOME ]]; then
@@ -332,7 +341,12 @@ mod tests {
     fn hook_id(tab: u32, event: &str, nt: Option<&str>, id: &str) -> Msg {
         Msg {
             tab,
-            kind: Kind::Hook { event: event.into(), notification_type: nt.map(Into::into), session_id: Some(id.into()) },
+            kind: Kind::Hook {
+                event: event.into(),
+                notification_type: nt.map(Into::into),
+                session_id: Some(id.into()),
+                cwd: None,
+            },
         }
     }
 
@@ -452,6 +466,48 @@ mod tests {
         assert_eq!(std::fs::read_to_string(&reported).unwrap(), "--model|a b|", "argv reported before exec");
         // Settings gone (app quit): plain claude, never a broken --settings.
         assert_eq!(run(&d.join("missing.json")), "real --model a b\n");
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn zsh_wrapper_reports_cwd_after_users_rc() {
+        if !Path::new("/usr/bin/zsh").exists() && !Path::new("/bin/zsh").exists() {
+            return;
+        }
+        let d = std::env::temp_dir().join(format!("agent-ide-zsh-test-{}", std::process::id()));
+        let (wrappers, user) = (d.join("wrap"), d.join("user"));
+        std::fs::create_dir_all(&wrappers).unwrap();
+        std::fs::create_dir_all(&user).unwrap();
+        for (name, body) in ZSH_WRAPPERS {
+            std::fs::write(wrappers.join(name), body).unwrap();
+        }
+        // A stand-in for the user's own .zshrc (never the real one) that has a precmd hook of its own.
+        std::fs::write(user.join(".zshrc"), "precmd_functions+=(mine); mine() { :; }\nPS1='> '\n").unwrap();
+        let mut cmd = session::CommandBuilder::new("zsh");
+        cmd.arg("-i");
+        for (k, v) in [
+            ("ZDOTDIR", wrappers.to_str().unwrap()),
+            ("AGENT_IDE_ZDOTDIR", wrappers.to_str().unwrap()),
+            ("AGENT_IDE_ZDOTDIR_ORIG", user.to_str().unwrap()),
+            ("AGENT_IDE_BIN", "/nonexistent"),
+        ] {
+            cmd.env(k, v);
+        }
+        let size = session::Size { cols: 80, rows: 10, cell_width: 8, cell_height: 16 };
+        let s = session::Session::spawn_command(cmd, &d, size).unwrap();
+        let wait_for = |want: &Path| {
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+            let mut last = None;
+            while last.as_deref() != Some(want) {
+                assert!(std::time::Instant::now() < deadline, "cwd {last:?}, want {want:?}");
+                std::thread::sleep(std::time::Duration::from_millis(20));
+                last = s.take_cwd_change().or(last);
+            }
+        };
+        wait_for(&d); // first prompt
+        s.write(b"cd '/tmp'\r");
+        wait_for(Path::new("/tmp"));
+        drop(s);
         let _ = std::fs::remove_dir_all(&d);
     }
 }

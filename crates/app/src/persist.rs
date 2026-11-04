@@ -14,6 +14,9 @@ pub struct State {
     pub sidebar: SidebarState,
     pub window: Option<WindowState>,
     pub last_dir: Option<PathBuf>,
+    /// Right-side git panel (added after version 1 shipped: missing in older files).
+    #[serde(default)]
+    pub git_panel: PanelState,
 }
 
 impl Default for State {
@@ -25,6 +28,7 @@ impl Default for State {
             sidebar: SidebarState { width: 220., open: true },
             window: None,
             last_dir: None,
+            git_panel: PanelState::default(),
         }
     }
 }
@@ -45,6 +49,18 @@ pub struct TabState {
 pub struct SidebarState {
     pub width: f32,
     pub open: bool,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq)]
+pub struct PanelState {
+    pub width: f32,
+    pub open: bool,
+}
+
+impl Default for PanelState {
+    fn default() -> Self {
+        Self { width: 340., open: true }
+    }
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq)]
@@ -154,6 +170,7 @@ mod tests {
             active: 0,
             window: Some(WindowState { mode: WindowMode::Maximized, x: 10., y: 20., w: 1200., h: 750. }),
             last_dir: Some("/home/x".into()),
+            git_panel: PanelState { width: 400., open: false },
             ..State::default()
         }
     }
@@ -168,7 +185,9 @@ mod tests {
         // Old files without the optional tab fields still load.
         std::fs::write(&p, r#"{"version":1,"tabs":[{"name":"a","cwd":"/"}],"active":0,
             "sidebar":{"width":200,"open":false},"window":null,"last_dir":null}"#).unwrap();
-        assert_eq!(load(&p).tabs[0].claude_session, None);
+        let old = load(&p);
+        assert_eq!(old.tabs[0].claude_session, None);
+        assert_eq!(old.git_panel, PanelState::default(), "files from before the git panel load with its defaults");
     }
 
     #[test]

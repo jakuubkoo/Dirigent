@@ -1,7 +1,10 @@
 //! Root view: session list, sidebar, the active terminal (cached view), modal, resize policy.
 
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::time::Duration;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::{Duration, Instant};
 
 use gpui::{
     ClickEvent, Context, DragMoveEvent, Entity, EntityId, FocusHandle, Focusable, KeyDownEvent, MouseButton, Pixels, Render,
@@ -10,6 +13,7 @@ use gpui::{
 use session::{Session, Size};
 
 use crate::agent::{self, Hub};
+use crate::git_panel::{self, DiffView, GitPanel, PanelView, Repos, line_counts};
 use crate::line_edit::{Edit, LineEdit};
 use crate::persist::{self, State as Saved, TabState, WindowMode, WindowState};
 use crate::window_chrome::{self, Chrome};
@@ -19,7 +23,7 @@ use crate::terminal_view::{Banner, PADDING, TerminalView};
 actions!(
     agent_ide,
     [
-        NewSession, CloseSession, NextSession, PrevSession, Rename, ToggleSidebar, NextNeedsYou, ResumeAll,
+        NewSession, CloseSession, NextSession, PrevSession, Rename, ToggleSidebar, NextNeedsYou, ResumeAll, ToggleGitPanel,
         Activate1, Activate2, Activate3, Activate4, Activate5, Activate6, Activate7, Activate8, Activate9
     ]
 );
@@ -29,7 +33,7 @@ const COLLAPSED: f32 = 10.;
 const RESIZE_DEBOUNCE: Duration = Duration::from_millis(100);
 const SAVE_DEBOUNCE: Duration = Duration::from_millis(500);
 
-mod colors {
+pub(crate) mod colors {
     pub const SIDEBAR: u32 = 0x17171c;
     pub const ROW_ACTIVE: u32 = 0x2b2b35;
     pub const ROW_HOVER: u32 = 0x212129;
@@ -56,6 +60,23 @@ struct Tab {
     view: Option<Entity<TerminalView>>,
     claude_session: Option<String>,
     claude_args: Vec<String>,
+    /// The git repo `cwd` is in (resolved off-thread when the tab spawns and on every cwd change).
+    repo: TabRepo,
+    /// Bumped per resolve: only the newest one applies (`cd a; cd b` in quick succession).
+    repo_gen: u64,
+    /// Claude Code's cwd from its last hook, as last applied (so each change is applied once).
+    hook_cwd: Option<PathBuf>,
+}
+
+#[derive(Clone, PartialEq)]
+enum TabRepo {
+    /// Not spawned yet: no discovery, no watcher.
+    Unknown,
+    Pending,
+    NotRepo,
+    GitMissing,
+    /// Holds one reference on that root's watcher in `Workspace::repos`.
+    Repo(PathBuf),
 }
 
 enum Modal {
@@ -65,6 +86,9 @@ enum Modal {
 
 #[derive(Clone)]
 struct SidebarDrag;
+
+#[derive(Clone)]
+struct GitPanelDrag;
 
 struct DragGhost;
 impl Render for DragGhost {
@@ -104,6 +128,20 @@ pub struct Workspace {
     _save_task: Option<Task<()>>,
     save_pending: bool,
     window_state: Option<WindowState>,
+    repos: Repos,
+    _repos_task: Task<()>,
+    /// Status Arc pointer per repo as of the last re-render: a refresh with an unchanged status re-renders nothing.
+    repos_seen: HashMap<PathBuf, usize>,
+    git_panel: Entity<GitPanel>,
+    git_open: bool,
+    git_width: Pixels,
+    /// Open diff (shown over the terminal); the active session is hidden meanwhile.
+    diff: Option<Entity<DiffView>>,
+    _diff_task: Option<Task<()>>,
+    /// Bumped per diff read: a stale read sees it changed, kills its `git diff` and is dropped.
+    diff_gen: Arc<AtomicU64>,
+    /// The open diff's repo refresh count when it was last read.
+    diff_seen: u64,
 }
 
 impl Workspace {
@@ -115,6 +153,18 @@ impl Workspace {
             .filter(|d| d.is_dir())
             .or_else(|| std::env::current_dir().ok())
             .unwrap_or_else(home);
+        let (repos, repo_pings) = Repos::new();
+        let repos_task = cx.spawn(async move |this, cx| {
+            while repo_pings.recv().await.is_ok() {
+                if this.update(cx, |w, cx| w.repos_changed(cx)).is_err() {
+                    return;
+                }
+            }
+        });
+        let git_panel = {
+            let ws = cx.entity().downgrade();
+            cx.new(|_| GitPanel::new(ws))
+        };
         let mut this = Self {
             tabs: Vec::new(),
             active: 0,
@@ -142,6 +192,16 @@ impl Workspace {
             save_pending: false,
             window_state: window_state(window),
             metrics,
+            repos,
+            _repos_task: repos_task,
+            repos_seen: HashMap::new(),
+            git_panel,
+            git_open: saved.git_panel.open,
+            git_width: px(saved.git_panel.width.clamp(git_panel::MIN_WIDTH, 2000.)),
+            diff: None,
+            _diff_task: None,
+            diff_gen: Arc::new(AtomicU64::new(0)),
+            diff_seen: 0,
         };
         match Hub::start() {
             Ok(hub) => {
@@ -212,6 +272,48 @@ impl Workspace {
             this.check_resumable(cx);
         }
 
+        if let Ok(path) = std::env::var("AGENT_IDE_PERF_DIFF") {
+            // Perf harness: open that file's diff in the active tab's repo, then jump 40 rows every 50 ms
+            // (AGENT_IDE_PERF_DIFF_STEPS times, default 100).
+            cx.spawn_in(window, async move |this, cx| {
+                let bg = cx.background_executor().clone();
+                let timer = |ms| bg.timer(Duration::from_millis(ms));
+                for _ in 0..100 {
+                    timer(100).await;
+                    let opened = this.update_in(cx, |w, window, cx| {
+                        let TabRepo::Repo(root) = w.tabs.get(w.active)?.repo.clone() else { return None };
+                        let file = w.repos.status(&root)?.files.iter().find(|f| f.path == path)?.clone();
+                        w.toggle_diff(root, file, window, cx);
+                        Some(())
+                    });
+                    if matches!(opened, Ok(Some(()))) {
+                        break;
+                    }
+                }
+                let started = Instant::now();
+                loop {
+                    timer(20).await;
+                    let rows = this.update(cx, |w, cx| w.diff.as_ref().map_or(0, |d| d.read(cx).loaded_rows())).unwrap_or(0);
+                    if rows > 0 || started.elapsed() > Duration::from_secs(10) {
+                        eprintln!("[perf] diff open → rows ready {:.0} ms ({} rows)", started.elapsed().as_secs_f64() * 1e3, rows);
+                        break;
+                    }
+                }
+                eprintln!("[perf] diff scroll start");
+                let steps = std::env::var("AGENT_IDE_PERF_DIFF_STEPS").ok().and_then(|n| n.parse().ok()).unwrap_or(100);
+                for step in 1..=steps {
+                    timer(50).await;
+                    let _ = this.update(cx, |w, cx| {
+                        if let Some(d) = &w.diff {
+                            d.update(cx, |d, cx| d.scroll_to(step * 40, cx));
+                        }
+                    });
+                }
+                eprintln!("[perf] diff scroll end");
+            })
+            .detach();
+        }
+
         if let Some(n) = std::env::var("AGENT_IDE_PERF_CYCLE").ok().and_then(|n| n.parse::<usize>().ok()) {
             this._cycle = Some(cx.spawn_in(window, async move |this, cx| {
                 for _ in 0..n {
@@ -229,9 +331,10 @@ impl Workspace {
     fn grid_size(&self, window: &Window) -> Size {
         let vp = window.viewport_size();
         let side = if self.sidebar_open { self.sidebar_width + px(DIVIDER) } else { px(COLLAPSED) };
+        let right = if self.git_open { self.git_width + px(DIVIDER) } else { px(0.) };
         let m = &self.metrics;
         let chrome = Chrome::of(window);
-        let w = vp.width - side - px(PADDING) - chrome.horizontal();
+        let w = vp.width - side - right - px(PADDING) - chrome.horizontal();
         let h = vp.height - px(PADDING) - chrome.vertical();
         Size {
             cols: (w / m.cell_width).floor().max(2.) as u16,
@@ -281,7 +384,18 @@ impl Workspace {
         self.next_id += 1;
         let dir_missing = !cwd.is_dir();
         let name = name.unwrap_or_else(|| format!("Session {id}"));
-        self.tabs.push(Tab { id, name, cwd, dir_missing, view: None, claude_session, claude_args });
+        self.tabs.push(Tab {
+            id,
+            name,
+            cwd,
+            dir_missing,
+            view: None,
+            claude_session,
+            claude_args,
+            repo: TabRepo::Unknown,
+            repo_gen: 0,
+            hook_cwd: None,
+        });
         self.tabs.len() - 1
     }
 
@@ -298,6 +412,7 @@ impl Workspace {
             view.update(cx, |v, cx| v.set_banner(Some(Banner::Resume(cmd)), cx));
         }
         self.tabs[i].view = Some(view.clone());
+        self.resolve_repo(i, cx);
         view
     }
 
@@ -319,6 +434,7 @@ impl Workspace {
             return;
         }
         crate::perf::switch_started();
+        self.drop_diff();
         if let Some(old) = self.tabs.get(self.active).and_then(|t| t.view.as_ref()) {
             old.read(cx).session.set_visible(false);
         }
@@ -337,6 +453,7 @@ impl Workspace {
             self.active = idx;
             self.mark_dirty(cx);
         }
+        self.sync_panel(cx);
         cx.notify();
     }
 
@@ -356,11 +473,16 @@ impl Workspace {
         if let Some(hub) = &self.agents {
             hub.remove_tab(tab.id as u32);
         }
+        if let TabRepo::Repo(root) = &tab.repo {
+            self.repos.release(root);
+        }
+        self.drop_diff();
         self.mark_dirty(cx);
         self.modal = None;
         if self.tabs.is_empty() {
             self.active = 0;
             window.focus(&self.focus, cx);
+            self.sync_panel(cx);
             cx.notify();
         } else {
             let idx = self.active.min(self.tabs.len() - 1);
@@ -479,6 +601,10 @@ impl Workspace {
                 agent::State::NeedsYou => Some(("needs you", colors::NEEDS_YOU)),
                 agent::State::Done => Some(("done", colors::DONE)),
             };
+            let changes = match &tab.repo {
+                TabRepo::Repo(root) => self.repos.status(root).map(|s| s.totals()).filter(|t| t.0 > 0),
+                _ => None,
+            };
             let model_line = (agent.state != agent::State::NoAgent).then(|| {
                 let mut parts = vec![agent.model.clone().unwrap_or_else(|| "claude".into())];
                 if let Some(p) = agent.context_pct {
@@ -537,7 +663,17 @@ impl Workspace {
                         )
                         .children(
                             model_line.map(|m| div().text_xs().truncate().text_color(rgb(colors::DIM)).child(m)),
-                        ),
+                        )
+                        .children(changes.map(|(n, add, del)| {
+                            let clamp = |v: u64| v.min(u32::MAX as u64) as u32;
+                            div()
+                                .flex()
+                                .gap_1()
+                                .text_xs()
+                                .text_color(rgb(colors::DIM))
+                                .child(format!("{n} file{}", if n == 1 { "" } else { "s" }))
+                                .child(line_counts(Some((clamp(add), clamp(del)))))
+                        })),
                 )
                 .when(exited, |d| {
                     d.child(div().text_xs().text_color(rgb(colors::EXITED)).child("exited")).child(
@@ -607,13 +743,18 @@ impl Workspace {
     fn agents_changed(&mut self, cx: &mut Context<Self>) {
         let Some(hub) = &self.agents else { return };
         let mut dirty = false;
+        let mut moves = Vec::new();
         {
             let mut board = hub.board.lock().unwrap();
             if let Some(tab) = self.tabs.get(self.active) {
                 board.mark_seen(tab.id as u32);
             }
-            for tab in &mut self.tabs {
+            for (i, tab) in self.tabs.iter_mut().enumerate() {
                 let a = board.get(tab.id as u32);
+                if a.cwd != tab.hook_cwd {
+                    tab.hook_cwd = a.cwd.clone();
+                    moves.extend(a.cwd.clone().map(|d| (i, d)));
+                }
                 if a.resume_failed.is_some() && a.resume_failed == tab.claude_session {
                     // `claude --resume` said the session doesn't exist: drop it and the badge.
                     board.forget_session(tab.id as u32);
@@ -633,6 +774,9 @@ impl Workspace {
         }
         if dirty {
             self.mark_dirty(cx);
+        }
+        for (i, dir) in moves {
+            self.set_cwd(i, dir, cx);
         }
         cx.notify();
     }
@@ -680,6 +824,7 @@ impl Workspace {
             sidebar: persist::SidebarState { width: f32::from(self.sidebar_width), open: self.sidebar_open },
             window: self.window_state,
             last_dir: Some(self.last_dir.clone()),
+            git_panel: persist::PanelState { width: f32::from(self.git_width), open: self.git_open },
             ..Saved::default()
         }
     }
@@ -858,8 +1003,11 @@ impl Render for Workspace {
         self.schedule_resize(window, cx);
         self.arm_minute_timer(cx);
 
-        let terminal = match self.tabs.get(self.active) {
-            Some(Tab { view: Some(view), .. }) => view.clone().cached(StyleRefinement::default().size_full()).into_any_element(),
+        let terminal = match (&self.diff, self.tabs.get(self.active)) {
+            (Some(diff), _) => diff.clone().cached(StyleRefinement::default().size_full()).into_any_element(),
+            (None, Some(Tab { view: Some(view), .. })) => {
+                view.clone().cached(StyleRefinement::default().size_full()).into_any_element()
+            }
             _ => div()
                 .size_full()
                 .flex()
@@ -896,6 +1044,29 @@ impl Render for Workspace {
                 .on_click(cx.listener(|w, _: &ClickEvent, _, cx| w.toggle_sidebar(cx)))
                 .into_any_element()
         };
+
+        let git_panel = self.git_open.then(|| {
+            div()
+                .flex()
+                .flex_none()
+                .h_full()
+                .child(
+                    div()
+                        .id("git-divider")
+                        .w(px(DIVIDER))
+                        .h_full()
+                        .cursor_col_resize()
+                        .bg(rgb(colors::DIVIDER))
+                        .hover(|s| s.bg(rgb(colors::DIVIDER_HOVER)))
+                        .on_drag(GitPanelDrag, |_, _, _, cx| cx.new(|_| DragGhost)),
+                )
+                .child(
+                    div()
+                        .w(self.git_width)
+                        .h_full()
+                        .child(self.git_panel.clone().cached(StyleRefinement::default().size_full())),
+                )
+        });
 
         let chrome = Chrome::of(window);
         let mut title = match self.tabs.get(self.active) {
@@ -963,6 +1134,7 @@ impl Render for Workspace {
             .on_action(cx.listener(|w, _: &ToggleSidebar, _, cx| w.toggle_sidebar(cx)))
             .on_action(cx.listener(|w, _: &NextNeedsYou, window, cx| w.next_needs_you(window, cx)))
             .on_action(cx.listener(|w, _: &ResumeAll, window, cx| w.resume_all(window, cx)))
+            .on_action(cx.listener(|w, _: &ToggleGitPanel, _, cx| w.toggle_git_panel(cx)))
             .on_action(cx.listener(|w, _: &Activate1, window, cx| w.activate(0, window, cx)))
             .on_action(cx.listener(|w, _: &Activate2, window, cx| w.activate(1, window, cx)))
             .on_action(cx.listener(|w, _: &Activate3, window, cx| w.activate(2, window, cx)))
@@ -979,6 +1151,15 @@ impl Render for Workspace {
                 cx.notify();
             }))
             .on_drop::<SidebarDrag>(cx.listener(|w, _, _, cx| w.end_drag(cx)))
+            .on_drag_move::<GitPanelDrag>(cx.listener(|w, e: &DragMoveEvent<GitPanelDrag>, window, cx| {
+                w.dragging = true;
+                let min = px(git_panel::MIN_WIDTH);
+                let max = (window.viewport_size().width * 0.6).max(min);
+                w.git_width = (e.bounds.right() - e.event.position.x).clamp(min, max);
+                w.sync_panel(cx);
+                cx.notify();
+            }))
+            .on_drop::<GitPanelDrag>(cx.listener(|w, _, _, cx| w.end_drag(cx)))
             .on_mouse_up(MouseButton::Left, cx.listener(|w, _, _, cx| w.end_drag(cx)))
             .children(title_bar)
             .child(
@@ -988,10 +1169,208 @@ impl Render for Workspace {
                     .min_h_0()
                     .w_full()
                     .child(side)
-                    .child(div().flex_1().h_full().overflow_hidden().child(terminal)),
+                    .child(div().flex_1().min_w_0().h_full().overflow_hidden().child(terminal))
+                    .children(git_panel),
             )
             .children(self.modal_view())
             .when(chrome.csd, |d| d.children(window_chrome::resize_handles(chrome.tiling)))
+    }
+}
+
+/// Git: repo resolution per tab, cwd following, the panel and the diff view.
+impl Workspace {
+    /// Finds the repo the tab's cwd is in (off the UI thread) and moves its watcher reference there.
+    fn resolve_repo(&mut self, i: usize, cx: &mut Context<Self>) {
+        let t = &mut self.tabs[i];
+        t.repo_gen += 1;
+        if t.repo == TabRepo::Unknown {
+            t.repo = TabRepo::Pending;
+        }
+        let (id, generation) = (t.id, t.repo_gen);
+        let dir = if t.dir_missing { home() } else { t.cwd.clone() };
+        cx.spawn(async move |this, cx| {
+            let found = cx.background_executor().spawn(async move { git::discover(&dir) }).await;
+            let _ = this.update(cx, |w, cx| w.repo_resolved(id, generation, found, cx));
+        })
+        .detach();
+    }
+
+    fn repo_resolved(&mut self, id: usize, generation: u64, found: git::Discovery, cx: &mut Context<Self>) {
+        // Tab closed meanwhile, or a newer resolve is running: nothing to do (nothing was acquired yet).
+        let Some(t) = self.tabs.iter_mut().find(|t| t.id == id && t.repo_gen == generation) else { return };
+        let new = match &found {
+            git::Discovery::Repo(r) => TabRepo::Repo(r.root.clone()),
+            git::Discovery::NotRepo => TabRepo::NotRepo,
+            git::Discovery::GitMissing => TabRepo::GitMissing,
+        };
+        if new == t.repo {
+            return;
+        }
+        crate::perf::event_with(|| format!("tab {id} repo → {}", match &new { TabRepo::Repo(r) => r.display().to_string(), _ => "none".into() }));
+        if let TabRepo::Repo(old) = std::mem::replace(&mut t.repo, new) {
+            self.repos.release(&old);
+        }
+        if let git::Discovery::Repo(r) = found {
+            self.repos.acquire(r);
+        }
+        self.sync_panel(cx);
+        cx.notify();
+    }
+
+    /// The shell (OSC 7) or Claude Code (hook payload) is in a new directory: it becomes the tab's directory
+    /// (saved), and its repo is resolved again.
+    fn set_cwd(&mut self, i: usize, dir: PathBuf, cx: &mut Context<Self>) {
+        let Some(t) = self.tabs.get_mut(i) else { return };
+        if t.cwd == dir && !t.dir_missing {
+            return;
+        }
+        crate::perf::event_with(|| format!("tab {} cwd → {}", t.id, dir.display()));
+        t.cwd = dir;
+        t.dir_missing = false;
+        self.mark_dirty(cx);
+        self.resolve_repo(i, cx);
+        cx.notify();
+    }
+
+    pub fn shell_cwd_changed(&mut self, view_id: EntityId, dir: PathBuf, cx: &mut Context<Self>) {
+        if let Some(i) = self.tab_of_view(view_id) {
+            self.set_cwd(i, dir, cx);
+        }
+    }
+
+    /// A watcher ran `git status`. Re-renders the sidebar only if a status changed; re-reads an open diff
+    /// whenever its repo refreshed (same +/- counts can still be different content).
+    fn repos_changed(&mut self, cx: &mut Context<Self>) {
+        let mut changed = false;
+        let roots: Vec<PathBuf> = self.repos.roots().cloned().collect();
+        for root in &roots {
+            let ptr = self.repos.status(root).map_or(0, |s| Arc::as_ptr(&s) as usize);
+            changed |= self.repos_seen.insert(root.clone(), ptr) != Some(ptr);
+        }
+        self.repos_seen.retain(|r, _| roots.contains(r));
+        crate::perf::event(if changed { "git refresh (changed)" } else { "git refresh (same)" });
+        if changed {
+            cx.notify();
+        }
+        self.sync_panel(cx);
+        let diff_root = self.diff.as_ref().map(|d| d.read(cx).root.clone());
+        if let Some(root) = diff_root {
+            let n = self.repos.refreshes(&root);
+            if n != self.diff_seen {
+                self.diff_seen = n;
+                self.load_diff(cx);
+            }
+        }
+    }
+
+    /// Pushes the active tab's repo state into the panel (it re-renders only if that differs).
+    fn sync_panel(&mut self, cx: &mut Context<Self>) {
+        let view = match self.tabs.get(self.active) {
+            None => PanelView::NoSession,
+            Some(t) => match &t.repo {
+                TabRepo::Unknown | TabRepo::Pending => PanelView::Pending,
+                TabRepo::NotRepo => PanelView::NotRepo,
+                TabRepo::GitMissing => PanelView::GitMissing,
+                TabRepo::Repo(root) => PanelView::Repo { root: root.clone(), status: self.repos.status(root) },
+            },
+        };
+        let selected = self.diff.as_ref().map(|d| d.read(cx).file.path.clone());
+        let narrow = self.git_width < px(git_panel::LEGEND_WIDTH);
+        self.git_panel.update(cx, |p, cx| p.set(view, selected, narrow, cx));
+    }
+
+    pub fn refresh_repo(&self, root: &Path) {
+        self.repos.refresh(root);
+    }
+
+    fn toggle_git_panel(&mut self, cx: &mut Context<Self>) {
+        self.git_open = !self.git_open;
+        self.flush_resize = true;
+        self.mark_dirty(cx);
+        cx.notify();
+    }
+
+    /// Clicking a file: opens its diff over the terminal; clicking the open one again closes it.
+    pub fn toggle_diff(&mut self, root: PathBuf, file: git::FileChange, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(d) = &self.diff {
+            let d = d.read(cx);
+            if d.root == root && d.file.path == file.path {
+                self.close_diff(window, cx);
+                return;
+            }
+        }
+        let ws = cx.entity().downgrade();
+        let lh = self.metrics.line_height;
+        let view = cx.new(|cx| DiffView::new(root.clone(), file, lh, ws, cx));
+        if self.diff.is_none()
+            && let Some(term) = self.tabs.get(self.active).and_then(|t| t.view.as_ref())
+        {
+            term.read(cx).session.set_visible(false); // not on screen: wakes only for the unread flip
+        }
+        self.diff = Some(view.clone());
+        self.diff_seen = self.repos.refreshes(&root);
+        self.load_diff(cx);
+        window.focus(&view.focus_handle(cx), cx);
+        self.sync_panel(cx);
+        cx.notify();
+    }
+
+    /// Esc in the diff: back to the terminal.
+    pub fn close_diff(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if !self.drop_diff() {
+            return;
+        }
+        if let Some(view) = self.tabs.get(self.active).and_then(|t| t.view.clone()) {
+            view.read(cx).session.set_visible(true);
+            view.update(cx, |_, cx| cx.notify());
+            if self.modal.is_none() {
+                window.focus(&view.read(cx).focus_handle(cx), cx);
+            }
+        }
+        self.sync_panel(cx);
+        cx.notify();
+    }
+
+    /// Forgets the diff view and cancels its read; returns whether one was open.
+    fn drop_diff(&mut self) -> bool {
+        self.diff_gen.fetch_add(1, Ordering::Relaxed);
+        self._diff_task = None;
+        self.diff.take().is_some()
+    }
+
+    /// (Re-)reads the open diff off the UI thread, with the file's current status entry.
+    fn load_diff(&mut self, cx: &mut Context<Self>) {
+        let Some(view) = self.diff.clone() else { return };
+        let (root, old) = {
+            let v = view.read(cx);
+            (v.root.clone(), v.file.clone())
+        };
+        let Some(repo) = self.repos.repo(&root).cloned() else { return };
+        let file = self
+            .repos
+            .status(&root)
+            .and_then(|s| s.files.iter().find(|f| f.path == old.path).cloned())
+            .unwrap_or(old);
+        let generation = self.diff_gen.fetch_add(1, Ordering::Relaxed) + 1;
+        let (current, current2) = (self.diff_gen.clone(), self.diff_gen.clone());
+        let read_file = file.clone();
+        self._diff_task = Some(cx.spawn(async move |_, cx| {
+            let started = Instant::now();
+            let lines = cx
+                .background_executor()
+                .spawn(async move {
+                    git::diff(&repo, &read_file, || current.load(Ordering::Relaxed) != generation).map(DiffView::prepare)
+                })
+                .await;
+            if current2.load(Ordering::Relaxed) != generation {
+                return; // a newer read or a close happened meanwhile
+            }
+            crate::perf::event_with(|| {
+                let n = lines.as_ref().map_or(0, |(l, _)| l.len());
+                format!("diff read: {n} lines in {:.1} ms", started.elapsed().as_secs_f64() * 1e3)
+            });
+            view.update(cx, |v, cx| v.set_lines(lines, file, cx));
+        }));
     }
 }
 

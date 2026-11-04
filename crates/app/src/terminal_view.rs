@@ -42,17 +42,19 @@ impl TerminalView {
         // unread flip, which repaints just the sidebar. Channel closed = shell exited.
         let wakeups = cx.spawn(async move |this, cx| {
             while rx.recv().await.is_ok() {
-                let Ok(visible) = this.update(cx, |this, cx| {
+                let Ok((visible, moved, id)) = this.update(cx, |this, cx| {
                     let visible = this.session.is_visible();
                     crate::perf::event(if visible { "wakeup (visible)" } else { "wakeup (unread flip)" });
                     if visible {
                         cx.notify();
                     }
-                    visible
+                    (visible, this.session.take_cwd_change(), cx.entity_id())
                 }) else {
                     return;
                 };
-                if !visible {
+                if let Some(dir) = moved {
+                    let _ = ws.update(cx, |w, cx| w.shell_cwd_changed(id, dir, cx));
+                } else if !visible {
                     let _ = ws.update(cx, |_, cx| cx.notify());
                 }
             }
