@@ -49,35 +49,45 @@ pub fn parse(mode: &str, json: &str) -> Option<Kind> {
     }
 }
 
-/// Flags of claude 2.1.318 (`claude --help`) that take a value, so a value isn't mistaken for the prompt.
-/// ponytail: refresh when Claude adds flags; an unknown value-taking flag's value would be dropped as a prompt.
-const VALUE_FLAGS: &[&str] = &[
-    "--agent", "--agents", "--append-system-prompt", "--append-system-prompt-file", "--autocompact", "--debug-file",
-    "--effort", "--environment", "--fallback-model", "--input-format", "--json-schema", "--max-budget-usd",
-    "--model", "-n", "--name", "--output-format", "--permission-mode", "--permission-prompts", "--plugin-dir",
-    "--plugin-url", "--remote-control-session-name-prefix", "--session-id", "--setting-sources", "--settings",
-    "--system-prompt", "--system-prompt-file", "--system-prompt-snapshot",
-];
-/// Variadic flags (`<x...>`): take every following arg up to the next one starting with `-`.
-const VARIADIC_FLAGS: &[&str] = &[
-    "--add-dir", "--allowedTools", "--allowed-tools", "--betas", "--disallowedTools", "--disallowed-tools", "--file",
-    "--mcp-config", "--tools",
-];
-/// Optional-value flags (`[x]`): take the next arg only if it doesn't start with `-`.
-const OPTIONAL_VALUE_FLAGS: &[&str] = &[
-    "-r", "--resume", "-d", "--debug", "-w", "--worktree", "--from-pr", "--teleport", "--cloud", "--remote-control",
-    "--prompt-suggestions",
-];
-/// Flags never replayed on resume: they start another session, print and exit, or bypass permission checks (a
-/// bypass must always be the user's explicit choice for that run, never something we type for them).
-const DROP_ON_RESUME: &[&str] = &[
-    "-p", "--print", "-c", "--continue", "-r", "--resume", "--session-id", "--fork-session", "-w", "--worktree",
-    "--from-pr", "--teleport", "--cloud", "-h", "--help", "-v", "--version",
-    "--dangerously-skip-permissions", "--allow-dangerously-skip-permissions",
+#[derive(Clone, Copy, PartialEq)]
+enum Arity {
+    Flag,
+    /// `<value>`
+    One,
+    /// `<values...>`: every following arg up to the next one starting with `-` (as claude parses it).
+    Many,
+}
+
+/// The only flags replayed on resume: verified in `claude --help` (2.1.318) to be valid in an interactive session
+/// and safe to repeat. Everything else is dropped — print-mode flags, session-starting flags, permission grants
+/// and bypasses, flags that disable our hooks (--bare, --safe-mode), and any flag Claude adds in the future.
+const RESUME_ALLOWLIST: &[(&str, Arity)] = &[
+    ("--model", Arity::One),
+    ("-n", Arity::One),
+    ("--name", Arity::One),
+    ("--permission-mode", Arity::One), // except bypassPermissions, see below
+    ("--effort", Arity::One),
+    ("--agent", Arity::One),
+    ("--agents", Arity::One),
+    ("--autocompact", Arity::One),
+    ("--plugin-dir", Arity::One),
+    ("--add-dir", Arity::Many),
+    ("--mcp-config", Arity::Many),
+    ("--tools", Arity::Many),
+    ("--disallowed-tools", Arity::Many),
+    ("--disallowedTools", Arity::Many),
+    ("--verbose", Arity::Flag),
+    ("--strict-mcp-config", Arity::Flag),
+    ("--ide", Arity::Flag),
+    ("--chrome", Arity::Flag),
+    ("--no-chrome", Arity::Flag),
+    ("--disable-slash-commands", Arity::Flag),
+    ("--brief", Arity::Flag),
 ];
 
-/// The flags to repeat after `claude --resume <id>`: everything the user started claude with, minus the prompt
-/// (positional args) and the flags in [`DROP_ON_RESUME`]. Mirrors claude's own option parsing for values.
+/// The flags to repeat after `claude --resume <id>`: only allowlisted ones (with their values), never a
+/// permission bypass. Positional args (the prompt) and every other flag are dropped; a dropped flag's value is
+/// a non-flag token, so it is dropped with it.
 pub fn resume_args(args: &[String]) -> Vec<String> {
     let mut out = Vec::new();
     let mut i = 0;
@@ -87,35 +97,33 @@ pub fn resume_args(args: &[String]) -> Vec<String> {
         if arg == "--" {
             break; // everything after is positional
         }
-        if !arg.starts_with('-') || arg == "-" {
-            continue; // positional: the prompt
-        }
-        let (name, inline_value) = match arg.split_once('=') {
-            Some((n, _)) if n.starts_with("--") => (n, true),
-            _ => (arg.as_str(), false),
+        let (name, inline) = match arg.split_once('=') {
+            Some((n, v)) if n.starts_with("--") => (n, Some(v)),
+            _ => (arg.as_str(), None),
         };
+        let Some(&(_, arity)) = RESUME_ALLOWLIST.iter().find(|(f, _)| *f == name) else { continue };
         let mut group = vec![arg.clone()];
-        if !inline_value {
-            if VALUE_FLAGS.contains(&name) {
-                if let Some(v) = args.get(i) {
-                    group.push(v.clone());
-                    i += 1;
+        if inline.is_none() {
+            match arity {
+                Arity::Flag => {}
+                Arity::One => {
+                    if let Some(v) = args.get(i) {
+                        group.push(v.clone());
+                        i += 1;
+                    }
                 }
-            } else if VARIADIC_FLAGS.contains(&name) {
-                while let Some(v) = args.get(i).filter(|v| !v.starts_with('-')) {
-                    group.push(v.clone());
-                    i += 1;
+                Arity::Many => {
+                    while let Some(v) = args.get(i).filter(|v| !v.starts_with('-')) {
+                        group.push(v.clone());
+                        i += 1;
+                    }
                 }
-            } else if OPTIONAL_VALUE_FLAGS.contains(&name)
-                && let Some(v) = args.get(i).filter(|v| !v.starts_with('-'))
-            {
-                group.push(v.clone());
-                i += 1;
             }
         }
-        let value = arg.split_once('=').map(|(_, v)| v).or(group.get(1).map(String::as_str));
+        let value = inline.or(group.get(1).map(String::as_str));
         let bypass = name == "--permission-mode" && value == Some("bypassPermissions");
-        if !DROP_ON_RESUME.contains(&name) && !bypass {
+        let complete = arity == Arity::Flag || group.len() > 1 || inline.is_some();
+        if !bypass && complete {
             out.extend(group);
         }
     }
@@ -151,9 +159,9 @@ mod tests {
         assert_eq!(resume_args(&v(&["--model", "haiku", "fix it"])), v(&["--model", "haiku"]));
         // A value that looks like a prompt after a value flag is that flag's value.
         assert_eq!(resume_args(&v(&["-n", "my session", "--effort", "high"])), v(&["-n", "my session", "--effort", "high"]));
-        // Session-starting / print flags are dropped, with their values.
+        // Session-starting flags are dropped, with their values.
         assert_eq!(
-            resume_args(&v(&["-p", "-c", "-r", "abc", "--resume=def", "--session-id", "x", "--fork-session", "--verbose"])),
+            resume_args(&v(&["-c", "-r", "abc", "--resume=def", "--session-id", "x", "--fork-session", "--verbose"])),
             v(&["--verbose"])
         );
         assert_eq!(resume_args(&v(&["-r", "--model", "opus"])), v(&["--model", "opus"]), "-r without value");
@@ -163,8 +171,48 @@ mod tests {
             resume_args(&v(&["--add-dir", "../a", "../b", "--verbose", "--", "prompt"])),
             v(&["--add-dir", "../a", "../b", "--verbose"])
         );
-        assert_eq!(resume_args(&v(&["-d", "hooks", "hello"])), v(&["-d", "hooks"]), "optional value taken like claude does");
+        // Not allowlisted: permission grants, settings, hook-disabling and debug flags.
+        assert_eq!(
+            resume_args(&v(&["--allowed-tools", "Bash", "--settings", "x.json", "--bare", "--safe-mode", "-d", "hooks"])),
+            v(&[])
+        );
+        // A value flag at the very end without its value is not replayed half.
+        assert_eq!(resume_args(&v(&["--verbose", "--model"])), v(&["--verbose"]));
         assert!(resume_args(&[]).is_empty());
+    }
+
+    #[test]
+    fn print_mode_flags_are_dropped() {
+        let args = v(&[
+            "-p",
+            "--print",
+            "--output-format",
+            "json",
+            "--output-format=stream-json",
+            "--input-format",
+            "text",
+            "--json-schema",
+            "{}",
+            "--include-partial-messages",
+            "--include-hook-events",
+            "--replay-user-messages",
+            "--max-budget-usd",
+            "1",
+            "--no-session-persistence",
+            "--fallback-model",
+            "sonnet",
+            "--model",
+            "haiku",
+            "reply ok",
+        ]);
+        assert_eq!(resume_args(&args), v(&["--model", "haiku"]));
+    }
+
+    #[test]
+    fn unknown_flags_are_dropped() {
+        // Flags Claude may add later: dropped, and so is their value (a non-flag token).
+        let args = v(&["--future-flag", "value", "--future-bool", "--future-kv=1", "--model", "opus", "-x"]);
+        assert_eq!(resume_args(&args), v(&["--model", "opus"]));
     }
 
     #[test]
