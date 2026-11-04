@@ -1,4 +1,5 @@
-//! `agent-ide-hook <socket> <tab> hook|status`, run by Claude Code for every hook event and statusLine refresh.
+//! `agent-ide-hook <socket> <tab> hook|status`, run by Claude Code for every hook event and statusLine refresh;
+//! `agent-ide-hook <socket> <tab> argv <claude args...>`, run by the `claude` shim right before it execs claude.
 //!
 //! Fire-and-forget: forwards a small datagram to the app on a non-blocking socket. If the app isn't running the
 //! send fails instantly and is ignored. Always exits 0 so Claude Code is never slowed down or broken.
@@ -14,11 +15,22 @@ const NESTED: &str = "AGENT_IDE_HOOK_NESTED";
 
 fn main() {
     let args: Vec<String> = std::env::args().collect();
+    let [_, socket, tab, mode, rest @ ..] = args.as_slice() else { return };
     let mut input = String::new();
-    let _ = std::io::stdin().read_to_string(&mut input);
-    let [_, socket, tab, mode] = args.as_slice() else { return };
+    let kind = if mode == "argv" {
+        // Never touch stdin here: it is the user's terminal.
+        let mut total = 0;
+        let args = rest.iter().take_while(|a| {
+            total += a.len();
+            total <= 8 * 1024
+        });
+        Some(Kind::Argv { args: args.cloned().collect() })
+    } else {
+        let _ = std::io::stdin().read_to_string(&mut input);
+        parse(mode, &input)
+    };
 
-    if let (Ok(tab), Some(kind)) = (tab.parse(), parse(mode, &input))
+    if let (Ok(tab), Some(kind)) = (tab.parse(), kind)
         && let Ok(sock) = UnixDatagram::unbound()
         && sock.set_nonblocking(true).is_ok()
         && let Ok(bytes) = serde_json::to_vec(&Msg { tab, kind })

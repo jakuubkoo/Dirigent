@@ -27,6 +27,14 @@ pub struct Agent {
     pub unseen: bool,
     pub model: Option<String>,
     pub context_pct: Option<u8>,
+    /// Last Claude Code session id seen in this tab (SessionStart; changes on /clear, /resume, /branch).
+    pub session_id: Option<String>,
+    /// Arguments of the last `claude` started in this tab (from the shim).
+    pub args: Option<Vec<String>>,
+    /// A SessionStart arrived since that `claude` was started.
+    started: bool,
+    /// `claude --resume <id>` failed: SessionEnd without any SessionStart (verified on 2.1.318).
+    pub resume_failed: Option<String>,
 }
 
 #[derive(Default, Debug)]
@@ -44,7 +52,17 @@ impl Board {
         let before = agent.clone();
         let (five, seven) = (self.five_hour, self.seven_day);
         match msg.kind {
-            Kind::Hook { event, notification_type } => {
+            Kind::Argv { args } => {
+                agent.args = Some(args);
+                agent.started = false;
+            }
+            Kind::Hook { event, notification_type, session_id } => {
+                if event == "SessionStart" {
+                    agent.started = true;
+                    if session_id.is_some() {
+                        agent.session_id = session_id.clone();
+                    }
+                }
                 let next = match (event.as_str(), notification_type.as_deref()) {
                     ("SessionStart", _) => Some(State::Ready),
                     ("UserPromptSubmit" | "PreToolUse" | "PostToolUse", _) => Some(State::Working),
@@ -55,7 +73,14 @@ impl Board {
                     // Esc/Ctrl-C interrupts send no Stop; idle_prompt (~60 s later) is the only signal.
                     ("Notification", Some("idle_prompt")) if agent.state == State::Working => Some(State::Done),
                     ("SessionEnd", _) => {
-                        *agent = Agent::default();
+                        // The session stays resumable: keep its id and the claude args.
+                        let failed = (!agent.started).then_some(session_id).flatten();
+                        *agent = Agent {
+                            session_id: agent.session_id.take(),
+                            args: agent.args.take(),
+                            resume_failed: failed,
+                            ..Agent::default()
+                        };
                         None
                     }
                     _ => None,
@@ -84,6 +109,21 @@ impl Board {
 
     pub fn get(&self, tab: u32) -> Agent {
         self.tabs.get(&tab).cloned().unwrap_or_default()
+    }
+
+    /// The tab's shell restarted: live agent state is gone, the resumable session id and args stay.
+    pub fn reset_live(&mut self, tab: u32) {
+        if let Some(a) = self.tabs.get_mut(&tab) {
+            *a = Agent { session_id: a.session_id.take(), args: a.args.take(), ..Agent::default() };
+        }
+    }
+
+    /// Forgets a session id that can no longer be resumed.
+    pub fn forget_session(&mut self, tab: u32) {
+        if let Some(a) = self.tabs.get_mut(&tab) {
+            a.session_id = None;
+            a.resume_failed = None;
+        }
     }
 
     pub fn mark_seen(&mut self, tab: u32) {
@@ -149,6 +189,7 @@ impl Hub {
             ("AGENT_IDE_SOCKET".into(), self.sock.display().to_string()),
             ("AGENT_IDE_SETTINGS".into(), settings.display().to_string()),
             ("AGENT_IDE_BIN".into(), self.bin.display().to_string()),
+            ("AGENT_IDE_HOOK".into(), self.helper.display().to_string()),
             ("PATH".into(), format!("{}:{path}", self.bin.display())),
         ];
         // zsh rc files usually prepend ~/.local/bin, which would shadow the shim: wrap them via ZDOTDIR so the shim
@@ -226,7 +267,11 @@ IFS=:
 for d in $PATH; do
   [ -z "$d" ] || [ "$d" = "$self_dir" ] && continue
   if [ -x "$d/claude" ] && [ ! -d "$d/claude" ]; then
-    if [ -f "$AGENT_IDE_SETTINGS" ]; then exec "$d/claude" --settings "$AGENT_IDE_SETTINGS" "$@"; fi
+    if [ -f "$AGENT_IDE_SETTINGS" ]; then
+      # Remember the flags for resuming later (fire-and-forget, never reads the terminal).
+      [ -x "$AGENT_IDE_HOOK" ] && "$AGENT_IDE_HOOK" "$AGENT_IDE_SOCKET" "$AGENT_IDE_TAB_ID" argv "$@" </dev/null
+      exec "$d/claude" --settings "$AGENT_IDE_SETTINGS" "$@"
+    fi
     exec "$d/claude" "$@"
   fi
 done
@@ -281,7 +326,14 @@ mod tests {
     use super::*;
 
     fn hook(tab: u32, event: &str, nt: Option<&str>) -> Msg {
-        Msg { tab, kind: Kind::Hook { event: event.into(), notification_type: nt.map(Into::into) } }
+        hook_id(tab, event, nt, "s1")
+    }
+
+    fn hook_id(tab: u32, event: &str, nt: Option<&str>, id: &str) -> Msg {
+        Msg {
+            tab,
+            kind: Kind::Hook { event: event.into(), notification_type: nt.map(Into::into), session_id: Some(id.into()) },
+        }
     }
 
     fn status(tab: u32, ctx: Option<f32>, five: Option<Limit>) -> Msg {
@@ -304,7 +356,7 @@ mod tests {
         assert!(b.apply(hook(1, "Notification", Some("permission_prompt"))));
         assert_eq!(st(&b), State::NeedsYou);
         assert!(b.apply(hook(1, "Stop", None)));
-        assert_eq!(b.get(1), Agent { state: State::Done, unseen: true, model: None, context_pct: None });
+        assert_eq!((b.get(1).state, b.get(1).unseen), (State::Done, true));
         b.mark_seen(1);
         assert!(!b.apply(hook(1, "Notification", Some("idle_prompt"))), "idle after Done changes nothing");
         assert!(!b.get(1).unseen);
@@ -313,7 +365,30 @@ mod tests {
         assert!(b.apply(hook(1, "Notification", Some("idle_prompt"))));
         assert_eq!(st(&b), State::Done);
         assert!(b.apply(hook(1, "SessionEnd", None)));
-        assert_eq!(b.get(1), Agent::default());
+        assert_eq!(b.get(1).state, State::NoAgent);
+        assert_eq!(b.get(1).session_id.as_deref(), Some("s1"), "still resumable after exit");
+        assert_eq!(b.get(1).resume_failed, None);
+    }
+
+    #[test]
+    fn session_ids_and_failed_resume() {
+        let mut b = Board::default();
+        let argv = |args: &[&str]| Msg { tab: 1, kind: Kind::Argv { args: args.iter().map(|s| s.to_string()).collect() } };
+        // /clear: SessionEnd(old) then SessionStart(new) — as observed on claude 2.1.318.
+        b.apply(argv(&["--model", "haiku"]));
+        b.apply(hook_id(1, "SessionStart", None, "old"));
+        b.apply(hook_id(1, "SessionEnd", Some("clear"), "old"));
+        b.apply(hook_id(1, "SessionStart", None, "new"));
+        assert_eq!(b.get(1).session_id.as_deref(), Some("new"));
+        b.apply(hook_id(1, "SessionEnd", None, "new"));
+        assert_eq!(b.get(1).resume_failed, None);
+        // `claude --resume gone`: shim argv, then SessionEnd without SessionStart.
+        b.apply(argv(&["--resume", "gone"]));
+        assert!(b.apply(hook_id(1, "SessionEnd", None, "gone")));
+        assert_eq!(b.get(1).resume_failed.as_deref(), Some("gone"));
+        assert_eq!(b.get(1).args.as_deref(), Some(&["--resume".to_string(), "gone".to_string()][..]));
+        b.forget_session(1);
+        assert_eq!((b.get(1).session_id, b.get(1).resume_failed), (None, None));
     }
 
     #[test]
@@ -354,6 +429,10 @@ mod tests {
         std::fs::create_dir_all(&real_dir).unwrap();
         write_exec(&shim_dir.join("claude"), SHIM).unwrap();
         write_exec(&real_dir.join("claude"), "#!/bin/sh\necho real \"$@\"\n").unwrap();
+        // Stand-in for agent-ide-hook: records what the shim reports.
+        let reported = d.join("argv.txt");
+        let fake_hook = d.join("hook.sh");
+        write_exec(&fake_hook, &format!("#!/bin/sh\nshift 3; printf '%s|' \"$@\" > {}\n", reported.display())).unwrap();
         let settings = d.join("s.json");
         std::fs::write(&settings, "{}").unwrap();
         let run = |settings: &Path| {
@@ -362,11 +441,15 @@ mod tests {
                 .arg("a b")
                 .env("PATH", format!("{}:{}:/usr/bin:/bin", shim_dir.display(), real_dir.display()))
                 .env("AGENT_IDE_SETTINGS", settings)
+                .env("AGENT_IDE_HOOK", &fake_hook)
+                .env("AGENT_IDE_SOCKET", "/nowhere")
+                .env("AGENT_IDE_TAB_ID", "3")
                 .output()
                 .unwrap();
             String::from_utf8(out.stdout).unwrap()
         };
         assert_eq!(run(&settings), format!("real --settings {} --model a b\n", settings.display()));
+        assert_eq!(std::fs::read_to_string(&reported).unwrap(), "--model|a b|", "argv reported before exec");
         // Settings gone (app quit): plain claude, never a broken --settings.
         assert_eq!(run(&d.join("missing.json")), "real --model a b\n");
         let _ = std::fs::remove_dir_all(&d);

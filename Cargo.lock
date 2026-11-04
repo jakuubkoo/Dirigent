@@ -117,6 +117,7 @@ dependencies = [
  "gpui",
  "gpui_platform",
  "hook",
+ "serde",
  "serde_json",
  "session",
 ]

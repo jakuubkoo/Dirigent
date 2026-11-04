@@ -4,7 +4,7 @@ use gpui::{
     Context, FocusHandle, Focusable, KeyDownEvent, Pixels, ScrollEvent, Task, WeakEntity, Window, div, prelude::*, px,
     rgb,
 };
-use session::Session;
+use session::{Session, Size};
 use session::alacritty_terminal::term::TermMode;
 use session::keys::{Mods, encode};
 
@@ -17,7 +17,20 @@ pub struct TerminalView {
     metrics: Metrics,
     scroll_px: f32,
     workspace: WeakEntity<Workspace>,
+    /// One-line prompt above the terminal; while shown it takes Enter and Esc only and the grid is one row
+    /// shorter, so it never covers terminal content. Change it only through `set_banner`.
+    banner: Option<Banner>,
+    /// The grid size the workspace gives every session; this view's PTY gets one row less while a banner shows.
+    grid: Size,
     _wakeups: Task<()>,
+}
+
+#[derive(Clone, PartialEq)]
+pub enum Banner {
+    /// The tab had a Claude session before the restart; holds the exact command Enter will type.
+    Resume(String),
+    /// Its transcript is gone (deleted, cleaned up after cleanupPeriodDays).
+    Gone,
 }
 
 impl TerminalView {
@@ -46,13 +59,52 @@ impl TerminalView {
             let _ = this.update(cx, |_, cx| cx.notify());
             let _ = ws.update(cx, |_, cx| cx.notify());
         });
-        Self { session, focus: cx.focus_handle(), metrics, scroll_px: 0., workspace, _wakeups: wakeups }
+        let grid = session.size();
+        Self { session, focus: cx.focus_handle(), metrics, scroll_px: 0., workspace, banner: None, grid, _wakeups: wakeups }
+    }
+
+    pub fn banner(&self) -> Option<&Banner> {
+        self.banner.as_ref()
+    }
+
+    pub fn set_banner(&mut self, banner: Option<Banner>, cx: &mut Context<Self>) {
+        if banner != self.banner {
+            self.banner = banner;
+            self.apply_grid();
+            cx.notify();
+        }
+    }
+
+    /// Workspace-wide grid size; returns whether the PTY was resized.
+    pub fn resize_to(&mut self, grid: Size) -> bool {
+        self.grid = grid;
+        self.apply_grid()
+    }
+
+    fn apply_grid(&self) -> bool {
+        let reserved = (self.banner.is_some() && self.grid.rows > 1) as u16;
+        self.session.resize(Size { rows: self.grid.rows - reserved, ..self.grid })
     }
 
     fn key_down(&mut self, ev: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
         let ks = &ev.keystroke;
         let m = ks.modifiers;
         if m.platform {
+            return;
+        }
+        if let Some(banner) = self.banner.clone()
+            && matches!(ks.key.as_str(), "enter" | "escape")
+            && !m.control
+            && !m.alt
+            && !m.shift
+        {
+            self.set_banner(None, cx);
+            if matches!(banner, Banner::Resume(_)) && ks.key == "enter" {
+                let id = cx.entity_id();
+                let _ = self.workspace.update(cx, |w, cx| w.resume(id, cx));
+            }
+            cx.notify();
+            cx.stop_propagation();
             return;
         }
         if self.session.is_exited() {
@@ -116,6 +168,36 @@ impl Focusable for TerminalView {
 impl Render for TerminalView {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         crate::perf::event("term view render");
+        let banner = self.banner.as_ref().map(|b| {
+            let (label, cmd, hint) = match b {
+                Banner::Resume(cmd) => ("Resume Claude session?", Some(cmd.clone()), "Enter = resume  ·  Esc = plain shell"),
+                Banner::Gone => ("That Claude session no longer exists.", None, "Esc to dismiss"),
+            };
+            div()
+                .flex()
+                .gap_3()
+                .child(div().flex_none().child(label))
+                .children(cmd.map(|c| {
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .truncate()
+                        .font_family(crate::terminal_element::FONT_FAMILY)
+                        .text_color(rgb(0xc8d3ee))
+                        .child(c)
+                }))
+                .child(div().flex_none().ml_auto().text_color(rgb(0x9aa3b8)).child(hint))
+                // Exactly one terminal row tall: the grid is one row shorter while it's shown.
+                .flex_none()
+                .items_center()
+                .overflow_hidden()
+                .h(self.metrics.line_height)
+                .line_height(self.metrics.line_height)
+                .px_3()
+                .bg(rgb(0x2b3348))
+                .text_color(palette::FG)
+                .text_sm()
+        });
         let exited = self.session.is_exited().then(|| {
             let code = self.session.exit_code().map_or(String::new(), |c| format!(" (code {c})"));
             div()
@@ -132,14 +214,22 @@ impl Render for TerminalView {
         });
         div()
             .relative()
+            .flex()
+            .flex_col()
             .size_full()
-            .pl(px(PADDING))
-            .pt(px(PADDING))
             .bg(palette::BG)
             .track_focus(&self.focus)
             .on_key_down(cx.listener(Self::key_down))
             .on_scroll(cx.listener(Self::scroll))
-            .child(TerminalElement::new(self.session.clone(), self.metrics.clone()))
+            .children(banner)
+            .child(
+                div()
+                    .flex_1()
+                    .min_h_0()
+                    .pl(px(PADDING))
+                    .pt(px(PADDING))
+                    .child(TerminalElement::new(self.session.clone(), self.metrics.clone())),
+            )
             .children(exited)
     }
 }

@@ -36,7 +36,7 @@ pub mod palette {
     ];
 }
 
-const FONT_FAMILY: &str = "DejaVu Sans Mono"; // ponytail: hard-coded; make it a setting when settings exist
+pub const FONT_FAMILY: &str = "DejaVu Sans Mono"; // ponytail: hard-coded; make it a setting when settings exist
 const FONT_SIZE: f32 = 14.;
 
 #[derive(Clone)]

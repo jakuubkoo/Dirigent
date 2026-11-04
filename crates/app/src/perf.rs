@@ -54,7 +54,21 @@ fn bump(event: &str, f: impl FnOnce(&mut Counters)) {
 }
 
 /// End of a terminal paint whose prepaint began at `started`.
+static PROCESS_START: std::sync::OnceLock<Instant> = std::sync::OnceLock::new();
+static FIRST_FRAME: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Call first thing in `main`.
+pub fn process_started() {
+    PROCESS_START.get_or_init(Instant::now);
+}
+
 pub fn term_paint(started: Instant) {
+    if *ENABLED
+        && !FIRST_FRAME.swap(true, std::sync::atomic::Ordering::Relaxed)
+        && let Some(t) = PROCESS_START.get()
+    {
+        eprintln!("[perf] startup → first frame {:.1} ms", t.elapsed().as_secs_f64() * 1e3);
+    }
     bump("term paint", |c| {
         c.term_paints += 1;
         c.term_nanos += started.elapsed().as_nanos() as u64;

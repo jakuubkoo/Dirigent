@@ -11,14 +11,15 @@ use session::{Session, Size};
 
 use crate::agent::{self, Hub};
 use crate::line_edit::{Edit, LineEdit};
+use crate::persist::{self, State as Saved, TabState, WindowMode, WindowState};
 use crate::window_chrome::{self, Chrome};
 use crate::terminal_element::{Metrics, palette};
-use crate::terminal_view::{PADDING, TerminalView};
+use crate::terminal_view::{Banner, PADDING, TerminalView};
 
 actions!(
     agent_ide,
     [
-        NewSession, CloseSession, NextSession, PrevSession, Rename, ToggleSidebar, NextNeedsYou,
+        NewSession, CloseSession, NextSession, PrevSession, Rename, ToggleSidebar, NextNeedsYou, ResumeAll,
         Activate1, Activate2, Activate3, Activate4, Activate5, Activate6, Activate7, Activate8, Activate9
     ]
 );
@@ -26,6 +27,7 @@ actions!(
 const DIVIDER: f32 = 4.;
 const COLLAPSED: f32 = 10.;
 const RESIZE_DEBOUNCE: Duration = Duration::from_millis(100);
+const SAVE_DEBOUNCE: Duration = Duration::from_millis(500);
 
 mod colors {
     pub const SIDEBAR: u32 = 0x17171c;
@@ -47,7 +49,13 @@ mod colors {
 struct Tab {
     id: usize,
     name: String,
-    view: Entity<TerminalView>,
+    /// Directory the tab belongs to (kept even if it no longer exists; the shell then starts in $HOME).
+    cwd: PathBuf,
+    dir_missing: bool,
+    /// None until the tab is first viewed (restored tabs spawn lazily).
+    view: Option<Entity<TerminalView>>,
+    claude_session: Option<String>,
+    claude_args: Vec<String>,
 }
 
 enum Modal {
@@ -92,19 +100,28 @@ pub struct Workspace {
     _minute: Option<Task<()>>,
     window_visible: bool,
     _subscriptions: Vec<gpui::Subscription>,
+    state_path: PathBuf,
+    _save_task: Option<Task<()>>,
+    save_pending: bool,
+    window_state: Option<WindowState>,
 }
 
 impl Workspace {
-    pub fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
+    pub fn new(saved: Saved, state_path: PathBuf, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let metrics = Metrics::new(window);
-        let last_dir = std::env::current_dir().unwrap_or_else(|_| home());
+        let last_dir = saved
+            .last_dir
+            .clone()
+            .filter(|d| d.is_dir())
+            .or_else(|| std::env::current_dir().ok())
+            .unwrap_or_else(home);
         let mut this = Self {
             tabs: Vec::new(),
             active: 0,
             next_id: 1,
             focus: cx.focus_handle(),
-            sidebar_width: px(220.),
-            sidebar_open: true,
+            sidebar_width: px(saved.sidebar.width.clamp(140., 2000.)),
+            sidebar_open: saved.sidebar.open,
             dragging: false,
             flush_resize: false,
             applied: Size { cols: 80, rows: 24, cell_width: 8, cell_height: 16 },
@@ -120,6 +137,10 @@ impl Workspace {
             _minute: None,
             window_visible: true,
             _subscriptions: Vec::new(),
+            state_path,
+            _save_task: None,
+            save_pending: false,
+            window_state: window_state(window),
             metrics,
         };
         match Hub::start() {
@@ -149,18 +170,47 @@ impl Workspace {
             }
             cx.notify();
         }));
+        this._subscriptions.push(cx.observe_window_bounds(window, |w, window, cx| {
+            let ws = window_state(window);
+            if ws != w.window_state {
+                w.window_state = ws;
+                w.mark_dirty(cx);
+            }
+        }));
+        this._subscriptions.push(cx.on_app_quit(|w, _| {
+            // Final save, synchronous: the process is about to exit.
+            w._save_task = None;
+            if let Err(e) = persist::save(&w.state_path, &w.snapshot()) {
+                eprintln!("agent-ide: saving state failed: {e}");
+            }
+            async {}
+        }));
         this.applied = this.grid_size(window);
 
-        // Perf harness: one session per line of AGENT_IDE_RUN, the line typed into it.
-        let script = std::env::var("AGENT_IDE_RUN").ok();
-        for line in script.as_deref().unwrap_or("").split('\n') {
-            let dir = this.last_dir.clone();
-            this.spawn_tab(&dir, window, cx);
-            if !line.is_empty() {
-                this.tabs.last().unwrap().view.read(cx).session.write(format!("{line}\r").as_bytes());
+        if let Ok(script) = std::env::var("AGENT_IDE_RUN") {
+            // Perf harness: one (eagerly spawned) session per line, the line typed into it; saved tabs are ignored.
+            for line in script.split('\n') {
+                let dir = this.last_dir.clone();
+                let i = this.add_tab(None, dir, None, Vec::new());
+                let view = this.ensure_spawned(i, window, cx);
+                if !line.is_empty() {
+                    view.read(cx).session.write(format!("{line}\r").as_bytes());
+                }
             }
+            this.activate(0, window, cx);
+        } else if saved.tabs.is_empty() {
+            let dir = this.last_dir.clone();
+            this.add_tab(None, dir, None, Vec::new());
+            this.activate(0, window, cx);
+        } else {
+            // Restore: rows for every tab, a shell only for the active one (the rest spawn on first view).
+            for t in saved.tabs {
+                this.add_tab(Some(t.name), t.cwd, t.claude_session, t.claude_args);
+            }
+            let active = saved.active.min(this.tabs.len() - 1);
+            this.activate(active, window, cx);
+            this.check_resumable(cx);
         }
-        this.activate(0, window, cx);
 
         if let Some(n) = std::env::var("AGENT_IDE_PERF_CYCLE").ok().and_then(|n| n.parse::<usize>().ok()) {
             this._cycle = Some(cx.spawn_in(window, async move |this, cx| {
@@ -197,12 +247,12 @@ impl Workspace {
         self.pending = None;
         self._resize_task = None;
         let mut n = 0;
-        for tab in &self.tabs {
-            n += tab.view.read(cx).session.resize(size) as u64;
+        for view in self.tabs.iter().filter_map(|t| t.view.clone()) {
+            n += view.update(cx, |v, _| v.resize_to(size)) as u64;
         }
         crate::perf::pty_resizes(n);
-        if let Some(tab) = self.tabs.get(self.active) {
-            tab.view.update(cx, |_, cx| cx.notify());
+        if let Some(view) = self.tabs.get(self.active).and_then(|t| t.view.as_ref()) {
+            view.update(cx, |_, cx| cx.notify());
         }
     }
 
@@ -225,11 +275,30 @@ impl Workspace {
         }
     }
 
-    fn spawn_tab(&mut self, dir: &Path, window: &mut Window, cx: &mut Context<Self>) {
+    /// Adds a tab row without starting its shell; returns its index.
+    fn add_tab(&mut self, name: Option<String>, cwd: PathBuf, claude_session: Option<String>, claude_args: Vec<String>) -> usize {
         let id = self.next_id;
         self.next_id += 1;
-        let view = self.new_view(id, dir, window, cx);
-        self.tabs.push(Tab { id, name: format!("Session {id}"), view });
+        let dir_missing = !cwd.is_dir();
+        let name = name.unwrap_or_else(|| format!("Session {id}"));
+        self.tabs.push(Tab { id, name, cwd, dir_missing, view: None, claude_session, claude_args });
+        self.tabs.len() - 1
+    }
+
+    /// Starts the tab's shell if it hasn't been yet; a tab with a saved Claude session gets the resume banner.
+    fn ensure_spawned(&mut self, i: usize, window: &mut Window, cx: &mut Context<Self>) -> Entity<TerminalView> {
+        if let Some(view) = &self.tabs[i].view {
+            return view.clone();
+        }
+        let tab = &self.tabs[i];
+        let dir = if tab.dir_missing { home() } else { tab.cwd.clone() };
+        let (id, resume) = (tab.id, resume_command(tab));
+        let view = self.new_view(id, &dir, window, cx);
+        if let Some(cmd) = resume {
+            view.update(cx, |v, cx| v.set_banner(Some(Banner::Resume(cmd)), cx));
+        }
+        self.tabs[i].view = Some(view.clone());
+        view
     }
 
     fn new_view(&mut self, id: usize, dir: &Path, _: &mut Window, cx: &mut Context<Self>) -> Entity<TerminalView> {
@@ -246,21 +315,28 @@ impl Workspace {
     }
 
     fn activate(&mut self, idx: usize, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(new) = self.tabs.get(idx) else { return };
-        crate::perf::switch_started();
-        if let Some(old) = self.tabs.get(self.active) {
-            old.view.read(cx).session.set_visible(false);
+        if idx >= self.tabs.len() {
+            return;
         }
-        new.view.read(cx).session.set_visible(true);
+        crate::perf::switch_started();
+        if let Some(old) = self.tabs.get(self.active).and_then(|t| t.view.as_ref()) {
+            old.read(cx).session.set_visible(false);
+        }
+        let view = self.ensure_spawned(idx, window, cx);
+        let new = &self.tabs[idx];
+        view.read(cx).session.set_visible(true);
         if let Some(hub) = &self.agents {
             hub.board.lock().unwrap().mark_seen(new.id as u32);
         }
         // It may have output since its cached frame was recorded.
-        new.view.update(cx, |_, cx| cx.notify());
+        view.update(cx, |_, cx| cx.notify());
         if self.modal.is_none() {
-            window.focus(&new.view.read(cx).focus_handle(cx), cx);
+            window.focus(&view.read(cx).focus_handle(cx), cx);
         }
-        self.active = idx;
+        if self.active != idx {
+            self.active = idx;
+            self.mark_dirty(cx);
+        }
         cx.notify();
     }
 
@@ -280,6 +356,7 @@ impl Workspace {
         if let Some(hub) = &self.agents {
             hub.remove_tab(tab.id as u32);
         }
+        self.mark_dirty(cx);
         self.modal = None;
         if self.tabs.is_empty() {
             self.active = 0;
@@ -293,12 +370,12 @@ impl Workspace {
     }
 
     pub fn restart(&mut self, view_id: EntityId, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(i) = self.tabs.iter().position(|t| t.view.entity_id() == view_id) else { return };
-        let (id, dir) = (self.tabs[i].id, self.tabs[i].view.read(cx).session.cwd.clone());
+        let Some(i) = self.tab_of_view(view_id) else { return };
         if let Some(hub) = &self.agents {
-            hub.board.lock().unwrap().tabs.remove(&(id as u32));
+            hub.board.lock().unwrap().reset_live(self.tabs[i].id as u32);
         }
-        self.tabs[i].view = self.new_view(id, &dir, window, cx);
+        self.tabs[i].view = None;
+        self.ensure_spawned(i, window, cx);
         if i == self.active {
             self.active = usize::MAX;
             self.activate(i, window, cx);
@@ -321,8 +398,8 @@ impl Workspace {
 
     fn close_modal(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.modal = None;
-        if let Some(tab) = self.tabs.get(self.active) {
-            window.focus(&tab.view.read(cx).focus_handle(cx), cx);
+        if let Some(view) = self.tabs.get(self.active).and_then(|t| t.view.as_ref()) {
+            window.focus(&view.read(cx).focus_handle(cx), cx);
         }
         cx.notify();
     }
@@ -352,6 +429,7 @@ impl Workspace {
                         && !name.is_empty()
                     {
                         t.name = name.to_string();
+                        self.mark_dirty(cx);
                     }
                     self.close_modal(window, cx);
                 }
@@ -360,8 +438,9 @@ impl Workspace {
                     if dir.is_dir() {
                         self.last_dir = dir.clone();
                         self.modal = None;
-                        self.spawn_tab(&dir, window, cx);
-                        self.activate(self.tabs.len() - 1, window, cx);
+                        let i = self.add_tab(None, dir, None, Vec::new());
+                        self.activate(i, window, cx);
+                        self.mark_dirty(cx);
                     } else {
                         let error = Some(format!("Not a directory: {}", dir.display()));
                         self.modal = Some(Modal::NewSession { edit, error });
@@ -377,9 +456,9 @@ impl Workspace {
     fn sidebar(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
         let board = self.agents.as_ref().map(|h| h.board.lock().unwrap());
         let rows = self.tabs.iter().enumerate().map(|(i, tab)| {
-            let session = &tab.view.read(cx).session;
-            let (unread, exited) = (session.is_unread(), session.is_exited());
-            let cwd = tilde(&session.cwd);
+            let session = tab.view.as_ref().map(|v| v.read(cx).session.clone());
+            let (unread, exited) = session.as_ref().map_or((false, false), |s| (s.is_unread(), s.is_exited()));
+            let cwd = if tab.dir_missing { format!("⚠ missing · {}", tilde(&tab.cwd)) } else { tilde(&tab.cwd) };
             let active = i == self.active;
             let agent = match &board {
                 Some(b) if !exited => b.get(tab.id as u32),
@@ -393,6 +472,7 @@ impl Workspace {
             };
             let needs_you = agent.state == agent::State::NeedsYou;
             let badge = match agent.state {
+                agent::State::NoAgent if tab.claude_session.is_some() => Some(("resumable", colors::DIM)),
                 agent::State::NoAgent => None,
                 agent::State::Ready => Some(("claude", colors::DIM)),
                 agent::State::Working => Some(("working", colors::WORKING)),
@@ -448,7 +528,13 @@ impl Workspace {
                                         .child(label)
                                 })),
                         )
-                        .child(div().text_xs().truncate().text_color(rgb(colors::DIM)).child(cwd))
+                        .child(
+                            div()
+                                .text_xs()
+                                .truncate()
+                                .text_color(rgb(if tab.dir_missing { colors::NEEDS_YOU } else { colors::DIM }))
+                                .child(cwd),
+                        )
                         .children(
                             model_line.map(|m| div().text_xs().truncate().text_color(rgb(colors::DIM)).child(m)),
                         ),
@@ -463,8 +549,9 @@ impl Workspace {
                             .hover(|s| s.bg(rgb(colors::DIVIDER_HOVER)))
                             .child("⟳")
                             .on_click(cx.listener(move |w, _: &ClickEvent, window, cx| {
-                                let id = w.tabs[i].view.entity_id();
-                                w.restart(id, window, cx);
+                                if let Some(id) = w.tabs[i].view.as_ref().map(|v| v.entity_id()) {
+                                    w.restart(id, window, cx);
+                                }
                                 cx.stop_propagation();
                             })),
                     )
@@ -518,10 +605,179 @@ impl Workspace {
 
     /// Agent states/limits changed (listener thread). The tab being looked at is never "unseen".
     fn agents_changed(&mut self, cx: &mut Context<Self>) {
-        if let (Some(hub), Some(tab)) = (&self.agents, self.tabs.get(self.active)) {
-            hub.board.lock().unwrap().mark_seen(tab.id as u32);
+        let Some(hub) = &self.agents else { return };
+        let mut dirty = false;
+        {
+            let mut board = hub.board.lock().unwrap();
+            if let Some(tab) = self.tabs.get(self.active) {
+                board.mark_seen(tab.id as u32);
+            }
+            for tab in &mut self.tabs {
+                let a = board.get(tab.id as u32);
+                if a.resume_failed.is_some() && a.resume_failed == tab.claude_session {
+                    // `claude --resume` said the session doesn't exist: drop it and the badge.
+                    board.forget_session(tab.id as u32);
+                    tab.claude_session = None;
+                    dirty = true;
+                } else if a.session_id.is_some() && a.session_id != tab.claude_session {
+                    tab.claude_session = a.session_id;
+                    dirty = true;
+                }
+                if let Some(args) = a.args
+                    && args != tab.claude_args
+                {
+                    tab.claude_args = args;
+                    dirty = true;
+                }
+            }
+        }
+        if dirty {
+            self.mark_dirty(cx);
         }
         cx.notify();
+    }
+
+    fn tab_of_view(&self, view_id: EntityId) -> Option<usize> {
+        self.tabs.iter().position(|t| t.view.as_ref().is_some_and(|v| v.entity_id() == view_id))
+    }
+
+    /// Saves at most 500 ms after the first unsaved change (not re-armed by later ones, so a steady stream of
+    /// changes can't postpone it forever); the snapshot is taken when it fires and written off the UI thread.
+    fn mark_dirty(&mut self, cx: &mut Context<Self>) {
+        if self.save_pending {
+            return;
+        }
+        self.save_pending = true;
+        self._save_task = Some(cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(SAVE_DEBOUNCE).await;
+            let Ok((path, snapshot)) = this.update(cx, |w, _| {
+                w.save_pending = false;
+                (w.state_path.clone(), w.snapshot())
+            }) else {
+                return;
+            };
+            let result = cx.background_executor().spawn(async move { persist::save(&path, &snapshot) }).await;
+            match result {
+                Ok(()) => crate::perf::event("state saved"),
+                Err(e) => eprintln!("agent-ide: saving state failed: {e}"),
+            }
+        }));
+    }
+
+    fn snapshot(&self) -> Saved {
+        Saved {
+            tabs: self
+                .tabs
+                .iter()
+                .map(|t| TabState {
+                    name: t.name.clone(),
+                    cwd: t.cwd.clone(),
+                    claude_session: t.claude_session.clone(),
+                    claude_args: t.claude_args.clone(),
+                })
+                .collect(),
+            active: self.active.min(self.tabs.len().saturating_sub(1)),
+            sidebar: persist::SidebarState { width: f32::from(self.sidebar_width), open: self.sidebar_open },
+            window: self.window_state,
+            last_dir: Some(self.last_dir.clone()),
+            ..Saved::default()
+        }
+    }
+
+    /// Startup: drop saved Claude sessions whose transcript is gone (checked off the UI thread, once).
+    fn check_resumable(&mut self, cx: &mut Context<Self>) {
+        let ids: Vec<(usize, String)> =
+            self.tabs.iter().filter_map(|t| Some((t.id, t.claude_session.clone()?))).collect();
+        if ids.is_empty() {
+            return;
+        }
+        cx.spawn(async move |this, cx| {
+            let gone: Vec<usize> = cx
+                .background_executor()
+                .spawn(async move { ids.into_iter().filter(|(_, s)| !persist::transcript_exists(s)).map(|(id, _)| id).collect() })
+                .await;
+            if gone.is_empty() {
+                return;
+            }
+            let _ = this.update(cx, |w, cx| {
+                for t in w.tabs.iter_mut().filter(|t| gone.contains(&t.id)) {
+                    t.claude_session = None;
+                    if let Some(view) = &t.view {
+                        view.update(cx, |v, cx| {
+                            if matches!(v.banner(), Some(Banner::Resume(_))) {
+                                v.set_banner(None, cx);
+                                cx.notify();
+                            }
+                        });
+                    }
+                }
+                w.mark_dirty(cx);
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    /// Enter on the resume banner: re-check the transcript off-thread, then type `claude --resume <id> <flags>`.
+    pub fn resume(&mut self, view_id: EntityId, cx: &mut Context<Self>) {
+        let Some(i) = self.tab_of_view(view_id) else { return };
+        self.resume_tabs(vec![i], cx);
+    }
+
+    /// Ctrl+Shift+R: resume every tab with a saved session whose claude isn't running (spawning hidden ones).
+    fn resume_all(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let board = self.agents.as_ref().map(|h| h.board.lock().unwrap());
+        let idle = |t: &Tab| board.as_ref().is_none_or(|b| b.get(t.id as u32).state == agent::State::NoAgent);
+        let targets: Vec<usize> =
+            (0..self.tabs.len()).filter(|&i| self.tabs[i].claude_session.is_some() && idle(&self.tabs[i])).collect();
+        drop(board);
+        for &i in &targets {
+            let view = self.ensure_spawned(i, window, cx);
+            view.update(cx, |v, cx| {
+                v.set_banner(None, cx);
+                cx.notify();
+            });
+        }
+        self.resume_tabs(targets, cx);
+    }
+
+    fn resume_tabs(&mut self, tabs: Vec<usize>, cx: &mut Context<Self>) {
+        let jobs: Vec<(usize, String, String)> = tabs
+            .into_iter()
+            .filter_map(|i| {
+                let t = &self.tabs[i];
+                Some((t.id, t.claude_session.clone()?, resume_command(t)?))
+            })
+            .collect();
+        cx.spawn(async move |this, cx| {
+            let checked: Vec<(usize, String, String, bool)> = cx
+                .background_executor()
+                .spawn(async move {
+                    jobs.into_iter().map(|(id, s, a)| {
+                        let ok = persist::transcript_exists(&s);
+                        (id, s, a, ok)
+                    }).collect()
+                })
+                .await;
+            let _ = this.update(cx, |w, cx| {
+                for (id, _session, cmd, exists) in checked {
+                    let Some(t) = w.tabs.iter_mut().find(|t| t.id == id) else { continue };
+                    let Some(view) = t.view.clone() else { continue };
+                    if exists {
+                        view.read(cx).session.write(format!("{cmd}\r").as_bytes());
+                    } else {
+                        t.claude_session = None;
+                        view.update(cx, |v, cx| {
+                            v.set_banner(Some(Banner::Gone), cx);
+                            cx.notify();
+                        });
+                        w.mark_dirty(cx);
+                    }
+                }
+                cx.notify();
+            });
+        })
+        .detach();
     }
 
     fn needs_you_count(&self) -> usize {
@@ -569,6 +825,7 @@ impl Workspace {
     fn toggle_sidebar(&mut self, cx: &mut Context<Self>) {
         self.sidebar_open = !self.sidebar_open;
         self.flush_resize = true;
+        self.mark_dirty(cx);
         cx.notify();
     }
 
@@ -602,8 +859,8 @@ impl Render for Workspace {
         self.arm_minute_timer(cx);
 
         let terminal = match self.tabs.get(self.active) {
-            Some(tab) => tab.view.clone().cached(StyleRefinement::default().size_full()).into_any_element(),
-            None => div()
+            Some(Tab { view: Some(view), .. }) => view.clone().cached(StyleRefinement::default().size_full()).into_any_element(),
+            _ => div()
                 .size_full()
                 .flex()
                 .items_center()
@@ -705,6 +962,7 @@ impl Render for Workspace {
             .on_action(cx.listener(|w, _: &Rename, window, cx| w.start_rename(w.active, window, cx)))
             .on_action(cx.listener(|w, _: &ToggleSidebar, _, cx| w.toggle_sidebar(cx)))
             .on_action(cx.listener(|w, _: &NextNeedsYou, window, cx| w.next_needs_you(window, cx)))
+            .on_action(cx.listener(|w, _: &ResumeAll, window, cx| w.resume_all(window, cx)))
             .on_action(cx.listener(|w, _: &Activate1, window, cx| w.activate(0, window, cx)))
             .on_action(cx.listener(|w, _: &Activate2, window, cx| w.activate(1, window, cx)))
             .on_action(cx.listener(|w, _: &Activate3, window, cx| w.activate(2, window, cx)))
@@ -742,6 +1000,7 @@ impl Workspace {
         if self.dragging {
             self.dragging = false;
             self.flush_resize = true;
+            self.mark_dirty(cx);
             cx.notify();
         }
     }
@@ -834,9 +1093,47 @@ fn limit_row(label: &'static str, limit: Option<hook::Limit>, now: i64) -> impl 
         )
 }
 
+fn window_state(window: &Window) -> Option<WindowState> {
+    let (mode, b) = match window.window_bounds() {
+        gpui::WindowBounds::Windowed(b) => (WindowMode::Windowed, b),
+        gpui::WindowBounds::Maximized(b) => (WindowMode::Maximized, b),
+        gpui::WindowBounds::Fullscreen(b) => (WindowMode::Fullscreen, b),
+    };
+    let f = f32::from;
+    Some(WindowState { mode, x: f(b.origin.x), y: f(b.origin.y), w: f(b.size.width), h: f(b.size.height) })
+}
+
+/// What resuming a tab types (also shown in its banner): saved flags minus prompt, session-starting and
+/// permission-bypassing ones (`hook::resume_args`).
+fn resume_command(t: &Tab) -> Option<String> {
+    let mut cmd = format!("claude --resume {}", sh_word(t.claude_session.as_ref()?));
+    for a in hook::resume_args(&t.claude_args) {
+        cmd.push(' ');
+        cmd.push_str(&sh_word(&a));
+    }
+    Some(cmd)
+}
+
+/// Quotes one shell word for typing into zsh/sh.
+fn sh_word(s: &str) -> String {
+    if !s.is_empty() && s.chars().all(|c| c.is_ascii_alphanumeric() || "-_./=:,+@%".contains(c)) {
+        s.to_string()
+    } else {
+        format!("'{}'", s.replace('\'', r"'\''"))
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::fmt_remaining;
+    use super::{fmt_remaining, sh_word};
+
+    #[test]
+    fn shell_words() {
+        assert_eq!(sh_word("--model"), "--model");
+        assert_eq!(sh_word("my session"), "'my session'");
+        assert_eq!(sh_word("it's"), r"'it'\''s'");
+        assert_eq!(sh_word(""), "''");
+    }
 
     #[test]
     fn remaining() {

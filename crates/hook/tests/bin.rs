@@ -76,3 +76,26 @@ fn runs_the_users_own_statusline() {
     assert!(out.status.success());
     assert_eq!(String::from_utf8_lossy(&out.stdout).trim(), r#"mine:"display_name": "Haiku 5.5""#);
 }
+
+#[test]
+fn argv_mode_never_reads_stdin() {
+    let d = tmpdir("argv");
+    let sock_path = d.join("app.sock");
+    let app = UnixDatagram::bind(&sock_path).unwrap();
+    app.set_read_timeout(Some(Duration::from_secs(2))).unwrap();
+    // stdin stays open and empty (like the user's terminal): reading it would hang forever.
+    let mut child = Command::new(env!("CARGO_BIN_EXE_agent-ide-hook"))
+        .args([sock_path.to_str().unwrap(), "7", "argv", "--model", "haiku", "fix it"])
+        .stdin(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let started = Instant::now();
+    while child.try_wait().unwrap().is_none() {
+        assert!(started.elapsed() < Duration::from_secs(2), "argv mode blocked on stdin");
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    let mut buf = [0u8; 4096];
+    let n = app.recv(&mut buf).unwrap();
+    let msg: Msg = serde_json::from_slice(&buf[..n]).unwrap();
+    assert_eq!(msg.kind, Kind::Argv { args: vec!["--model".into(), "haiku".into(), "fix it".into()] });
+}
