@@ -10,7 +10,7 @@ use gpui::{
 };
 
 use super::*;
-use crate::theme::{self, UI_FONT, height, radius, space, text_size};
+use crate::theme::{self, MONO_FONT, UI_FONT, height, radius, space, text_size};
 use crate::ui::{self, icon, line_counts, tip};
 
 impl Render for Workspace {
@@ -179,7 +179,7 @@ impl Render for Workspace {
                     .children(right),
             )
             .child(self.status_bar())
-            .children(self.modal_view())
+            .children(self.modal_view(cx))
             .when(chrome.csd, |d| d.children(window_chrome::resize_handles(chrome.tiling)))
     }
 }
@@ -698,22 +698,114 @@ impl Workspace {
             })
     }
 
-    fn modal_view(&self) -> Option<impl IntoElement + use<>> {
+    fn modal_view(&self, cx: &mut Context<Self>) -> Option<gpui::AnyElement> {
         let t = theme::get();
-        let Some(Modal::NewSession { edit, error }) = &self.modal else { return None };
-        Some(
-            div().absolute().size_full().flex().justify_center().items_start().pt(px(120.)).bg(t.bg.scrim).child(
+        let card = || {
+            div()
+                .w(px(520.))
+                .h_auto()
+                .p(px(space::XL))
+                .flex()
+                .flex_col()
+                .gap(px(space::MD))
+                .rounded(px(radius::LG))
+                .bg(t.bg.elevated)
+                .border_1()
+                .border_color(t.border.strong)
+        };
+        let scrim = || div().absolute().size_full().flex().justify_center().items_start().pt(px(120.)).bg(t.bg.scrim);
+        if let Some(Modal::Confirm { title, body, files, ok, danger, .. }) = &self.modal {
+            let (ok, danger) = (*ok, *danger);
+            // Commit-confirm list: shared / via-command files stand out (they may hold other work).
+            let list = (!files.is_empty()).then(|| {
                 div()
-                    .w(px(520.))
-                    .h_auto()
-                    .p(px(space::XL))
+                    .id("confirm-files")
+                    .max_h(px(240.))
+                    .overflow_y_scroll()
                     .flex()
                     .flex_col()
-                    .gap(px(space::MD))
-                    .rounded(px(radius::LG))
-                    .bg(t.bg.elevated)
-                    .border_1()
-                    .border_color(t.border.strong)
+                    .gap(px(space::XXS))
+                    .p(px(space::SM))
+                    .rounded(px(radius::MD))
+                    .bg(t.bg.input)
+                    .font_family(MONO_FONT)
+                    .text_size(px(text_size::XS))
+                    .children(files.iter().map(|(path, m)| {
+                        let flagged = m.shared || m.via_command;
+                        let tag = |icon_path: &'static str, label: &'static str| {
+                            div()
+                                .flex_none()
+                                .flex()
+                                .items_center()
+                                .gap(px(space::XXS))
+                                .child(ui::icon(icon_path, 11., t.state.needs_you))
+                                .child(label)
+                        };
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap(px(space::SM))
+                            .text_color(if flagged { t.state.needs_you } else { t.text.primary })
+                            .child(div().min_w_0().flex_1().truncate().child(path.clone()))
+                            .when(m.shared, |d| d.child(tag(icon::SHARED, "shared")))
+                            .when(m.via_command, |d| d.child(tag(icon::VIA_COMMAND, "via command")))
+                    }))
+            });
+            let flagged = files.iter().any(|(_, m)| m.shared || m.via_command);
+            let button = |id: &'static str, label: &'static str, danger: bool| {
+                div()
+                    .id(id)
+                    .px(px(space::MD))
+                    .py(px(space::XS))
+                    .rounded(px(radius::MD))
+                    .text_size(px(text_size::SM))
+                    .cursor_pointer()
+                    .when(danger, |d| d.bg(t.state.error).text_color(t.text.on_accent))
+                    .when(!danger && label != "Cancel", |d| d.bg(t.accent).text_color(t.text.on_accent))
+                    .when(label == "Cancel", |d| d.border_1().border_color(t.border.strong).text_color(t.text.primary))
+                    .hover(|s| s.opacity(0.85))
+                    .child(label)
+            };
+            return Some(
+                scrim()
+                    .child(
+                        card()
+                            .child(
+                                div()
+                                    .flex()
+                                    .items_center()
+                                    .gap(px(space::SM))
+                                    .child(if danger { ui::icon(icon::WARNING, 15., t.state.error) } else { ui::icon(icon::BRANCH, 15., t.accent) })
+                                    .child(div().min_w_0().truncate().font_weight(FontWeight::SEMIBOLD).child(title.clone())),
+                            )
+                            .child(div().text_size(px(text_size::SM)).text_color(t.text.muted).child(body.clone()))
+                            .children(list)
+                            .when(flagged, |d| {
+                                d.child(div().text_size(px(text_size::XS)).text_color(t.state.needs_you).child(
+                                    "Highlighted: shared with another session or changed by a shell command (best effort): check they hold only this agent's work.",
+                                ))
+                            })
+                            .child(
+                                div()
+                                    .flex()
+                                    .justify_end()
+                                    .gap(px(space::SM))
+                                    .child(button("confirm-cancel", "Cancel", false).on_click(cx.listener(|w, _: &ClickEvent, window, cx| {
+                                        w.close_modal(window, cx)
+                                    })))
+                                    .child(button("confirm-ok", ok, danger).on_click(cx.listener(|w, _: &ClickEvent, window, cx| {
+                                        w.confirm_ok(window, cx)
+                                    }))),
+                            )
+                            .child(div().text_size(px(text_size::XS)).text_color(t.text.dim).child(format!("Enter to {} · Esc to cancel", ok.to_lowercase()))),
+                    )
+                    .into_any_element(),
+            );
+        }
+        let Some(Modal::NewSession { edit, error }) = &self.modal else { return None };
+        Some(
+            scrim().child(
+                card()
                     .child(
                         div()
                             .flex()
@@ -726,7 +818,8 @@ impl Workspace {
                     .child(text_field(edit))
                     .children(error.clone().map(|e| div().text_size(px(text_size::SM)).text_color(t.state.error).child(e)))
                     .child(div().text_size(px(text_size::XS)).text_color(t.text.dim).child("Enter to create · Esc to cancel")),
-            ),
+            )
+            .into_any_element(),
         )
     }
 }

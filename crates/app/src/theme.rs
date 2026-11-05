@@ -43,6 +43,8 @@ pub struct Text {
     pub muted: Rgba,
     pub dim: Rgba,
     pub faint: Rgba,
+    /// Text on an accent-filled button.
+    pub on_accent: Rgba,
 }
 
 pub struct States {
@@ -172,7 +174,7 @@ pub static DARK: Theme = Theme {
         scrim: hexa(0x00000080),
     },
     border: Border { subtle: hexa(0xffffff0f), strong: hexa(0xffffff1f) },
-    text: Text { primary: hex(0xececf1), muted: hex(0xa1a1aa), dim: hex(0x6b6b76), faint: hex(0x45454d) },
+    text: Text { primary: hex(0xececf1), muted: hex(0xa1a1aa), dim: hex(0x6b6b76), faint: hex(0x45454d), on_accent: hex(0xffffff) },
     accent: hex(0x7c8aff),
     state: States {
         working: hex(0x60a5fa),

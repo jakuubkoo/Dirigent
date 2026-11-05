@@ -85,6 +85,16 @@ enum TabRepo {
 enum Modal {
     NewSession { edit: LineEdit, error: Option<String> },
     Rename { tab: usize, edit: LineEdit },
+    /// "Discard …?" / "Commit … files of this agent?" before a git write; `ok` is the action button's label.
+    Confirm {
+        title: String,
+        body: String,
+        files: Vec<(String, crate::changes::Mark)>,
+        ok: &'static str,
+        danger: bool,
+        root: PathBuf,
+        job: crate::git_ops::Job,
+    },
 }
 
 #[derive(Clone)]
@@ -132,6 +142,9 @@ pub struct Workspace {
     /// Files each tab's agent changed (sidebar summary, Changes filter, tree marks).
     tracker: Arc<crate::changes::Tracker>,
     _changes_task: Option<Task<()>>,
+    /// Git writes per repo (lock, running/failed) and the commit boxes (drafts per repo).
+    git_ops: HashMap<PathBuf, crate::git_ops::RepoOps>,
+    commit_boxes: HashMap<PathBuf, Entity<crate::commit_box::CommitBox>>,
     notifications: persist::Notifications,
     _click_task: Option<Task<()>>,
     _subscriptions: Vec<gpui::Subscription>,
@@ -241,6 +254,8 @@ impl Workspace {
             notifier,
             tracker,
             _changes_task: None,
+            git_ops: HashMap::new(),
+            commit_boxes: HashMap::new(),
             notifications: saved.notifications,
             _click_task: None,
             _subscriptions: Vec::new(),
@@ -878,6 +893,15 @@ impl Workspace {
         let ks = &ev.keystroke;
         let edit = match modal {
             Modal::NewSession { edit, .. } | Modal::Rename { edit, .. } => edit,
+            Modal::Confirm { .. } => {
+                match ks.key.as_str() {
+                    "enter" => self.confirm_ok(window, cx),
+                    "escape" => self.close_modal(window, cx),
+                    _ => {}
+                }
+                cx.stop_propagation();
+                return;
+            }
         };
         let result = if ks.modifiers.control && ks.key == "v" {
             if let Some(text) = cx.read_from_clipboard().and_then(|c| c.text()) {
@@ -915,7 +939,7 @@ impl Workspace {
                         self.modal = Some(Modal::NewSession { edit, error });
                     }
                 }
-                None => {}
+                other => self.modal = other,
             },
         }
         cx.stop_propagation();
@@ -1221,6 +1245,7 @@ impl Workspace {
 
 }
 
+mod git_write;
 mod view;
 
 /// Git: repo resolution per tab, cwd following, the panel and the diff view.
@@ -1315,6 +1340,10 @@ impl Workspace {
 
     /// Pushes the active tab's repo state into the panel (it re-renders only if that differs).
     fn sync_panel(&mut self, cx: &mut Context<Self>) {
+        let commit = match self.tabs.get(self.active).map(|t| t.repo.clone()) {
+            Some(TabRepo::Repo(root)) => Some(self.sync_commit_box(&root, cx)),
+            _ => None,
+        };
         let view = match self.tabs.get(self.active) {
             None => PanelView::NoSession,
             Some(t) => match &t.repo {
@@ -1325,7 +1354,8 @@ impl Workspace {
                     let view = self.tracker.view(t.id as u32);
                     let ran = t.claude_session.is_some() || !view.touched.is_empty();
                     let agent = ran.then(|| git_panel::AgentFiles { view, only: t.agent_only.unwrap_or(true) });
-                    PanelView::Repo { root: root.clone(), status: self.repos.status(root), agent }
+                    let ops = Box::new(self.git_ops.get(root).map(|o| o.view.clone()).unwrap_or_default());
+                    PanelView::Repo { root: root.clone(), status: self.repos.status(root), agent, ops, commit }
                 }
             },
         };
@@ -1528,30 +1558,43 @@ impl Workspace {
                             let diff = git::diff(&repo, &read_file, || current.load(Ordering::Relaxed) != generation)?;
                             // Same diff as shown: keep its layout (no work, and the view sees no change).
                             let hash = git::layout::hash(&diff);
-                            if let Some(prev) = prev.filter(|p| p.hash == hash) {
-                                return Some((prev, None));
-                            }
-                            let t = Instant::now();
-                            let layout = Arc::new(git::layout::layout(&diff));
-                            Some((layout, Some(t.elapsed())))
+                            let (layout, took) = match prev.filter(|p| p.hash == hash) {
+                                Some(prev) => (prev, None),
+                                None => {
+                                    let t = Instant::now();
+                                    (Arc::new(git::layout::layout(&diff)), Some(t.elapsed()))
+                                }
+                            };
+                            // What each hunk has staged/unstaged (re-read every time: staging doesn't change the
+                            // HEAD→worktree diff itself).
+                            let rows: Vec<(u32, git::write::Span)> =
+                                layout.lines.iter().enumerate().filter_map(|(i, l)| Some((i as u32, l.span?))).collect();
+                            let spans: Vec<_> = rows.iter().map(|r| r.1).collect();
+                            let states = git::write::hunk_state(&repo, &read_file, &spans);
+                            let hunks: HashMap<u32, (bool, bool)> = rows.iter().map(|r| r.0).zip(states).collect();
+                            Some((layout, took, Arc::new(hunks)))
                         })
                         .await;
                     if current2.load(Ordering::Relaxed) != generation {
                         return; // a newer read or a close happened meanwhile
                     }
                     crate::perf::event_with(|| match &lines {
-                        Some((l, Some(took))) => format!(
+                        Some((l, Some(took), _)) => format!(
                             "diff read: {} lines in {:.1} ms (layout {:.1} ms)",
                             l.lines.len(),
                             started.elapsed().as_secs_f64() * 1e3,
                             took.as_secs_f64() * 1e3
                         ),
-                        Some((_, None)) => "diff read: unchanged, layout reused".into(),
+                        Some((_, None, _)) => "diff read: unchanged, layout reused".into(),
                         None => "diff read failed".into(),
                     });
-                    let reused = matches!(lines, Some((_, None)));
-                    let base = lines.as_ref().map(|(l, _)| l.clone());
-                    view.update(cx, |v, cx| v.set_layout(base.clone(), file.clone(), cx));
+                    let reused = matches!(lines, Some((_, None, _)));
+                    let base = lines.as_ref().map(|(l, _, _)| l.clone());
+                    let hunks = lines.as_ref().map(|(_, _, h)| h.clone()).unwrap_or_default();
+                    view.update(cx, |v, cx| {
+                        v.set_hunks(hunks, cx);
+                        v.set_layout(base.clone(), file.clone(), cx)
+                    });
                     let Some(base) = base.filter(|_| !syntax_off()) else { return };
                     if reused && settled && base.colored {
                         return; // colors and the structural diff of this exact diff are shown already

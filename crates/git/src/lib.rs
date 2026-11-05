@@ -5,6 +5,7 @@ mod fs;
 pub mod layout;
 pub mod text;
 mod watch;
+pub mod write;
 
 use std::io::Read;
 use std::path::{Path, PathBuf};

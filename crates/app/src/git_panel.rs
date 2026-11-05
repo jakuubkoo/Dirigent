@@ -133,7 +133,14 @@ pub enum PanelView {
     NotRepo,
     GitMissing,
     /// `agent`: the tab's agent ran (its changed files and the This agent / All choice).
-    Repo { root: PathBuf, status: Option<Arc<Status>>, agent: Option<AgentFiles> },
+    Repo {
+        root: PathBuf,
+        status: Option<Arc<Status>>,
+        agent: Option<AgentFiles>,
+        /// Git writes: running / failed (with retry).
+        ops: Box<crate::git_ops::OpsView>,
+        commit: Option<gpui::Entity<crate::commit_box::CommitBox>>,
+    },
 }
 
 #[derive(Clone)]
@@ -146,8 +153,13 @@ pub struct AgentFiles {
 impl PanelView {
     fn same(&self, other: &Self) -> bool {
         match (self, other) {
-            (Self::Repo { root: a, status: sa, agent: ga }, Self::Repo { root: b, status: sb, agent: gb }) => {
+            (
+                Self::Repo { root: a, status: sa, agent: ga, ops: oa, commit: ca },
+                Self::Repo { root: b, status: sb, agent: gb, ops: ob, commit: cb },
+            ) => {
                 a == b
+                    && oa == ob
+                    && ca.as_ref().map(|c| c.entity_id()) == cb.as_ref().map(|c| c.entity_id())
                     && match (sa, sb) {
                         (Some(x), Some(y)) => Arc::ptr_eq(x, y),
                         (None, None) => true,
@@ -223,12 +235,49 @@ impl GitPanel {
         };
         let selected = self.selected.as_deref() == Some(f.path.as_str());
         let (file, root, ws) = (f.clone(), root.to_path_buf(), self.workspace.clone());
-        let tag = |id: &'static str, label: &'static str, color, hint: &'static str| {
-            div().id((id, ix)).flex_none().text_size(px(text_size::XS)).text_color(color).child(label).tooltip(tip(hint))
+        // S/U: click to unstage/stage (stopping the click before the row opens the diff).
+        let tag_root = root.clone();
+        let tag = |id: &'static str, label: &'static str, color, hint: &'static str, job: crate::git_ops::Job| {
+            let (ws, root) = (self.workspace.clone(), tag_root.clone());
+            div()
+                .id((id, ix))
+                .flex_none()
+                .px(px(2.))
+                .rounded(px(radius::SM))
+                .text_size(px(text_size::XS))
+                .text_color(color)
+                .cursor_pointer()
+                .hover(|s| s.bg(t.bg.elevated))
+                .child(label)
+                .tooltip(tip(hint))
+                .on_click(move |_: &ClickEvent, _, cx| {
+                    cx.stop_propagation();
+                    let _ = ws.update(cx, |w, cx| w.run_git(root.clone(), job.clone(), cx));
+                })
+        };
+        let discard = {
+            let (ws, root, f) = (self.workspace.clone(), root.to_path_buf(), f.clone());
+            div()
+                .id(("discard", ix))
+                .flex_none()
+                .invisible()
+                .group_hover("git-row", |s| s.visible())
+                .p(px(2.))
+                .rounded(px(radius::SM))
+                .cursor_pointer()
+                .hover(|s| s.bg(t.bg.elevated))
+                .child(ui::icon(icon::RESTART, 12., t.text.muted))
+                .tooltip(tip("Discard changes…"))
+                .on_click(move |_: &ClickEvent, window, cx| {
+                    cx.stop_propagation();
+                    let job = crate::git_ops::Job::Discard(f.clone());
+                    let _ = ws.update(cx, |w, cx| w.confirm_discard(root.clone(), job, window, cx));
+                })
         };
         let kind_color = theme::git_kind(f.kind);
         div()
             .id(("git-file", ix))
+            .group("git-row")
             .w_full() // a uniform_list row is laid out as a root: without this it takes its min-content width
             .overflow_hidden()
             .h(px(height::LIST_ROW))
@@ -267,14 +316,126 @@ impl GitPanel {
                         d.child(mark("mark-cmd", icon::VIA_COMMAND, "Changed by a shell command (best effort)"))
                     })
             }))
-            .when(f.staged, |d| d.child(tag("tag-s", "S", t.git.added, "Staged: has changes in the index")))
-            .when(f.unstaged, |d| d.child(tag("tag-u", "U", t.git.modified, "Unstaged: has changes not added to the index")))
+            .child(discard)
+            .when(f.staged, |d| {
+                d.child(tag("tag-s", "S", t.git.added, "Staged · click to unstage", crate::git_ops::Job::Unstage(vec![f.clone()])))
+            })
+            .when(f.unstaged, |d| {
+                d.child(tag("tag-u", "U", t.git.modified, "Unstaged · click to stage", crate::git_ops::Job::Stage(vec![f.clone()])))
+            })
             .child(div().flex_none().text_size(px(text_size::XS)).child(line_counts(f.lines)))
             .into_any_element()
     }
 }
 
 impl GitPanel {
+    /// Progress of the running git write (left) and Stage all / Stage this agent's files (right).
+    fn actions_row(&self, root: &Path, st: &Status, agent: bool, ops: &crate::git_ops::OpsView) -> impl IntoElement + use<> {
+        let t = theme::get();
+        let unstaged = st.files.iter().any(|f| f.unstaged);
+        let link = |id: &'static str, label: &'static str, hint: &'static str, enabled: bool| {
+            div()
+                .id(id)
+                .flex_none()
+                .text_size(px(text_size::XS))
+                .when(enabled, |d| d.text_color(t.text.muted).cursor_pointer().hover(|s| s.text_color(t.text.primary)))
+                .when(!enabled, |d| d.text_color(t.text.faint).cursor_not_allowed())
+                .child(label)
+                .tooltip(tip(hint))
+        };
+        let (ws, ws2, r, r2) = (self.workspace.clone(), self.workspace.clone(), root.to_path_buf(), root.to_path_buf());
+        div()
+            .flex()
+            .items_center()
+            .gap(px(space::MD))
+            .px(px(space::LG))
+            .pb(px(space::SM))
+            .text_size(px(text_size::XS))
+            .child(match &ops.running {
+                Some(label) => div()
+                    .flex()
+                    .items_center()
+                    .gap(px(space::XS))
+                    .text_color(t.text.muted)
+                    .child(ui::icon(icon::REFRESH, 11., t.text.muted))
+                    .child(label.clone())
+                    .into_any_element(),
+                None => div().into_any_element(),
+            })
+            .child(div().flex_1())
+            .when(agent, |d| {
+                d.child(link("stage-agent", "Stage agent's files", "Stage this session's agent files", unstaged).on_click(
+                    move |_: &ClickEvent, _, cx| {
+                        let _ = ws2.update(cx, |w, cx| {
+                            let files: Vec<_> = w.agent_files(&r2).into_iter().filter(|f| f.unstaged).collect();
+                            if !files.is_empty() {
+                                w.run_git(r2.clone(), crate::git_ops::Job::Stage(files), cx);
+                            }
+                        });
+                    },
+                ))
+            })
+            .child(link("stage-all", "Stage all", "git add -A", unstaged).on_click(move |_: &ClickEvent, _, cx| {
+                if unstaged {
+                    let _ = ws.update(cx, |w, cx| w.run_git(r.clone(), crate::git_ops::Job::StageAll, cx));
+                }
+            }))
+    }
+
+    /// A failed git write: its message (hook output scrolls), Retry when it can help, dismiss.
+    fn error_banner(&self, root: &Path, e: crate::git_ops::OpError) -> impl IntoElement + use<> {
+        let t = theme::get();
+        let (ws, ws2, r, r2) = (self.workspace.clone(), self.workspace.clone(), root.to_path_buf(), root.to_path_buf());
+        div()
+            .mx(px(space::MD))
+            .mb(px(space::SM))
+            .p(px(space::SM))
+            .flex()
+            .flex_col()
+            .gap(px(space::XS))
+            .rounded(px(radius::MD))
+            .bg(t.bg.elevated)
+            .border_1()
+            .border_color(t.state.error)
+            .text_size(px(text_size::XS))
+            .child(
+                div()
+                    .id("git-error-text")
+                    .max_h(px(160.))
+                    .overflow_y_scroll()
+                    .font_family(MONO_FONT)
+                    .text_color(t.text.primary)
+                    .children(e.message.lines().map(|l| div().child(l.to_string()))),
+            )
+            .child(
+                div()
+                    .flex()
+                    .gap(px(space::MD))
+                    .children(e.retry.is_some().then(|| {
+                        div()
+                            .id("git-retry")
+                            .cursor_pointer()
+                            .text_color(t.accent)
+                            .hover(|s| s.text_color(t.text.primary))
+                            .child("Retry")
+                            .on_click(move |_: &ClickEvent, _, cx| {
+                                let _ = ws.update(cx, |w, cx| w.retry_git(r.clone(), cx));
+                            })
+                    }))
+                    .child(
+                        div()
+                            .id("git-dismiss")
+                            .cursor_pointer()
+                            .text_color(t.text.muted)
+                            .hover(|s| s.text_color(t.text.primary))
+                            .child("Dismiss")
+                            .on_click(move |_: &ClickEvent, _, cx| {
+                                let _ = ws2.update(cx, |w, cx| w.dismiss_git_error(r2.clone(), cx));
+                            }),
+                    ),
+            )
+    }
+
     /// This agent / All, and "Clear" (forget this agent's files), in the header of a tab whose agent ran.
     fn agent_switch(&self, only: bool) -> impl IntoElement + use<> {
         let t = theme::get();
@@ -325,8 +486,10 @@ impl Render for GitPanel {
             PanelView::NotRepo => ui::note("Not a git repository").into_any_element(),
             PanelView::GitMissing => ui::note("git not found on PATH").into_any_element(),
             PanelView::Repo { status: None, .. } => ui::note("Reading status…").into_any_element(),
-            PanelView::Repo { root, status: Some(st), agent } => {
+            PanelView::Repo { root, status: Some(st), agent, ops, commit } => {
                 let (root, st) = (root.clone(), st.clone());
+                let actions = self.actions_row(&root, &st, agent.is_some(), ops);
+                let error = ops.error.clone().map(|e| self.error_banner(&root, e));
                 // This agent: only its files (indices into the status); All: everything.
                 let only: Option<Arc<Vec<usize>>> = agent.as_ref().filter(|a| a.only).map(|a| {
                     Arc::new(st.files.iter().enumerate().filter(|(_, f)| a.view.files.contains_key(&f.path)).map(|(i, _)| i).collect())
@@ -394,10 +557,71 @@ impl Render for GitPanel {
                         .child(scrollbar(self.scroll.clone(), self.drag.clone(), cx.entity_id()))
                         .into_any_element()
                 };
-                div().flex().flex_col().flex_1().min_h_0().child(summary).children(warning).child(list).into_any_element()
+                div()
+                    .flex()
+                    .flex_col()
+                    .flex_1()
+                    .min_h_0()
+                    .children(commit.clone())
+                    .child(summary)
+                    .children(warning)
+                    .child(actions)
+                    .children(error)
+                    .child(list)
+                    .into_any_element()
             }
         };
         div().flex().flex_col().size_full().bg(t.bg.panel).child(body)
+    }
+}
+
+/// Stage / Unstage / Discard… on a hunk header row (git's hunks, whatever the engine or style).
+#[derive(Clone)]
+struct HunkActions {
+    hunks: Arc<HashMap<u32, (bool, bool)>>,
+    root: PathBuf,
+    file: FileChange,
+    ws: WeakEntity<Workspace>,
+}
+
+impl HunkActions {
+    fn buttons(&self, row: u32, span: git::write::Span) -> gpui::Div {
+        use crate::git_ops::Job;
+        let t = theme::get();
+        let (staged, unstaged) = self.hunks.get(&row).copied().unwrap_or_default();
+        let button = |id: &'static str, label: &'static str, hint: &'static str, job: Job, confirm: bool| {
+            let (ws, root) = (self.ws.clone(), self.root.clone());
+            div()
+                .id((id, row as usize))
+                .flex_none()
+                .px(px(space::SM))
+                .rounded(px(radius::SM))
+                .font_family(theme::UI_FONT)
+                .text_size(px(text_size::XS))
+                .text_color(t.text.muted)
+                .cursor_pointer()
+                .hover(|s| s.bg(t.bg.hover).text_color(t.text.primary))
+                .child(label)
+                .tooltip(tip(hint))
+                .on_click(move |_: &ClickEvent, window, cx| {
+                    cx.stop_propagation();
+                    let (root, job) = (root.clone(), job.clone());
+                    let _ = ws.update(cx, |w, cx| {
+                        if confirm { w.confirm_discard(root, job, window, cx) } else { w.run_git(root, job, cx) }
+                    });
+                })
+        };
+        let f = &self.file;
+        div()
+            .flex_none()
+            .flex()
+            .items_center()
+            .gap(px(space::XS))
+            .when(unstaged, |d| d.child(button("hunk-stage", "Stage", "Stage this hunk", Job::StageHunk(f.clone(), span), false)))
+            .when(staged, |d| d.child(button("hunk-unstage", "Unstage", "Unstage this hunk", Job::UnstageHunk(f.clone(), span), false)))
+            .when(staged || unstaged, |d| {
+                d.child(button("hunk-discard", "Discard…", "Put this hunk back to the last commit", Job::DiscardHunk(f.clone(), span), true))
+            })
     }
 }
 
@@ -421,6 +645,8 @@ pub struct DiffView {
     narrow: bool,
     split_style: SplitStyle,
     engine: DiffEngine,
+    /// Hunk rows (line index) → (has staged parts, has unstaged parts): which hunk buttons to show.
+    hunks: Arc<HashMap<u32, (bool, bool)>>,
     scroll: UniformListScrollHandle,
     drag: scrollbar::Drag,
     focus: FocusHandle,
@@ -445,6 +671,7 @@ impl DiffView {
             layout: None,
             structural: None,
             fallback: None,
+            hunks: Default::default(),
             failed: false,
             mode,
             narrow,
@@ -479,6 +706,13 @@ impl DiffView {
         }
         self.file = file;
         cx.notify();
+    }
+
+    pub fn set_hunks(&mut self, hunks: Arc<HashMap<u32, (bool, bool)>>, cx: &mut Context<Self>) {
+        if *hunks != *self.hunks {
+            self.hunks = hunks;
+            cx.notify();
+        }
     }
 
     /// The structural pass finished: its layout, or why the word diff stays.
@@ -960,6 +1194,7 @@ impl Render for DiffView {
             (Some(l), _) => {
                 let (l, split, style) = (l.clone(), self.split(), self.split_style);
                 let structural = l.engine == Engine::Structural;
+                let actions = HunkActions { hunks: self.hunks.clone(), root: self.root.clone(), file: self.file.clone(), ws: self.workspace.clone() };
                 let g = Geom { lh: self.line_height, old: digits(l.max_old), new: digits(l.max_new) };
                 let rows = if split { l.split.len() } else { l.lines.len() };
                 let count = rows + l.truncated as usize;
@@ -973,7 +1208,19 @@ impl Render for DiffView {
                                     .text_color(theme::get().state.needs_you)
                                     .child("… diff truncated (too large to show)");
                             }
-                            if split { split_row(&l, l.split[ix], g, style) } else { unified_row(&l.lines[ix], g, structural) }
+                            let (row, line) = if split {
+                                let line = match l.split[ix] {
+                                    SplitRow::Full(i) => Some(i),
+                                    _ => None,
+                                };
+                                (split_row(&l, l.split[ix], g, style), line)
+                            } else {
+                                (unified_row(&l.lines[ix], g, structural), Some(ix as u32))
+                            };
+                            match line.and_then(|i| Some((i, l.lines[i as usize].span?))) {
+                                Some((i, span)) => row.child(actions.buttons(i, span)),
+                                None => row,
+                            }
                         })
                         .collect::<Vec<_>>()
                 })
@@ -1029,6 +1276,7 @@ mod tests {
             moves: Vec::new(),
             moved: None,
             same: false,
+            span: None,
             runs: Vec::new(),
         };
         let (del, add) = (line(LineKind::Del, vec![]), line(LineKind::Add, std::iter::once(0..1).collect()));

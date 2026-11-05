@@ -38,6 +38,8 @@ pub struct DLine {
     pub moved: Option<u32>,
     /// Structural: a removed/added line with nothing changed or moved on it (reformatting).
     pub same: bool,
+    /// Hunk rows: the hunk's changed-line span (HEAD and worktree lines), for staging/discarding it.
+    pub span: Option<crate::write::Span>,
     /// What to draw: sorted, non-overlapping ranges with a syntax class and/or the word-diff mark. Text outside
     /// every run uses the line's default color.
     pub runs: Vec<Run>,
@@ -255,24 +257,42 @@ pub fn hash(diff: &Diff) -> u64 {
 pub fn layout(diff: &Diff) -> Layout {
     let mut out = Layout { truncated: diff.truncated, hash: hash(diff), ..Default::default() };
     let (mut old, mut new) = (0u32, 0u32);
+    // The current hunk's row and its span (stage/discard buttons), counted exactly like git's own patches.
+    let mut hunk: Option<(usize, crate::write::SpanBuilder)> = None;
+    let close = |out: &mut Layout, hunk: &mut Option<(usize, crate::write::SpanBuilder)>| {
+        if let Some((row, b)) = hunk.take() {
+            out.lines[row].span = b.span();
+        }
+    };
     for l in &diff.lines {
         let (o, n, text) = match l.kind {
             LineKind::Header => continue,
             LineKind::Hunk => {
+                close(&mut out, &mut hunk);
+                hunk = Some((out.lines.len(), crate::write::SpanBuilder::new(&l.text)));
                 (old, new) = hunk_starts(&l.text);
                 (None, None, hunk_context(&l.text))
             }
             LineKind::Meta => (None, None, l.text.clone()),
             LineKind::Context => {
                 (old, new) = (old + 1, new + 1);
+                if let Some((_, b)) = &mut hunk {
+                    b.context();
+                }
                 (Some(old - 1), Some(new - 1), strip_marker(&l.text))
             }
             LineKind::Del => {
                 old += 1;
+                if let Some((_, b)) = &mut hunk {
+                    b.del();
+                }
                 (Some(old - 1), None, strip_marker(&l.text))
             }
             LineKind::Add => {
                 new += 1;
+                if let Some((_, b)) = &mut hunk {
+                    b.add();
+                }
                 (None, Some(new - 1), strip_marker(&l.text))
             }
         };
@@ -283,9 +303,11 @@ pub fn layout(diff: &Diff) -> Layout {
             moves: Vec::new(),
             moved: None,
             same: false,
+            span: None,
             runs: Vec::new(),
         });
     }
+    close(&mut out, &mut hunk);
     pair_blocks(&mut out);
     out
 }
