@@ -78,6 +78,9 @@ pub struct DiffColors {
     pub clean_add: Rgba,
     pub clean_del_bg: Rgba,
     pub clean_add_bg: Rgba,
+    /// Structural diff: moved code (gutter number, bar, hint) and its token background.
+    pub moved: Rgba,
+    pub moved_bg: Rgba,
     /// Line numbers.
     pub gutter: Rgba,
 }
@@ -199,6 +202,8 @@ pub static DARK: Theme = Theme {
         clean_add: hex(0x4ade80),
         clean_del_bg: hexa(0xf8717129),
         clean_add_bg: hexa(0x4ade8029),
+        moved: hex(0x60a5fa),
+        moved_bg: hexa(0x60a5fa29),
         gutter: hex(0x45454d),
     },
     scrollbar: Scrollbar { thumb: hexa(0xffffff1f), active: hexa(0xffffff47) },

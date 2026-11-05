@@ -7,7 +7,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 use async_channel::{Receiver, Sender};
-use git::layout::{DLine, Layout, SplitRow};
+use git::layout::{DLine, Engine, Layout, SplitRow};
 use git::{FileChange, LineKind, Status};
 use gpui::{
     ClickEvent, Context, FocusHandle, Focusable, HighlightStyle, KeyDownEvent, StyledText,
@@ -17,8 +17,9 @@ use gpui::{
 use crate::scrollbar::{self, scrollbar};
 use crate::theme::{self, MONO_FONT, TERMINAL_FONT_SIZE, height, radius, space, text_size};
 use crate::ui::{self, icon, line_counts, tip};
-use crate::persist::{DiffMode, SplitStyle};
+use crate::persist::{DiffEngine, DiffMode, SplitStyle};
 use crate::workspace::Workspace;
+use syntax::structural::Fail;
 
 /// One watcher per repo root, refcounted by the tabs whose cwd is in it. The last tab leaving drops it (and its
 /// inotify watches).
@@ -319,13 +320,18 @@ pub const MIN_SPLIT_COLS: u16 = 120;
 pub struct DiffView {
     pub root: PathBuf,
     pub file: FileChange,
-    /// None while the first read is running; later reads keep showing the previous diff until they finish.
+    /// The word-diff layout (plain, then colored). None while the first read is running; later reads keep showing
+    /// the previous diff until they finish.
     layout: Option<Arc<Layout>>,
+    /// The structural diff of the same diff (third publish), or why there is none. Both None while it's computed.
+    structural: Option<Arc<Layout>>,
+    fallback: Option<Fail>,
     failed: bool,
     /// The saved preference; `narrow` forces unified without changing it.
     mode: DiffMode,
     narrow: bool,
     split_style: SplitStyle,
+    engine: DiffEngine,
     scroll: UniformListScrollHandle,
     drag: scrollbar::Drag,
     focus: FocusHandle,
@@ -338,15 +344,18 @@ impl DiffView {
         root: PathBuf,
         file: FileChange,
         line_height: gpui::Pixels,
-        (mode, split_style, narrow): (DiffMode, SplitStyle, bool),
+        (mode, split_style, engine, narrow): (DiffMode, SplitStyle, DiffEngine, bool),
         workspace: WeakEntity<Workspace>,
         cx: &mut Context<Self>,
     ) -> Self {
         Self {
             split_style,
+            engine,
             root,
             file,
             layout: None,
+            structural: None,
+            fallback: None,
             failed: false,
             mode,
             narrow,
@@ -369,6 +378,11 @@ impl DiffView {
                 if self.layout.as_ref().is_some_and(|old| Arc::ptr_eq(old, &l)) && file == self.file && !self.failed {
                     return;
                 }
+                // A different diff: its structural result is computed again (colors alone keep it).
+                if self.layout.as_ref().is_none_or(|old| old.hash != l.hash) {
+                    self.structural = None;
+                    self.fallback = None;
+                }
                 self.layout = Some(l);
                 self.failed = false;
             }
@@ -378,16 +392,65 @@ impl DiffView {
         cx.notify();
     }
 
+    /// The structural pass finished: its layout, or why the word diff stays.
+    pub fn set_structural(&mut self, result: Result<Arc<Layout>, Fail>, cx: &mut Context<Self>) {
+        let top = self.top_line();
+        match result {
+            Ok(l) => (self.structural, self.fallback) = (Some(l), None),
+            Err(e) => (self.structural, self.fallback) = (None, Some(e)),
+        }
+        self.restore_top(top);
+        cx.notify();
+    }
+
+    /// The structural pass ran for the current diff (ok or fell back): a refresh of the same diff skips it.
+    pub fn structure_settled(&self) -> bool {
+        self.structural.is_some() || self.fallback.is_some()
+    }
+
+    /// What's drawn: the structural layout when it's preferred and available, else the word one.
+    fn shown(&self) -> Option<&Arc<Layout>> {
+        match (&self.structural, self.engine) {
+            (Some(s), DiffEngine::Auto) => Some(s),
+            _ => self.layout.as_ref(),
+        }
+    }
+
+    /// The unified line at the top of the view (rows differ between split layouts).
+    fn top_line(&self) -> Option<usize> {
+        let l = self.shown()?;
+        let top = self.scroll.0.borrow().base_handle.logical_scroll_top().0;
+        Some(if self.split() { split_to_line(l, top) } else { top })
+    }
+
+    fn restore_top(&self, line: Option<usize>) {
+        if let (Some(line), Some(l), true) = (line, self.shown(), self.split()) {
+            self.scroll.scroll_to_item_strict(line_to_split(l, line), gpui::ScrollStrategy::Top);
+        }
+    }
+
     fn split(&self) -> bool {
         self.mode == DiffMode::Split && !self.narrow
     }
 
     /// Mode, split style or width changed: keep the line at the top in view across a mode switch.
-    pub fn set_mode(&mut self, mode: DiffMode, split_style: SplitStyle, narrow: bool, cx: &mut Context<Self>) {
-        if (mode, split_style, narrow) == (self.mode, self.split_style, self.narrow) {
+    pub fn set_mode(
+        &mut self,
+        mode: DiffMode,
+        split_style: SplitStyle,
+        engine: DiffEngine,
+        narrow: bool,
+        cx: &mut Context<Self>,
+    ) {
+        if (mode, split_style, engine, narrow) == (self.mode, self.split_style, self.engine, self.narrow) {
             return;
         }
         self.split_style = split_style;
+        if engine != self.engine {
+            let top = self.top_line();
+            self.engine = engine;
+            self.restore_top(top);
+        }
         let was_split = self.split();
         (self.mode, self.narrow) = (mode, narrow);
         if was_split != self.split()
@@ -407,7 +470,7 @@ impl DiffView {
 
     /// Perf harness: how many rows are loaded, and jump to one.
     pub fn loaded_rows(&self) -> usize {
-        self.layout.as_ref().map_or(0, |l| if self.split() { l.split.len() } else { l.lines.len() })
+        self.shown().map_or(0, |l| if self.split() { l.split.len() } else { l.lines.len() })
     }
 
     pub fn scroll_to(&mut self, ix: usize, cx: &mut Context<Self>) {
@@ -433,6 +496,33 @@ impl DiffView {
                         if !narrow {
                             let _ = ws2.update(cx, |w, cx| w.set_diff_mode(DiffMode::Split, cx));
                         }
+                    }),
+            )
+    }
+
+    /// Structural / Word. Structural = use it when the file allows; the active segment is what's drawn.
+    fn engine_switch(&self) -> impl IntoElement + use<> {
+        let structural = self.shown().is_some_and(|l| l.engine == Engine::Structural);
+        let tip_structural: &'static str = match (self.engine, self.fallback, &self.structural) {
+            (DiffEngine::Word, ..) => "Syntax-aware diff: changed tokens, moved code; reformatting ignored",
+            (_, Some(f), _) => f.reason(),
+            (_, None, None) => "Computing the syntax-aware diff…",
+            _ => "Syntax-aware diff: changed tokens, moved code; reformatting ignored",
+        };
+        let (ws, ws2) = (self.workspace.clone(), self.workspace.clone());
+        segmented()
+            .child(
+                segment("diff-structural", "Structural", structural, self.fallback.is_none())
+                    .tooltip(tip(tip_structural))
+                    .on_click(move |_: &ClickEvent, _, cx| {
+                        let _ = ws.update(cx, |w, cx| w.set_diff_engine(DiffEngine::Auto, cx));
+                    }),
+            )
+            .child(
+                segment("diff-word", "Word", !structural, true)
+                    .tooltip(tip("Line diff with changed words"))
+                    .on_click(move |_: &ClickEvent, _, cx| {
+                        let _ = ws2.update(cx, |w, cx| w.set_diff_engine(DiffEngine::Word, cx));
                     }),
             )
     }
@@ -538,11 +628,15 @@ fn line_colors(kind: LineKind) -> (Option<gpui::Rgba>, gpui::Rgba, Option<gpui::
 
 /// How a line is drawn. Clean (split only): no line background or marker; a paired changed line shows syntax
 /// colors with only its changed tokens in red/green (bold, faint background); an unpaired one is all red/green.
-#[derive(Clone, Copy, PartialEq)]
+/// Structural layouts add Quiet (a removed/added line with nothing changed on it: reformatting) and Moved (only
+/// moved code on it): syntax colors, no line background.
+#[derive(Clone, Copy, PartialEq, Debug)]
 enum Look {
     Classic,
     CleanPaired,
     CleanWhole,
+    Quiet,
+    Moved,
 }
 
 /// Clean style colors of a changed line: (text/number color, token background); None for other kinds.
@@ -557,12 +651,18 @@ fn clean_tone(kind: LineKind) -> Option<(gpui::Rgba, gpui::Rgba)> {
 
 /// One line as a single text run: right-aligned line numbers (`nums`: number, width), marker, text; gutter
 /// color, syntax colors and word highlights as highlight ranges. One shaped line per row keeps scrolling cheap.
-fn line_text(l: &DLine, nums: &[(Option<u32>, usize)], look: Look) -> gpui::Div {
+/// `clean`: the Clean split style (no +/- markers).
+fn line_text(l: &DLine, nums: &[(Option<u32>, usize)], look: Look, clean: bool) -> gpui::Div {
     use std::fmt::Write;
     let t = theme::get();
     let (_, mut fg, word_bg, marker) = line_colors(l.kind);
-    let tone = clean_tone(l.kind).filter(|_| look != Look::Classic);
-    let marker = if tone.is_some() { ' ' } else { marker };
+    let tone = clean_tone(l.kind);
+    let (marker, gutter_color) = match look {
+        Look::Classic => (marker, t.diff.gutter),
+        Look::CleanPaired | Look::CleanWhole => (' ', tone.map_or(t.diff.gutter, |(c, _)| c)),
+        Look::Quiet => (if clean || tone.is_none() { ' ' } else { '~' }, t.diff.gutter),
+        Look::Moved => (if clean { ' ' } else { marker }, t.diff.moved),
+    };
     let mut s = String::with_capacity(l.text.len() + 16);
     for &(n, w) in nums {
         match n {
@@ -574,24 +674,25 @@ fn line_text(l: &DLine, nums: &[(Option<u32>, usize)], look: Look) -> gpui::Div 
     write!(s, " {marker} ").unwrap();
     let start = s.len();
     s.push_str(&l.text);
-    let gutter_color = tone.map_or(t.diff.gutter, |(c, _)| c);
     let mut hl = vec![(0..gutter, HighlightStyle { color: Some(gutter_color.into()), ..Default::default() })];
     let range = |r: &git::layout::Run| start + r.range.start as usize..start + r.range.end as usize;
+    let syntax = |r: &git::layout::Run| r.class.and_then(|c| t.syntax.color(c)).map(Into::into);
+    let moved_bg = |r: &git::layout::Run| r.moved.then(|| t.diff.moved_bg.into());
     match (look, tone) {
         // Whole added/removed line: all of it in the tone, nothing else.
         (Look::CleanWhole, Some((c, _))) => fg = c,
-        (Look::CleanPaired, Some((c, bg))) => {
+        // Code colors; changed tokens in the tone (bold, faint background), moved ones on the moved background.
+        (Look::CleanPaired | Look::Quiet | Look::Moved, _) => {
             fg = t.diff.context;
             hl.extend(l.runs.iter().map(|r| {
-                let style = if r.word {
-                    HighlightStyle {
+                let style = match tone {
+                    Some((c, bg)) if r.word => HighlightStyle {
                         color: Some(c.into()),
                         background_color: Some(bg.into()),
                         font_weight: Some(gpui::FontWeight::BOLD),
                         ..Default::default()
-                    }
-                } else {
-                    HighlightStyle { color: r.class.and_then(|c| t.syntax.color(c)).map(Into::into), ..Default::default() }
+                    },
+                    _ => HighlightStyle { color: syntax(r), background_color: moved_bg(r), ..Default::default() },
                 };
                 (range(r), style)
             }));
@@ -599,8 +700,8 @@ fn line_text(l: &DLine, nums: &[(Option<u32>, usize)], look: Look) -> gpui::Div 
         // Classic (and context lines): syntax sets the text color; the word-diff background sits on top.
         _ => hl.extend(l.runs.iter().map(|r| {
             let style = HighlightStyle {
-                color: r.class.and_then(|c| t.syntax.color(c)).map(Into::into),
-                background_color: word_bg.filter(|_| r.word).map(Into::into),
+                color: syntax(r),
+                background_color: word_bg.filter(|_| r.word).map(Into::into).or_else(|| moved_bg(r)),
                 ..Default::default()
             };
             (range(r), style)
@@ -615,30 +716,82 @@ fn line_text(l: &DLine, nums: &[(Option<u32>, usize)], look: Look) -> gpui::Div 
         .child(StyledText::new(s).with_highlights(hl))
 }
 
-fn unified_row(l: &DLine, g: Geom) -> gpui::Div {
+/// "moved to L12" (old side) / "moved from L40" (new side) at the end of a moved block's first line.
+fn moved_hint(l: &DLine) -> Option<gpui::Div> {
+    let n = l.moved?;
+    let what = if l.kind == LineKind::Del { "moved to" } else { "moved from" };
+    Some(
+        div()
+            .flex_none()
+            .pl(px(space::SM))
+            .text_size(px(text_size::XS))
+            .text_color(theme::get().diff.moved)
+            .child(format!("{what} L{n}")),
+    )
+}
+
+/// A structural layout's look for one line (per side: alignment by matched nodes can put a changed line next to
+/// a reformatted one).
+fn structural_look(l: &DLine, clean: bool) -> Look {
+    if !matches!(l.kind, LineKind::Del | LineKind::Add) {
+        return if clean { Look::CleanWhole } else { Look::Classic };
+    }
+    if l.same {
+        Look::Quiet
+    } else if l.words.is_empty() {
+        Look::Moved
+    } else if !clean {
+        Look::Classic
+    } else if whole(l) {
+        Look::CleanWhole
+    } else {
+        Look::CleanPaired
+    }
+}
+
+/// All of the line's non-blank text is changed (a new or deleted line): drawn as a whole line, not token-wise.
+fn whole(l: &DLine) -> bool {
+    let changed: usize =
+        l.words.iter().map(|r| l.text[r.start as usize..r.end as usize].chars().filter(|c| !c.is_whitespace()).count()).sum();
+    changed >= l.text.chars().filter(|c| !c.is_whitespace()).count()
+}
+
+fn unified_row(l: &DLine, g: Geom, structural: bool) -> gpui::Div {
+    let look = if structural { structural_look(l, false) } else { Look::Classic };
     let (bg, ..) = line_colors(l.kind);
     div()
         .flex()
         .w_full()
         .h(g.lh)
         .pr(px(14.))
-        .when_some(bg, |r, bg| r.bg(bg))
-        .child(line_text(l, &[(l.old, g.old), (l.new, g.new)], Look::Classic))
+        .when_some(bg.filter(|_| look == Look::Classic), |r, bg| r.bg(bg))
+        .child(line_text(l, &[(l.old, g.old), (l.new, g.new)], look, false))
+        .children(moved_hint(l))
 }
 
-fn split_half(l: Option<&DLine>, old_side: bool, g: Geom, look: Look) -> gpui::Div {
+fn split_half(l: Option<&DLine>, old_side: bool, g: Geom, look: Look, clean: bool) -> gpui::Div {
     let half = div().flex().flex_1().flex_basis(px(0.)).min_w_0().h_full().overflow_hidden();
     let Some(l) = l else {
-        return half.when(look == Look::Classic, |h| h.bg(theme::get().diff.filler));
+        return half.when(!clean, |h| h.bg(theme::get().diff.filler));
     };
     let num = if old_side { (l.old, g.old) } else { (l.new, g.new) };
-    if look == Look::Classic {
+    if !clean {
         let (bg, ..) = line_colors(l.kind);
-        return half.when_some(bg, |h, bg| h.bg(bg)).child(line_text(l, &[num], look));
+        return half
+            .when_some(bg.filter(|_| look == Look::Classic), |h, bg| h.bg(bg))
+            .child(line_text(l, &[num], look, false))
+            .children(moved_hint(l));
     }
-    // Clean: a thin bar by the number marks a whole added/removed line (same width everywhere, so text aligns).
-    let bar = clean_tone(l.kind).filter(|_| look == Look::CleanWhole).map(|(c, _)| c);
-    half.child(div().flex_none().w(px(2.)).h_full().when_some(bar, |b, c| b.bg(c))).child(line_text(l, &[num], look))
+    // Clean: a thin bar by the number marks a whole added/removed line, or moved code (same width everywhere, so
+    // text aligns).
+    let bar = match look {
+        Look::CleanWhole => clean_tone(l.kind).map(|(c, _)| c),
+        Look::Moved => Some(theme::get().diff.moved),
+        _ => None,
+    };
+    half.child(div().flex_none().w(px(2.)).h_full().when_some(bar, |b, c| b.bg(c)))
+        .child(line_text(l, &[num], look, true))
+        .children(moved_hint(l))
 }
 
 /// Clean style of a split row: a removed/added pair with changed tokens to show is drawn token-wise; anything else
@@ -657,23 +810,27 @@ fn clean_look(left: Option<&DLine>, right: Option<&DLine>) -> Look {
 fn split_row(l: &Layout, r: SplitRow, g: Geom, style: SplitStyle) -> gpui::Div {
     match r {
         SplitRow::Full(i) => {
-            div().flex().w_full().h(g.lh).child(line_text(&l.lines[i as usize], &[(None, g.old)], Look::Classic))
+            div().flex().w_full().h(g.lh).child(line_text(&l.lines[i as usize], &[(None, g.old)], Look::Classic, false))
         }
         SplitRow::Pair(a, b) => {
             let get = |i: Option<u32>| i.map(|i| &l.lines[i as usize]);
             let (left, right) = (get(a), get(b));
-            let look = match style {
-                SplitStyle::Classic => Look::Classic,
-                SplitStyle::Clean => clean_look(left, right),
+            let clean = style == SplitStyle::Clean;
+            let (ll, rl) = if l.engine == Engine::Structural {
+                let look = |x: Option<&DLine>| x.map_or(Look::CleanWhole, |x| structural_look(x, clean));
+                (look(left), look(right))
+            } else {
+                let look = if clean { clean_look(left, right) } else { Look::Classic };
+                (look, look)
             };
             div()
                 .flex()
                 .w_full()
                 .h(g.lh)
                 .pr(px(14.))
-                .child(split_half(left, true, g, look))
+                .child(split_half(left, true, g, ll, clean))
                 .child(div().flex_none().w(px(1.)).h_full().bg(theme::get().border.subtle))
-                .child(split_half(right, false, g, look))
+                .child(split_half(right, false, g, rl, clean))
         }
     }
 }
@@ -697,14 +854,23 @@ impl Render for DiffView {
                 _ if f.kind == '?' => "untracked",
                 _ => "unstaged",
             }))
-            .child(div().ml_auto().flex().gap(px(space::SM)).when(self.split(), |d| d.child(self.style_switch())).child(self.mode_switch()))
+            .child(
+                div()
+                    .ml_auto()
+                    .flex()
+                    .gap(px(space::SM))
+                    .child(self.engine_switch())
+                    .when(self.split(), |d| d.child(self.style_switch()))
+                    .child(self.mode_switch()),
+            )
             .child(div().flex_none().text_size(px(text_size::XS)).text_color(t.text.dim).child("Esc to close"));
-        let body = match (&self.layout, self.failed) {
+        let body = match (self.shown(), self.failed) {
             (_, true) => ui::note("Couldn't read the diff").text_color(t.state.error).into_any_element(),
             (None, _) => ui::note("Loading…").into_any_element(),
             (Some(l), _) if l.lines.is_empty() => ui::note("No textual changes (mode change or binary)").into_any_element(),
             (Some(l), _) => {
                 let (l, split, style) = (l.clone(), self.split(), self.split_style);
+                let structural = l.engine == Engine::Structural;
                 let g = Geom { lh: self.line_height, old: digits(l.max_old), new: digits(l.max_new) };
                 let rows = if split { l.split.len() } else { l.lines.len() };
                 let count = rows + l.truncated as usize;
@@ -718,7 +884,7 @@ impl Render for DiffView {
                                     .text_color(theme::get().state.needs_you)
                                     .child("… diff truncated (too large to show)");
                             }
-                            if split { split_row(&l, l.split[ix], g, style) } else { unified_row(&l.lines[ix], g) }
+                            if split { split_row(&l, l.split[ix], g, style) } else { unified_row(&l.lines[ix], g, structural) }
                         })
                         .collect::<Vec<_>>()
                 })
@@ -771,6 +937,9 @@ mod tests {
             new: None,
             text: "x".into(),
             words,
+            moves: Vec::new(),
+            moved: None,
+            same: false,
             runs: Vec::new(),
         };
         let (del, add) = (line(LineKind::Del, vec![]), line(LineKind::Add, std::iter::once(0..1).collect()));

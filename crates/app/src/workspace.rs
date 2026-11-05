@@ -13,6 +13,7 @@ use gpui::{
 use session::{Session, Size};
 
 use crate::agent::{self, Hub};
+use crate::diff_syntax::{self, syntax_off};
 use crate::file_tree::{self, Marks, Row};
 use crate::files_panel::{Content, FileView, FilesPanel, TreeData};
 use crate::git_panel::{self, DiffView, GitPanel, PanelView, Repos};
@@ -142,12 +143,15 @@ pub struct Workspace {
     overlay_cancel: Arc<AtomicUsize>,
     /// Highlighted files by content hash (with their parse trees), shared by diff and preview loads.
     syntax_cache: Arc<syntax::Cache>,
+    /// Structural diffs by both versions' content hashes.
+    structural_cache: Arc<syntax::StructuralCache>,
     files_panel: Entity<FilesPanel>,
     panel_tab: PanelTab,
     show_ignored: bool,
     /// Unified or split diffs (saved); split falls back to unified while the main area is narrow.
     diff_mode: persist::DiffMode,
     split_style: persist::SplitStyle,
+    diff_engine: persist::DiffEngine,
     /// Directory listings shown by any spawned tab's tree.
     tree_cache: file_tree::Cache,
     /// Listing requests in flight: directory → request id (only the newest applies).
@@ -236,11 +240,13 @@ impl Workspace {
             overlay_seen: 0,
             overlay_cancel: Default::default(),
             syntax_cache: Default::default(),
+            structural_cache: Default::default(),
             files_panel,
             panel_tab: saved.git_panel.tab,
             show_ignored: saved.git_panel.show_ignored,
             diff_mode: saved.diff_mode,
             split_style: saved.split_style,
+            diff_engine: saved.diff_engine,
             tree_cache: Default::default(),
             tree_pending: HashMap::new(),
             tree_req: 0,
@@ -362,6 +368,18 @@ impl Workspace {
                             .unwrap_or(false);
                         if colored {
                             eprintln!("[perf] diff colored {:.0} ms", started.elapsed().as_secs_f64() * 1e3);
+                            break;
+                        }
+                        timer(5).await;
+                    }
+                    while started.elapsed() < Duration::from_secs(5) {
+                        let done = this
+                            .update(cx, |w, cx| {
+                                matches!(&w.overlay, Some(Overlay::Diff(d)) if d.read(cx).structure_settled())
+                            })
+                            .unwrap_or(false);
+                        if done {
+                            eprintln!("[perf] diff structural settled {:.0} ms", started.elapsed().as_secs_f64() * 1e3);
                             break;
                         }
                         timer(5).await;
@@ -947,6 +965,7 @@ impl Workspace {
             },
             diff_mode: self.diff_mode,
             split_style: self.split_style,
+            diff_engine: self.diff_engine,
             ..Saved::default()
         }
     }
@@ -1222,7 +1241,7 @@ impl Workspace {
         }
         let ws = cx.entity().downgrade();
         let lh = self.metrics.line_height;
-        let mode = (self.diff_mode, self.split_style, self.diff_narrow(window));
+        let mode = (self.diff_mode, self.split_style, self.diff_engine, self.diff_narrow(window));
         let view = cx.new(|cx| DiffView::new(root, file, lh, mode, ws, cx));
         self.show_overlay(Overlay::Diff(view), window, cx);
     }
@@ -1258,12 +1277,21 @@ impl Workspace {
         }
     }
 
-    /// Hands the mode, the split style and the (settled) main-area width to the open diff; it re-renders only if either changed.
+    pub fn set_diff_engine(&mut self, engine: persist::DiffEngine, cx: &mut Context<Self>) {
+        if engine != self.diff_engine {
+            self.diff_engine = engine;
+            self.mark_dirty(cx);
+            self.sync_diff_mode(cx);
+        }
+    }
+
+    /// Hands the mode, split style, engine and the (settled) main-area width to the open diff; it re-renders only if
+    /// one of them changed.
     fn sync_diff_mode(&self, cx: &mut Context<Self>) {
         if let Some(Overlay::Diff(v)) = &self.overlay {
             let narrow = self.applied.cols < git_panel::MIN_SPLIT_COLS;
-            let (mode, style) = (self.diff_mode, self.split_style);
-            v.update(cx, |v, cx| v.set_mode(mode, style, narrow, cx));
+            let (mode, style, engine) = (self.diff_mode, self.split_style, self.diff_engine);
+            v.update(cx, |v, cx| v.set_mode(mode, style, engine, narrow, cx));
         }
     }
 
@@ -1350,9 +1378,9 @@ impl Workspace {
         match self.overlay.clone() {
             None => {}
             Some(Overlay::Diff(view)) => {
-                let (root, old, prev) = {
+                let (root, old, prev, settled) = {
                     let v = view.read(cx);
-                    (v.root.clone(), v.file.clone(), v.layout())
+                    (v.root.clone(), v.file.clone(), v.layout(), v.structure_settled())
                 };
                 let Some(repo) = self.repos.repo(&root).cloned() else { return };
                 let file = self
@@ -1363,6 +1391,8 @@ impl Workspace {
                 let read_file = file.clone();
                 let syn_file = file.clone();
                 let syn_repo = repo.clone();
+                let structural_cache = self.structural_cache.clone();
+                let cancel2 = cancel.clone();
                 self._overlay_task = Some(cx.spawn(async move |_, cx| {
                     let started = Instant::now();
                     let lines = cx
@@ -1379,7 +1409,6 @@ impl Workspace {
                             Some((layout, Some(t.elapsed())))
                         })
                         .await;
-                    let plain = lines.as_ref().filter(|(l, _)| !l.colored).map(|(l, _)| l.clone());
                     if current2.load(Ordering::Relaxed) != generation {
                         return; // a newer read or a close happened meanwhile
                     }
@@ -1393,23 +1422,57 @@ impl Workspace {
                         Some((_, None)) => "diff read: unchanged, layout reused".into(),
                         None => "diff read failed".into(),
                     });
-                    view.update(cx, |v, cx| v.set_layout(lines.map(|(l, _)| l), file.clone(), cx));
+                    let reused = matches!(lines, Some((_, None)));
+                    let base = lines.as_ref().map(|(l, _)| l.clone());
+                    view.update(cx, |v, cx| v.set_layout(base.clone(), file.clone(), cx));
+                    let Some(base) = base.filter(|_| !syntax_off()) else { return };
+                    if reused && settled && base.colored {
+                        return; // colors and the structural diff of this exact diff are shown already
+                    }
                     // Second pass: syntax colors (both sides parsed as whole files), then one more publish.
-                    let Some(plain) = plain.filter(|_| !syntax_off()) else { return };
                     let started = Instant::now();
-                    let colored = cx
+                    let (base, colored, sides) = cx
                         .background_executor()
-                        .spawn(async move { color_diff(&plain, &syn_repo, &syn_file, &cache, &cancel).map(Arc::new) })
+                        .spawn(async move {
+                            match diff_syntax::color_diff(&base, &syn_repo, &syn_file, &cache, &cancel) {
+                                Some((colored, sides)) => {
+                                    let colored = colored.filter(|_| !base.colored).map(Arc::new);
+                                    (base, colored, Some(sides))
+                                }
+                                None => (base, None, None),
+                            }
+                        })
                         .await;
                     if current2.load(Ordering::Relaxed) != generation {
                         return;
                     }
-                    crate::perf::event_with(|| {
-                        format!("diff syntax: {} in {:.1} ms", if colored.is_some() { "colored" } else { "plain" }, started.elapsed().as_secs_f64() * 1e3)
-                    });
-                    if let Some(colored) = colored {
-                        view.update(cx, |v, cx| v.set_layout(Some(colored), file, cx));
+                    if let Some(colored) = &colored {
+                        crate::perf::event_with(|| format!("diff syntax: colored in {:.1} ms", started.elapsed().as_secs_f64() * 1e3));
+                        view.update(cx, |v, cx| v.set_layout(Some(colored.clone()), file.clone(), cx));
                     }
+                    // Third pass: the structural diff from the same trees.
+                    let base = colored.unwrap_or(base);
+                    let started = Instant::now();
+                    let structural = cx
+                        .background_executor()
+                        .spawn(async move {
+                            let sides = sides.ok_or(syntax::structural::Fail::Unsupported)?;
+                            diff_syntax::structure(&base, &sides, &structural_cache, &cancel2).map(Arc::new)
+                        })
+                        .await;
+                    if current2.load(Ordering::Relaxed) != generation
+                        || structural.as_ref().err() == Some(&syntax::structural::Fail::Cancelled)
+                    {
+                        return;
+                    }
+                    crate::perf::event_with(|| {
+                        let what = match &structural {
+                            Ok(_) => "ok".to_string(),
+                            Err(e) => format!("{e:?}"),
+                        };
+                        format!("diff structural: {what} in {:.1} ms", started.elapsed().as_secs_f64() * 1e3)
+                    });
+                    view.update(cx, |v, cx| v.set_structural(structural, cx));
                 }));
             }
             Some(Overlay::File(view)) => {
@@ -1804,97 +1867,10 @@ fn sh_word(s: &str) -> String {
     }
 }
 
-/// `AGENT_IDE_SYNTAX=off`: no syntax highlighting (escape hatch, and the plain baseline for perf runs).
-fn syntax_off() -> bool {
-    static OFF: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *OFF.get_or_init(|| std::env::var("AGENT_IDE_SYNTAX").is_ok_and(|v| v == "off"))
-}
-
-/// The diff's syntax colors: the old side from HEAD, the new side from the working tree, each highlighted as a
-/// whole file (cached by content). None when the language is unknown or neither side could be highlighted.
-fn color_diff(
-    plain: &git::layout::Layout,
-    repo: &git::Repo,
-    file: &git::FileChange,
-    cache: &syntax::Cache,
-    cancel: &AtomicUsize,
-) -> Option<git::layout::Layout> {
-    let lang = syntax::detect(Path::new(&file.path))?;
-    let old_text = (file.kind != '?')
-        .then(|| git::head_text(repo, file.orig.as_deref().unwrap_or(&file.path), syntax::MAX_BYTES))
-        .flatten();
-    let new_text = match git::text::read_file(&repo.root.join(&file.path)) {
-        Ok(git::text::FileText::Lines { raw, .. }) => Some(raw),
-        _ => None,
-    };
-    // Both sides in parallel: a big file's two parses take about as long as one.
-    let (old, new) = std::thread::scope(|s| {
-        let old = s.spawn(|| old_text.as_deref().and_then(|t| cache.get(lang, t, cancel).ok()));
-        let new = new_text.as_deref().and_then(|t| cache.get(lang, t, cancel).ok());
-        (old.join().ok().flatten(), new)
-    });
-    if old.is_none() && new.is_none() {
-        return None;
-    }
-    let old_side = old.as_ref().zip(old_text.as_deref()).map(|(h, t)| git::layout::Side::new(t, &h.lines));
-    let new_side = new.as_ref().zip(new_text.as_deref()).map(|(h, t)| git::layout::Side::new(t, &h.lines));
-    Some(plain.with_syntax(old_side.as_ref(), new_side.as_ref()))
-}
-
 #[cfg(test)]
 mod tests {
     use super::{fmt_remaining, group_order, sh_word};
     use std::path::PathBuf;
-
-    /// Staged + unstaged edits: every colored row comes from the right side (HEAD for removed lines, the working
-    /// tree for added/context lines), so its text is exactly that file line.
-    #[test]
-    fn diff_colors_come_from_head_and_worktree() {
-        use std::process::Command;
-        let d = std::env::temp_dir().join(format!("agent-ide-color-diff-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&d);
-        std::fs::create_dir_all(&d).unwrap();
-        let git = |args: &[&str]| {
-            let ok = Command::new("git")
-                .args(["-c", "user.name=t", "-c", "user.email=t@t", "-c", "commit.gpgsign=false"])
-                .args(args)
-                .current_dir(&d)
-                .status()
-                .unwrap()
-                .success();
-            assert!(ok, "{args:?}");
-        };
-        git(&["init", "-q", "-b", "main"]);
-        let head = "fn one() {\n    let a = \"x\";\n}\n\nfn two() {\n\tlet b = 2;\n}\n";
-        std::fs::write(d.join("m.rs"), head).unwrap();
-        git(&["add", "."]);
-        git(&["commit", "-q", "-m", "init"]);
-        std::fs::write(d.join("m.rs"), head.replace("\"x\"", "\"staged\"")).unwrap();
-        git(&["add", "."]);
-        let work = head.replace("\"x\"", "\"staged\"").replace("let b = 2;", "let b = 3; // unstaged");
-        std::fs::write(d.join("m.rs"), &work).unwrap();
-
-        let git::Discovery::Repo(repo) = git::discover(&d) else { panic!("repo") };
-        let file = git::status(&repo).unwrap().files.into_iter().find(|f| f.path == "m.rs").unwrap();
-        let diff = git::diff(&repo, &file, || false).unwrap();
-        let plain = git::layout::layout(&diff);
-        let colored = super::color_diff(&plain, &repo, &file, &syntax::Cache::default(), &Default::default()).unwrap();
-        let shown = |t: &str, n: Option<u32>| git::text::display_line(t.lines().nth(n.unwrap() as usize - 1).unwrap(), 0);
-        let mut checked = 0;
-        for l in colored.lines.iter().filter(|l| l.runs.iter().any(|r| r.class.is_some())) {
-            let expect = match l.kind {
-                git::LineKind::Del => shown(head, l.old),
-                _ => shown(&work, l.new),
-            };
-            assert_eq!(*l.text, expect, "{:?} row matches its side", l.kind);
-            checked += 1;
-        }
-        assert!(checked >= 4, "colored rows: {checked}");
-        let add = colored.lines.iter().find(|l| l.kind == git::LineKind::Add && l.text.contains("unstaged")).unwrap();
-        let comment = syntax::Class::Comment as u8;
-        assert!(add.runs.iter().any(|r| r.class == Some(comment)), "{:?}", add.runs);
-        let _ = std::fs::remove_dir_all(&d);
-    }
 
     #[test]
     fn grouping_and_order() {

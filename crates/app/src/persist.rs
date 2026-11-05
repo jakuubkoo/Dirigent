@@ -24,6 +24,8 @@ pub struct State {
     pub diff_mode: DiffMode,
     #[serde(default)]
     pub split_style: SplitStyle,
+    #[serde(default)]
+    pub diff_engine: DiffEngine,
 }
 
 impl Default for State {
@@ -39,6 +41,7 @@ impl Default for State {
             collapsed_groups: Vec::new(),
             diff_mode: DiffMode::Unified,
             split_style: SplitStyle::Clean,
+            diff_engine: DiffEngine::Auto,
         }
     }
 }
@@ -98,6 +101,16 @@ pub enum SplitStyle {
     Classic,
     #[default]
     Clean,
+}
+
+/// What finds the changes in a diff: Auto = the structural (syntax tree) diff when the file allows it, else the
+/// word diff; Word = always the word diff.
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum DiffEngine {
+    #[default]
+    Auto,
+    Word,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -219,6 +232,7 @@ mod tests {
             git_panel: PanelState { width: 400., open: false, tab: PanelTab::Files, show_ignored: false },
             diff_mode: DiffMode::Split,
             split_style: SplitStyle::Classic,
+            diff_engine: DiffEngine::Word,
             ..State::default()
         }
     }
@@ -239,6 +253,7 @@ mod tests {
         assert!(old.tabs[0].expanded.is_empty());
         assert_eq!(old.diff_mode, DiffMode::Unified);
         assert_eq!(old.split_style, SplitStyle::Clean, "Clean is the default split style");
+        assert_eq!(old.diff_engine, DiffEngine::Auto, "structural when possible by default");
         // A git panel saved before the file tree existed keeps its width/open.
         std::fs::write(&p, r#"{"version":1,"tabs":[],"active":0,"sidebar":{"width":200,"open":false},"window":null,
             "last_dir":null,"git_panel":{"width":280,"open":false}}"#).unwrap();

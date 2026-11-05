@@ -343,7 +343,8 @@ pub fn diff(repo: &Repo, file: &FileChange, cancelled: impl Fn() -> bool) -> Opt
     Some(d)
 }
 
-fn parse_diff(raw: &[u8]) -> Diff {
+/// Parses `git diff` output (also used by tests that diff two commits).
+pub fn parse_diff(raw: &[u8]) -> Diff {
     let text = String::from_utf8_lossy(raw);
     let mut d = Diff::default();
     let mut in_hunk = false;

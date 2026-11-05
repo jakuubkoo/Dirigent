@@ -14,6 +14,8 @@ use std::time::{Duration, Instant};
 use tree_sitter::{Language, ParseOptions, ParseState, Parser, Tree};
 use tree_sitter_highlight::{HighlightConfiguration, HighlightEvent, Highlighter};
 
+pub mod structural;
+
 /// Bigger files stay plain.
 pub const MAX_BYTES: usize = 4 << 20;
 pub const MAX_LINES: usize = 100_000;
@@ -443,17 +445,50 @@ fn push_span(lines: &mut [LineSpans], starts: &[usize], text: &str, range: Range
 /// Recently highlighted files by (language, content hash). Holds the trees too. Use from background tasks.
 type Key = (Lang, u64);
 
-#[derive(Default)]
-struct Lru {
-    /// None: highlighting gave up (too big/slow/failed), so the next load doesn't try again.
-    map: HashMap<Key, Option<Arc<Highlighted>>>,
-    /// Insertion order, oldest first.
-    order: VecDeque<Key>,
+fn text_hash(text: &str) -> u64 {
+    let mut h = DefaultHasher::new();
+    text.hash(&mut h);
+    h.finish()
 }
 
-#[derive(Default)]
+/// A small LRU map (insertion order; a hit doesn't refresh).
+struct Lru<K, V> {
+    map: HashMap<K, V>,
+    /// Insertion order, oldest first.
+    order: VecDeque<K>,
+    cap: usize,
+}
+
+impl<K: Copy + Eq + std::hash::Hash, V: Clone> Lru<K, V> {
+    fn new(cap: usize) -> Self {
+        Self { map: HashMap::new(), order: VecDeque::new(), cap }
+    }
+
+    fn get(&self, k: &K) -> Option<V> {
+        self.map.get(k).cloned()
+    }
+
+    fn insert(&mut self, k: K, v: V) {
+        if self.map.insert(k, v).is_none() {
+            self.order.push_back(k);
+            while self.order.len() > self.cap {
+                if let Some(old) = self.order.pop_front() {
+                    self.map.remove(&old);
+                }
+            }
+        }
+    }
+}
+
 pub struct Cache {
-    inner: Mutex<Lru>,
+    /// None: highlighting gave up (too big/slow/failed), so the next load doesn't try again.
+    inner: Mutex<Lru<Key, Option<Arc<Highlighted>>>>,
+}
+
+impl Default for Cache {
+    fn default() -> Self {
+        Self { inner: Mutex::new(Lru::new(CACHE_ENTRIES)) }
+    }
 }
 
 const CACHE_ENTRIES: usize = 32;
@@ -461,26 +496,51 @@ const CACHE_ENTRIES: usize = 32;
 impl Cache {
     /// The cached result, or a fresh highlight (cached, failures too, unless cancelled). Err = show plain text.
     pub fn get(&self, lang: Lang, text: &str, cancel: &AtomicUsize) -> Result<Arc<Highlighted>, Plain> {
-        let key = (lang, {
-            let mut h = DefaultHasher::new();
-            text.hash(&mut h);
-            h.finish()
-        });
-        if let Some(hit) = self.inner.lock().unwrap().map.get(&key) {
-            return hit.clone().ok_or(Plain::Failed);
+        let key = (lang, text_hash(text));
+        if let Some(hit) = self.inner.lock().unwrap().get(&key) {
+            return hit.ok_or(Plain::Failed);
         }
         let result = match highlight(lang, text, cancel) {
             Err(Plain::Cancelled) => return Err(Plain::Cancelled),
             r => r.map(Arc::new),
         };
-        let mut lru = self.inner.lock().unwrap();
-        if lru.map.insert(key, result.as_ref().ok().cloned()).is_none() {
-            lru.order.push_back(key);
-            while lru.order.len() > CACHE_ENTRIES {
-                if let Some(old) = lru.order.pop_front() {
-                    lru.map.remove(&old);
-                }
-            }
+        self.inner.lock().unwrap().insert(key, result.as_ref().ok().cloned());
+        result
+    }
+}
+
+type StructuralResult = Result<Arc<structural::Structural>, structural::Fail>;
+
+/// Recent structural diffs by (language, old content hash, new content hash), failures included (not cancels).
+pub struct StructuralCache {
+    inner: Mutex<Lru<(Lang, u64, u64), StructuralResult>>,
+}
+
+impl Default for StructuralCache {
+    fn default() -> Self {
+        Self { inner: Mutex::new(Lru::new(16)) }
+    }
+}
+
+impl StructuralCache {
+    /// `old`/`new`: the texts with their highlights (trees) and the line diff's changed lines.
+    pub fn get(
+        &self,
+        lang: Lang,
+        old: structural::Side,
+        new: structural::Side,
+        cancel: &AtomicUsize,
+    ) -> Result<Arc<structural::Structural>, structural::Fail> {
+        if matches!(lang, Lang::Markdown | Lang::MarkdownInline) {
+            return Err(structural::Fail::Unsupported);
+        }
+        let key = (lang, text_hash(old.text), text_hash(new.text));
+        if let Some(hit) = self.inner.lock().unwrap().get(&key) {
+            return hit;
+        }
+        let result = structural::diff(old, new, cancel, structural::BUDGET).map(Arc::new);
+        if result != Err(structural::Fail::Cancelled) {
+            self.inner.lock().unwrap().insert(key, result.clone());
         }
         result
     }

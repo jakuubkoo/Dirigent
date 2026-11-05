@@ -1,6 +1,7 @@
 mod agent;
 mod assets;
 mod blur;
+mod diff_syntax;
 mod file_tree;
 mod files_panel;
 mod git_panel;

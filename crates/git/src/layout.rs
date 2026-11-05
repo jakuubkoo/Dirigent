@@ -29,8 +29,15 @@ pub struct DLine {
     pub new: Option<u32>,
     /// Without the +/-/space marker. Hunk rows: only git's section context (`⋯ fn main()`).
     pub text: Arc<str>,
-    /// Changed byte ranges of `text` (on token boundaries); empty = plain line highlight.
+    /// Changed byte ranges of `text` (on token boundaries); empty = plain line highlight (word engine) or nothing
+    /// changed (structural: see `same`).
     pub words: Vec<Range<u32>>,
+    /// Structural: byte ranges of `text` belonging to a moved block.
+    pub moves: Vec<Range<u32>>,
+    /// Structural: first line of a moved block; the block's first line number (1-based) on the other side.
+    pub moved: Option<u32>,
+    /// Structural: a removed/added line with nothing changed or moved on it (reformatting).
+    pub same: bool,
     /// What to draw: sorted, non-overlapping ranges with a syntax class and/or the word-diff mark. Text outside
     /// every run uses the line's default color.
     pub runs: Vec<Run>,
@@ -43,6 +50,16 @@ pub struct Run {
     pub class: Option<u8>,
     /// Part of a changed-word range.
     pub word: bool,
+    /// Part of a moved block (structural).
+    pub moved: bool,
+}
+
+/// What produced a layout's changed ranges and split pairing.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Engine {
+    #[default]
+    Word,
+    Structural,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -64,6 +81,7 @@ pub struct Layout {
     pub hash: u64,
     /// Syntax runs applied (see `with_syntax`).
     pub colored: bool,
+    pub engine: Engine,
 }
 
 /// One side of a diff for syntax coloring: the file's raw lines and their spans (raw-line byte ranges).
@@ -98,35 +116,126 @@ impl Layout {
             }
             let shown = crate::text::display_spans(raw, spans);
             let syntax: Vec<(Range<u32>, u8)> = shown.into_iter().map(|(r, c)| (r, c.into())).collect();
-            l.runs = merge_runs(&l.words, &syntax);
+            l.runs = merge_runs(&l.words, &l.moves, &syntax);
         }
         out
     }
+
+    /// Which lines of each file the diff marks as removed (old) / added (new); `old_len`/`new_len` = line counts.
+    pub fn changed_lines(&self, old_len: usize, new_len: usize) -> (Vec<bool>, Vec<bool>) {
+        let (mut a, mut b) = (vec![false; old_len], vec![false; new_len]);
+        for l in &self.lines {
+            match (l.kind, l.old, l.new) {
+                (LineKind::Del, Some(n), _) => a.get_mut(n as usize - 1).map(|v| *v = true),
+                (LineKind::Add, _, Some(n)) => b.get_mut(n as usize - 1).map(|v| *v = true),
+                _ => None,
+            };
+        }
+        (a, b)
+    }
+
+    /// A copy with the structural diff's changed/moved ranges and its split pairing (syntax runs kept). None when a
+    /// changed row isn't exactly its file line (the file changed since the diff was taken) or the diff was cut.
+    pub fn with_structure(&self, old: &StructSide, new: &StructSide) -> Option<Layout> {
+        if self.truncated {
+            return None;
+        }
+        let mut out = self.clone();
+        out.engine = Engine::Structural;
+        for l in &mut out.lines {
+            let (side, n) = match l.kind {
+                LineKind::Del => (old, l.old),
+                LineKind::Add => (new, l.new),
+                _ => continue,
+            };
+            let ix = n? as usize - 1;
+            let raw = side.lines.get(ix)?;
+            if crate::text::display_line(raw, 0) != *l.text {
+                return None;
+            }
+            let shown = crate::text::display_spans(raw, side.marks.get(ix).map_or(&[][..], Vec::as_slice));
+            l.words = shown.iter().filter(|(_, m)| !m).map(|(r, _)| r.clone()).collect();
+            l.moves = shown.iter().filter(|(_, m)| *m).map(|(r, _)| r.clone()).collect();
+            l.same = l.words.is_empty() && l.moves.is_empty();
+            let syntax: Vec<(Range<u32>, u8)> = l.runs.iter().filter_map(|r| r.class.map(|c| (r.range.clone(), c))).collect();
+            l.runs = merge_runs(&l.words, &l.moves, &syntax);
+        }
+        // Hints: on each moved block's first shown line (its first line can be context or share a line).
+        for (side, kind) in [(old, LineKind::Del), (new, LineKind::Add)] {
+            for &(first, other) in side.moved {
+                let line = |l: &DLine| if kind == LineKind::Del { l.old } else { l.new };
+                if let Some(l) = out
+                    .lines
+                    .iter_mut()
+                    .find(|l| l.kind == kind && !l.moves.is_empty() && line(l).is_some_and(|n| n > first))
+                {
+                    l.moved.get_or_insert(other + 1);
+                }
+            }
+        }
+        // Split: a removed line sits next to the added line holding most of its unchanged tokens (in order);
+        // moved lines get rows of their own.
+        let lines = &out.lines;
+        let partner = |d: usize| old.partner.get(lines[d].old? as usize - 1).copied().flatten();
+        let moved = |k: usize| !lines[k].moves.is_empty();
+        out.split = split_rows(lines, |dels, adds| {
+            let at: std::collections::HashMap<u32, usize> =
+                adds.iter().enumerate().filter_map(|(j, &k)| Some((lines[k].new? - 1, j))).collect();
+            let mut pairs = Vec::new();
+            for (i, &d) in dels.iter().enumerate() {
+                if let Some(&j) = partner(d).and_then(|p| at.get(&p))
+                    && pairs.last().is_none_or(|&(_, pj)| j > pj)
+                    && !moved(d)
+                    && !moved(adds[j])
+                {
+                    pairs.push((i, j));
+                }
+            }
+            pairs
+        }, moved);
+        Some(out)
+    }
 }
 
-/// Word ranges and syntax spans (each sorted, non-overlapping) → one run list.
-fn merge_runs(words: &[Range<u32>], syntax: &[(Range<u32>, u8)]) -> Vec<Run> {
-    let mut cuts: Vec<u32> = words.iter().chain(syntax.iter().map(|(r, _)| r)).flat_map(|r| [r.start, r.end]).collect();
+/// One side of a structural diff, for `Layout::with_structure` (the `syntax` crate's per-line output, as plain
+/// data): raw lines, per-line marks (raw byte range, moved), partner lines and moved blocks (0-based lines).
+pub struct StructSide<'a> {
+    pub lines: Vec<&'a str>,
+    pub marks: &'a [Vec<(Range<u32>, bool)>],
+    pub partner: &'a [Option<u32>],
+    pub moved: &'a [(u32, u32)],
+}
+
+/// Word ranges, moved ranges and syntax spans (each sorted, non-overlapping) → one run list.
+fn merge_runs(words: &[Range<u32>], moves: &[Range<u32>], syntax: &[(Range<u32>, u8)]) -> Vec<Run> {
+    let mut cuts: Vec<u32> =
+        words.iter().chain(moves).chain(syntax.iter().map(|(r, _)| r)).flat_map(|r| [r.start, r.end]).collect();
     cuts.sort_unstable();
     cuts.dedup();
     let mut out: Vec<Run> = Vec::new();
-    let (mut wi, mut si) = (0, 0);
+    let (mut wi, mut mi, mut si) = (0, 0, 0);
     for pair in cuts.windows(2) {
         let (a, b) = (pair[0], pair[1]);
         while wi < words.len() && words[wi].end <= a {
             wi += 1;
         }
+        while mi < moves.len() && moves[mi].end <= a {
+            mi += 1;
+        }
         while si < syntax.len() && syntax[si].0.end <= a {
             si += 1;
         }
         let word = words.get(wi).is_some_and(|w| w.start <= a);
+        let moved = moves.get(mi).is_some_and(|w| w.start <= a);
         let class = syntax.get(si).filter(|(r, _)| r.start <= a).map(|(_, c)| *c);
-        if !word && class.is_none() {
+        if !word && !moved && class.is_none() {
             continue;
         }
         match out.last_mut() {
-            Some(last) if last.range.end == a && last.class == class && last.word == word => last.range.end = b,
-            _ => out.push(Run { range: a..b, class, word }),
+            Some(last) if last.range.end == a && last.class == class && last.word == word && last.moved == moved => {
+                last.range.end = b
+            }
+            _ => out.push(Run { range: a..b, class, word, moved }),
         }
     }
     out
@@ -169,7 +278,13 @@ pub fn layout(diff: &Diff) -> Layout {
         };
         out.max_old = out.max_old.max(o.unwrap_or(0));
         out.max_new = out.max_new.max(n.unwrap_or(0));
-        out.lines.push(DLine { kind: l.kind, old: o, new: n, text: text.into(), words: Vec::new(), runs: Vec::new() });
+        out.lines.push(DLine { kind: l.kind, old: o, new: n, text: text.into(),
+            words: Vec::new(),
+            moves: Vec::new(),
+            moved: None,
+            same: false,
+            runs: Vec::new(),
+        });
     }
     pair_blocks(&mut out);
     out
@@ -364,11 +479,40 @@ fn to_bytes(toks: &[Range<usize>], s: &str, ranges: Vec<Range<usize>>) -> Vec<Ra
     out
 }
 
-/// Finds del/add blocks, pairs them, fills in word ranges, and builds the split rows.
+/// Finds del/add blocks, pairs them by similarity, fills in word ranges, and builds the split rows.
 fn pair_blocks(out: &mut Layout) {
-    let mut budget = MAX_PAIRS;
-    let mut split = Vec::with_capacity(out.lines.len());
-    let lines = &mut out.lines;
+    let lines = &out.lines;
+    let mut all = Vec::new();
+    out.split = split_rows(
+        lines,
+        |dels, adds| {
+            let sig = |ix: &[usize]| -> Vec<Option<Vec<u64>>> { ix.iter().map(|&k| signature(&lines[k].text)).collect() };
+            let pairs = align(&sig(dels), &sig(adds));
+            all.extend(pairs.iter().map(|&(d, a)| (dels[d], adds[a])));
+            pairs
+        },
+        |_| false,
+    );
+    for (dl, al) in all.into_iter().take(MAX_PAIRS) {
+        let lines = &mut out.lines;
+        if let Some((wd, wa)) = word_ranges(&lines[dl].text, &lines[al].text) {
+            lines[dl].runs = merge_runs(&wd, &[], &[]);
+            lines[al].runs = merge_runs(&wa, &[], &[]);
+            lines[dl].words = wd;
+            lines[al].words = wa;
+        }
+    }
+}
+
+/// Side-by-side rows. Each del/add block (dels, then adds) is paired by `pair` (indices into its dels/adds, in
+/// order); a pair shares a row, the unpaired lines between pairs are zipped, filler for the rest. Lines for which
+/// `alone` holds (moved ones) get a row of their own. "\ No newline" lines inside a block are shown after it.
+fn split_rows(
+    lines: &[DLine],
+    mut pair: impl FnMut(&[usize], &[usize]) -> Vec<(usize, usize)>,
+    alone: impl Fn(usize) -> bool,
+) -> Vec<SplitRow> {
+    let mut split = Vec::with_capacity(lines.len());
     let mut i = 0;
     while i < lines.len() {
         match lines[i].kind {
@@ -381,7 +525,6 @@ fn pair_blocks(out: &mut Layout) {
                 i += 1;
             }
             LineKind::Del | LineKind::Add => {
-                // A block: dels, then adds; "\ No newline" lines inside it are shown after it.
                 let (mut dels, mut adds, mut metas) = (Vec::new(), Vec::new(), Vec::new());
                 while i < lines.len() {
                     match lines[i].kind {
@@ -392,31 +535,22 @@ fn pair_blocks(out: &mut Layout) {
                     }
                     i += 1;
                 }
-                let sig = |ix: &[usize], lines: &[DLine]| -> Vec<Option<Vec<u64>>> {
-                    ix.iter().map(|&k| signature(&lines[k].text)).collect()
-                };
-                let pairs = align(&sig(&dels, lines), &sig(&adds, lines));
-                for &(d, a) in &pairs {
-                    if budget == 0 {
-                        break;
-                    }
-                    budget -= 1;
-                    let (dl, al) = (dels[d], adds[a]);
-                    if let Some((wd, wa)) = word_ranges(&lines[dl].text.clone(), &lines[al].text.clone()) {
-                        lines[dl].runs = merge_runs(&wd, &[]);
-                        lines[al].runs = merge_runs(&wa, &[]);
-                        lines[dl].words = wd;
-                        lines[al].words = wa;
-                    }
-                }
-                // Side by side: each pair on one row; the unpaired lines between pairs are zipped, filler for the rest.
+                let pairs = pair(&dels, &adds);
                 let (mut d0, mut a0) = (0, 0);
                 for (d, a) in pairs.iter().copied().chain(std::iter::once((dels.len(), adds.len()))) {
-                    let (gd, ga) = (d - d0, a - a0);
-                    for k in 0..gd.max(ga) {
-                        let l = (k < gd).then(|| dels[d0 + k] as u32);
-                        let r = (k < ga).then(|| adds[a0 + k] as u32);
-                        split.push(SplitRow::Pair(l, r));
+                    // Zip the gap, each side in its order; a line that must stay alone gets its own row.
+                    let (gd, ga) = (&dels[d0..d], &adds[a0..a]);
+                    let (mut i, mut j) = (0, 0);
+                    while i < gd.len() || j < ga.len() {
+                        let (l, r) = (gd.get(i).copied(), ga.get(j).copied());
+                        let row = match (l, r) {
+                            (Some(x), _) if alone(x) => (Some(x), None),
+                            (_, Some(y)) if alone(y) => (None, Some(y)),
+                            _ => (l, r),
+                        };
+                        i += row.0.is_some() as usize;
+                        j += row.1.is_some() as usize;
+                        split.push(SplitRow::Pair(row.0.map(|k| k as u32), row.1.map(|k| k as u32)));
                     }
                     if d < dels.len() {
                         split.push(SplitRow::Pair(Some(dels[d] as u32), Some(adds[a] as u32)));
@@ -427,7 +561,7 @@ fn pair_blocks(out: &mut Layout) {
             }
         }
     }
-    out.split = split;
+    split
 }
 
 #[cfg(test)]
@@ -638,14 +772,14 @@ mod tests {
 
     #[test]
     fn runs_merge_words_over_syntax() {
-        let r = |a: u32, b: u32, class: Option<u8>, word: bool| Run { range: a..b, class, word };
+        let r = |a: u32, b: u32, class: Option<u8>, word: bool| Run { range: a..b, class, word, moved: false };
         // syntax: 0..3 kw(1), 4..9 var(2); word: 4..6
         assert_eq!(
-            merge_runs(std::slice::from_ref(&(4..6)), &[(0..3, 1), (4..9, 2)]),
+            merge_runs(std::slice::from_ref(&(4..6)), &[], &[(0..3, 1), (4..9, 2)]),
             [r(0, 3, Some(1), false), r(4, 6, Some(2), true), r(6, 9, Some(2), false)]
         );
-        assert_eq!(merge_runs(std::slice::from_ref(&(2..5)), &[]), [r(2, 5, None, true)]);
-        assert_eq!(merge_runs(&[], &[(1..2, 3), (2..4, 3)]), [r(1, 4, Some(3), false)], "adjacent same class merge");
+        assert_eq!(merge_runs(std::slice::from_ref(&(2..5)), &[], &[]), [r(2, 5, None, true)]);
+        assert_eq!(merge_runs(&[], &[], &[(1..2, 3), (2..4, 3)]), [r(1, 4, Some(3), false)], "adjacent same class merge");
     }
 
     #[test]
@@ -659,10 +793,10 @@ mod tests {
         let colored = lay.with_syntax(Some(&Side::new(before, &os)), Some(&Side::new(after, &ns)));
         let del = colored.lines.iter().find(|l| l.kind == LineKind::Del).unwrap();
         // Raw "\tle" → display "    le": the tab span covers 4 spaces.
-        assert_eq!(del.runs[0], Run { range: 0..6, class: Some(7), word: false });
+        assert_eq!(del.runs[0], Run { range: 0..6, class: Some(7), word: false, moved: false });
         assert!(del.runs.iter().any(|r| r.word), "word highlight kept");
         let ctx = colored.lines.iter().find(|l| l.kind == LineKind::Context).unwrap();
-        assert_eq!(ctx.runs, [Run { range: 0..3, class: Some(7), word: false }]);
+        assert_eq!(ctx.runs, [Run { range: 0..3, class: Some(7), word: false, moved: false }]);
         // The new side changed since the diff: rows that no longer match stay plain.
         let edited = "\tlet b = 2;\nkeep();\nnew();\n";
         let es = spans(edited);

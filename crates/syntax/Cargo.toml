@@ -7,6 +7,7 @@ license.workspace = true
 [dependencies]
 tree-sitter = "0.27.1"
 tree-sitter-highlight = "0.27.1"
+imara-diff = "=0.2.0"
 tree-sitter-rust = "0.24.2"
 tree-sitter-php = "0.25.1"
 tree-sitter-typescript = "0.23.2"
