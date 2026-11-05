@@ -1,14 +1,14 @@
 use std::rc::Rc;
 
 use gpui::{
-    Context, FocusHandle, Focusable, KeyDownEvent, Pixels, ScrollEvent, Task, WeakEntity, Window, div, prelude::*, px,
+    Context, FocusHandle, Focusable, KeyDownEvent, Pixels, ScrollEvent, Task, WeakEntity, Window, div, prelude::*,
 };
 use session::{Session, Size};
 use session::alacritty_terminal::term::TermMode;
 use session::keys::{Mods, encode};
 
 use crate::terminal_element::{Metrics, TerminalElement};
-use crate::theme::{self, MONO_FONT, radius, space, text_size};
+use crate::theme::{z, self, MONO_FONT, radius, space, text_size};
 use crate::ui::{self, icon};
 use crate::workspace::Workspace;
 
@@ -35,6 +35,12 @@ pub enum Banner {
 }
 
 impl TerminalView {
+    /// Settings → Terminal font size: the next paint uses it (the workspace resizes the PTY after).
+    pub fn set_metrics(&mut self, metrics: Metrics, cx: &mut Context<Self>) {
+        self.metrics = metrics;
+        cx.notify();
+    }
+
     pub fn new(session: Session, metrics: Metrics, workspace: WeakEntity<Workspace>, cx: &mut Context<Self>) -> Self {
         let session = Rc::new(session);
         let rx = session.wakeups.clone();
@@ -179,7 +185,7 @@ impl Render for TerminalView {
             };
             div()
                 .flex()
-                .gap(px(space::MD))
+                .gap(z(space::MD))
                 .child(ui::icon(glyph, 14., t.accent))
                 .child(div().flex_none().child(label))
                 .children(cmd.map(|c| {
@@ -192,31 +198,31 @@ impl Render for TerminalView {
                 .overflow_hidden()
                 .h(self.metrics.line_height)
                 .line_height(self.metrics.line_height)
-                .px(px(space::LG))
+                .px(z(space::LG))
                 .bg(t.bg.elevated)
                 .border_b_1()
                 .border_color(t.border.subtle)
                 .text_color(t.text.primary)
-                .text_size(px(text_size::SM))
+                .text_size(z(text_size::SM))
         });
         let exited = self.session.is_exited().then(|| {
             let code = self.session.exit_code().map_or(String::new(), |c| format!(" (code {c})"));
             div()
                 .absolute()
-                .bottom(px(space::LG))
-                .left(px(space::LG))
-                .right(px(space::LG))
-                .px(px(space::LG))
-                .py(px(space::MD))
+                .bottom(z(space::LG))
+                .left(z(space::LG))
+                .right(z(space::LG))
+                .px(z(space::LG))
+                .py(z(space::MD))
                 .flex()
                 .items_center()
-                .gap(px(space::MD))
-                .rounded(px(radius::LG))
+                .gap(z(space::MD))
+                .rounded(z(radius::LG))
                 .bg(t.bg.elevated)
                 .border_1()
                 .border_color(t.border.strong)
                 .text_color(t.text.primary)
-                .text_size(px(text_size::SM))
+                .text_size(z(text_size::SM))
                 .child(ui::icon(icon::RESTART, 14., t.state.error))
                 .child(format!("Process exited{code}"))
                 .child(ui::hint("Enter to restart"))
@@ -235,8 +241,8 @@ impl Render for TerminalView {
                 div()
                     .flex_1()
                     .min_h_0()
-                    .pl(px(PADDING))
-                    .pt(px(PADDING))
+                    .pl(z(PADDING))
+                    .pt(z(PADDING))
                     .child(TerminalElement::new(self.session.clone(), self.metrics.clone())),
             )
             .children(exited)

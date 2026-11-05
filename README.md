@@ -20,6 +20,7 @@ stay at zero lag and 0 % CPU when idle. Linux (Wayland and X11) for now.
 - **Git:** changes and diffs (word-level, split, syntax-highlighted, structural with moved code), per-agent change
   tracking, staging per file or hunk, commits with an optional generated message.
 - **Files:** a file tree and a file preview.
+- **Settings:** a searchable page (Ctrl+,) over `settings.json`; hand edits of the file apply live.
 - **From the terminal:** `dirigent .` opens a session in the running app (single instance).
 
 ## Install
@@ -71,6 +72,8 @@ defaults, worktrees).
 
 | Keys | Action |
 |---|---|
+| Ctrl+, | Settings |
+| Ctrl+= or Ctrl++ / Ctrl+- / Ctrl+0 | Zoom the whole UI in / out / back to 100 % (saved as UI zoom) |
 | Ctrl+Shift+T | New session (project picker) |
 | Ctrl+Shift+N | New session in the current project |
 | Ctrl+Shift+W | Close session |
@@ -83,11 +86,13 @@ defaults, worktrees).
 | Ctrl+Shift+G / Ctrl+Shift+E | Show Changes / Files |
 | Ctrl+Shift+D | Unified / split diff |
 | Ctrl+Enter | Commit (in the commit box) |
-| Esc | Close a diff, preview or dialog |
+| Esc | Close a diff, preview, Settings or dialog |
 
 ## State
 
-Tabs, layout, projects and settings live in `~/.local/state/dirigent/state.json` (`$XDG_STATE_HOME`). Your
+Preferences live in `~/.config/dirigent/settings.json` (`$XDG_CONFIG_HOME`): change them on the Settings page
+(Ctrl+, or the gear) or edit the file, both apply at once. Tabs, layout and projects live in
+`~/.local/state/dirigent/state.json` (`$XDG_STATE_HOME`). Your
 `~/.claude/settings.json` is never modified: Dirigent passes its hooks to each claude it starts with `--settings`.
 
 ## License

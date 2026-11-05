@@ -36,7 +36,28 @@ pub struct Project {
     pub setup_cmd: Option<String>,
 }
 
+/// Project defaults as typed in the dialog or on the Settings page.
+pub struct Typed<'a> {
+    pub auto: bool,
+    pub flags: &'a str,
+    pub setup: &'a str,
+    pub wt_dir: &'a str,
+}
+
 impl Project {
+    /// Flags only as `hook::resume_args` keeps them (never a permission bypass); empty setup/dir = none; a worktree
+    /// dir with `~` is under `home`, a relative one under the project.
+    pub fn apply_defaults(&mut self, t: &Typed, home: &Path) {
+        self.auto_claude = t.auto;
+        self.claude_args = hook::resume_args(&hook::split_words(t.flags));
+        self.setup_cmd = Some(t.setup.trim().to_string()).filter(|c| !c.is_empty());
+        let dir = t.wt_dir.trim();
+        self.worktrees_dir = (!dir.is_empty()).then(|| match dir.strip_prefix('~') {
+            Some(rest) => home.join(rest.trim_start_matches('/')),
+            None => self.root.join(dir), // absolute stays absolute
+        });
+    }
+
     pub fn display(&self) -> String {
         self.name.clone().unwrap_or_else(|| {
             self.root.file_name().map_or_else(|| self.root.display().to_string(), |n| n.to_string_lossy().into_owned())
@@ -256,6 +277,20 @@ pub fn common_prefix(c: &[&str]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn typed_defaults_keep_only_safe_flags_and_resolve_dirs() {
+        let mut p = Project { root: "/r/app".into(), ..Default::default() };
+        let t = Typed { auto: true, flags: "--model opus --dangerously-skip-permissions --permission-mode bypassPermissions hi", setup: "  ", wt_dir: "~/wt" };
+        p.apply_defaults(&t, Path::new("/home/u"));
+        assert!(p.auto_claude);
+        assert_eq!(p.claude_args, vec!["--model", "opus"], "bypasses and the prompt never stored");
+        assert_eq!(p.setup_cmd, None);
+        assert_eq!(p.worktrees_dir, Some(PathBuf::from("/home/u/wt")));
+        p.apply_defaults(&Typed { auto: false, flags: "", setup: "pnpm i", wt_dir: "../trees" }, Path::new("/home/u"));
+        assert_eq!((p.claude_args.len(), p.setup_cmd.as_deref()), (0, Some("pnpm i")));
+        assert_eq!(p.worktrees_dir, Some(PathBuf::from("/r/app/../trees")));
+    }
 
     fn p(root: &str, last_used: i64, pinned: bool) -> Project {
         Project { root: root.into(), last_used, pinned, ..Default::default() }

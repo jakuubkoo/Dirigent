@@ -11,13 +11,13 @@ use git::layout::{DLine, Engine, Layout, SplitRow};
 use git::{FileChange, LineKind, Status};
 use gpui::{
     ClickEvent, Context, FocusHandle, Focusable, HighlightStyle, KeyDownEvent, StyledText,
-    UniformListScrollHandle, WeakEntity, Window, div, prelude::*, px, uniform_list,
+    UniformListScrollHandle, WeakEntity, Window, div, prelude::*, uniform_list,
 };
 
 use crate::scrollbar::{self, scrollbar};
-use crate::theme::{self, MONO_FONT, TERMINAL_FONT_SIZE, height, radius, space, text_size};
+use crate::theme::{z, self, MONO_FONT, height, radius, space, text_size};
 use crate::ui::{self, icon, line_counts, tip};
-use crate::persist::{DiffEngine, DiffMode, SplitStyle};
+use crate::settings::{DiffEngine, DiffMode, SplitStyle};
 use crate::workspace::Workspace;
 use syntax::structural::Fail;
 
@@ -223,7 +223,7 @@ impl GitPanel {
     fn row(&self, ix: usize, root: &Path, st: &Status, marks: Option<&crate::changes::View>) -> gpui::AnyElement {
         let t = theme::get();
         let Some(f) = st.files.get(ix) else {
-            return ui::note(format!("+{} more files not listed", st.more)).h(px(height::LIST_ROW)).into_any_element();
+            return ui::note(format!("+{} more files not listed", st.more)).h(z(height::LIST_ROW)).into_any_element();
         };
         let (name, dir) = match f.path.rsplit_once('/') {
             Some((d, n)) => (n.to_string(), format!("{d}/")),
@@ -242,9 +242,9 @@ impl GitPanel {
             div()
                 .id((id, ix))
                 .flex_none()
-                .px(px(2.))
-                .rounded(px(radius::SM))
-                .text_size(px(text_size::XS))
+                .px(z(2.))
+                .rounded(z(radius::SM))
+                .text_size(z(text_size::XS))
                 .text_color(color)
                 .cursor_pointer()
                 .hover(|s| s.bg(t.bg.elevated))
@@ -262,8 +262,8 @@ impl GitPanel {
                 .flex_none()
                 .invisible()
                 .group_hover("git-row", |s| s.visible())
-                .p(px(2.))
-                .rounded(px(radius::SM))
+                .p(z(2.))
+                .rounded(z(radius::SM))
                 .cursor_pointer()
                 .hover(|s| s.bg(t.bg.elevated))
                 .child(ui::icon(icon::RESTART, 12., t.text.muted))
@@ -280,14 +280,14 @@ impl GitPanel {
             .group("git-row")
             .w_full() // a uniform_list row is laid out as a root: without this it takes its min-content width
             .overflow_hidden()
-            .h(px(height::LIST_ROW))
-            .pl(px(space::LG))
-            .pr(px(14.)) // room for the scrollbar
+            .h(z(height::LIST_ROW))
+            .pl(z(space::LG))
+            .pr(z(14.)) // room for the scrollbar
             .flex()
             .items_center()
-            .gap(px(space::SM))
+            .gap(z(space::SM))
             .cursor_pointer()
-            .text_size(px(text_size::MD))
+            .text_size(z(text_size::MD))
             .when(selected, |d| d.bg(t.bg.selected))
             .when(!selected, |d| d.hover(|s| s.bg(t.bg.hover)))
             // Not `cx.listener`: the workspace updates this panel in response, which must not happen while the
@@ -300,7 +300,7 @@ impl GitPanel {
             // Name and directory share what's left; counts and S/U never shrink. The directory truncates first.
             .child(shrink(div().min_w_0().truncate().text_color(t.text.primary), 1.).child(name))
             .child(
-                shrink(div().flex_grow(1.).min_w_0().truncate().text_size(px(text_size::XS)).text_color(t.text.dim), 10_000.)
+                shrink(div().flex_grow(1.).min_w_0().truncate().text_size(z(text_size::XS)).text_color(t.text.dim), 10_000.)
                     .child(dir),
             )
             .children(marks.and_then(|m| m.files.get(&f.path)).map(|m| {
@@ -310,7 +310,7 @@ impl GitPanel {
                 div()
                     .flex_none()
                     .flex()
-                    .gap(px(space::XS))
+                    .gap(z(space::XS))
                     .when(m.shared, |d| d.child(mark("mark-shared", icon::SHARED, "Also changed by another session")))
                     .when(m.via_command, |d| {
                         d.child(mark("mark-cmd", icon::VIA_COMMAND, "Changed by a shell command (best effort)"))
@@ -323,7 +323,7 @@ impl GitPanel {
             .when(f.unstaged, |d| {
                 d.child(tag("tag-u", "U", t.git.modified, "Unstaged · click to stage", crate::git_ops::Job::Stage(vec![f.clone()])))
             })
-            .child(div().flex_none().text_size(px(text_size::XS)).child(line_counts(f.lines)))
+            .child(div().flex_none().text_size(z(text_size::XS)).child(line_counts(f.lines)))
             .into_any_element()
     }
 }
@@ -337,7 +337,7 @@ impl GitPanel {
             div()
                 .id(id)
                 .flex_none()
-                .text_size(px(text_size::XS))
+                .text_size(z(text_size::XS))
                 .when(enabled, |d| d.text_color(t.text.muted).cursor_pointer().hover(|s| s.text_color(t.text.primary)))
                 .when(!enabled, |d| d.text_color(t.text.faint).cursor_not_allowed())
                 .child(label)
@@ -347,15 +347,15 @@ impl GitPanel {
         div()
             .flex()
             .items_center()
-            .gap(px(space::MD))
-            .px(px(space::LG))
-            .pb(px(space::SM))
-            .text_size(px(text_size::XS))
+            .gap(z(space::MD))
+            .px(z(space::LG))
+            .pb(z(space::SM))
+            .text_size(z(text_size::XS))
             .child(match &ops.running {
                 Some(label) => div()
                     .flex()
                     .items_center()
-                    .gap(px(space::XS))
+                    .gap(z(space::XS))
                     .text_color(t.text.muted)
                     .child(ui::icon(icon::REFRESH, 11., t.text.muted))
                     .child(label.clone())
@@ -387,21 +387,21 @@ impl GitPanel {
         let t = theme::get();
         let (ws, ws2, r, r2) = (self.workspace.clone(), self.workspace.clone(), root.to_path_buf(), root.to_path_buf());
         div()
-            .mx(px(space::MD))
-            .mb(px(space::SM))
-            .p(px(space::SM))
+            .mx(z(space::MD))
+            .mb(z(space::SM))
+            .p(z(space::SM))
             .flex()
             .flex_col()
-            .gap(px(space::XS))
-            .rounded(px(radius::MD))
+            .gap(z(space::XS))
+            .rounded(z(radius::MD))
             .bg(t.bg.elevated)
             .border_1()
             .border_color(t.state.error)
-            .text_size(px(text_size::XS))
+            .text_size(z(text_size::XS))
             .child(
                 div()
                     .id("git-error-text")
-                    .max_h(px(160.))
+                    .max_h(z(160.))
                     .overflow_y_scroll()
                     .font_family(MONO_FONT)
                     .text_color(t.text.primary)
@@ -410,7 +410,7 @@ impl GitPanel {
             .child(
                 div()
                     .flex()
-                    .gap(px(space::MD))
+                    .gap(z(space::MD))
                     .children(e.retry.is_some().then(|| {
                         div()
                             .id("git-retry")
@@ -445,7 +445,7 @@ impl GitPanel {
             .flex_none()
             .flex()
             .items_center()
-            .gap(px(space::XS))
+            .gap(z(space::XS))
             .child(
                 segmented()
                     .child(segment("agent-only", "This agent", only, true).tooltip(tip("Files this session's agent changed")).on_click(
@@ -463,8 +463,8 @@ impl GitPanel {
                 div()
                     .id("agent-clear")
                     .flex_none()
-                    .p(px(space::XXS))
-                    .rounded(px(radius::SM))
+                    .p(z(space::XXS))
+                    .rounded(z(radius::SM))
                     .cursor_pointer()
                     .hover(|s| s.bg(t.bg.hover))
                     .child(ui::icon(icon::RESTART, 12., t.text.muted))
@@ -503,10 +503,10 @@ impl Render for GitPanel {
                 let summary = div()
                     .flex()
                     .items_center()
-                    .gap(px(space::SM))
-                    .px(px(space::LG))
-                    .py(px(space::SM))
-                    .text_size(px(text_size::XS))
+                    .gap(z(space::SM))
+                    .px(z(space::LG))
+                    .py(z(space::SM))
+                    .text_size(z(text_size::XS))
                     .text_color(t.text.muted)
                     .child(ui::icon(icon::BRANCH, 12., t.text.muted))
                     .child(div().min_w_0().truncate().text_color(t.text.primary).child(st.branch.clone()))
@@ -518,14 +518,14 @@ impl Render for GitPanel {
                     let (root, ws) = (root.clone(), self.workspace.clone());
                     div()
                         .id("git-refresh")
-                        .mx(px(space::MD))
-                        .px(px(space::MD))
-                        .py(px(space::XS))
+                        .mx(z(space::MD))
+                        .px(z(space::MD))
+                        .py(z(space::XS))
                         .flex()
-                        .gap(px(space::SM))
-                        .rounded(px(radius::MD))
+                        .gap(z(space::SM))
+                        .rounded(z(radius::MD))
                         .bg(t.bg.elevated)
-                        .text_size(px(text_size::XS))
+                        .text_size(z(text_size::XS))
                         .text_color(t.state.needs_you)
                         .cursor_pointer()
                         .hover(|s| s.bg(t.bg.hover))
@@ -594,10 +594,10 @@ impl HunkActions {
             div()
                 .id((id, row as usize))
                 .flex_none()
-                .px(px(space::SM))
-                .rounded(px(radius::SM))
+                .px(z(space::SM))
+                .rounded(z(radius::SM))
                 .font_family(theme::UI_FONT)
-                .text_size(px(text_size::XS))
+                .text_size(z(text_size::XS))
                 .text_color(t.text.muted)
                 .cursor_pointer()
                 .hover(|s| s.bg(t.bg.hover).text_color(t.text.primary))
@@ -616,7 +616,7 @@ impl HunkActions {
             .flex_none()
             .flex()
             .items_center()
-            .gap(px(space::XS))
+            .gap(z(space::XS))
             .when(unstaged, |d| d.child(button("hunk-stage", "Stage", "Stage this hunk", Job::StageHunk(f.clone(), span), false)))
             .when(staged, |d| d.child(button("hunk-unstage", "Unstage", "Unstage this hunk", Job::UnstageHunk(f.clone(), span), false)))
             .when(staged || unstaged, |d| {
@@ -652,13 +652,15 @@ pub struct DiffView {
     focus: FocusHandle,
     workspace: WeakEntity<Workspace>,
     line_height: gpui::Pixels,
+    /// One px under the terminal's font size (Settings → Terminal).
+    font_size: gpui::Pixels,
 }
 
 impl DiffView {
     pub fn new(
         root: PathBuf,
         file: FileChange,
-        line_height: gpui::Pixels,
+        m: &crate::terminal_element::Metrics,
         (mode, split_style, engine, narrow): (DiffMode, SplitStyle, DiffEngine, bool),
         workspace: WeakEntity<Workspace>,
         cx: &mut Context<Self>,
@@ -679,8 +681,14 @@ impl DiffView {
             drag: Default::default(),
             focus: cx.focus_handle(),
             workspace,
-            line_height,
+            line_height: m.line_height,
+            font_size: m.font_size - z(1.),
         }
+    }
+
+    pub fn set_metrics(&mut self, m: &crate::terminal_element::Metrics, cx: &mut Context<Self>) {
+        (self.line_height, self.font_size) = (m.line_height, m.font_size - z(1.));
+        cx.notify();
     }
 
     /// The current layout, handed to the next read so an unchanged diff isn't laid out again.
@@ -873,25 +881,25 @@ impl DiffView {
 }
 
 /// A small segmented control (the diff header's switches).
-fn segmented() -> gpui::Div {
+pub(crate) fn segmented() -> gpui::Div {
     let t = theme::get();
     div()
         .flex()
         .flex_none()
-        .p(px(space::XXS))
-        .gap(px(space::XXS))
-        .rounded(px(radius::MD))
+        .p(z(space::XXS))
+        .gap(z(space::XXS))
+        .rounded(z(radius::MD))
         .border_1()
         .border_color(t.border.subtle)
 }
 
-fn segment(id: &'static str, label: &'static str, on: bool, enabled: bool) -> gpui::Stateful<gpui::Div> {
+pub(crate) fn segment(id: &'static str, label: &'static str, on: bool, enabled: bool) -> gpui::Stateful<gpui::Div> {
     let t = theme::get();
     div()
         .id(id)
-        .px(px(space::SM))
-        .rounded(px(radius::SM))
-        .text_size(px(text_size::XS))
+        .px(z(space::SM))
+        .rounded(z(radius::SM))
+        .text_size(z(text_size::XS))
         .when(on, |d| d.bg(t.bg.selected).text_color(t.text.primary))
         .when(!on && enabled, |d| d.text_color(t.text.muted).cursor_pointer().hover(|s| s.bg(t.bg.hover)))
         .when(!enabled, |d| d.text_color(t.text.faint).cursor_not_allowed())
@@ -1046,8 +1054,8 @@ fn moved_hint(l: &DLine) -> Option<gpui::Div> {
     Some(
         div()
             .flex_none()
-            .pl(px(space::SM))
-            .text_size(px(text_size::XS))
+            .pl(z(space::SM))
+            .text_size(z(text_size::XS))
             .text_color(theme::get().diff.moved)
             .child(format!("{what} L{n}")),
     )
@@ -1086,14 +1094,14 @@ fn unified_row(l: &DLine, g: Geom, structural: bool) -> gpui::Div {
         .flex()
         .w_full()
         .h(g.lh)
-        .pr(px(14.))
+        .pr(z(14.))
         .when_some(bg.filter(|_| look == Look::Classic), |r, bg| r.bg(bg))
         .child(line_text(l, &[(l.old, g.old), (l.new, g.new)], look, false))
         .children(moved_hint(l))
 }
 
 fn split_half(l: Option<&DLine>, old_side: bool, g: Geom, look: Look, clean: bool) -> gpui::Div {
-    let half = div().flex().flex_1().flex_basis(px(0.)).min_w_0().h_full().overflow_hidden();
+    let half = div().flex().flex_1().flex_basis(z(0.)).min_w_0().h_full().overflow_hidden();
     let Some(l) = l else {
         return half.when(!clean, |h| h.bg(theme::get().diff.filler));
     };
@@ -1112,7 +1120,7 @@ fn split_half(l: Option<&DLine>, old_side: bool, g: Geom, look: Look, clean: boo
         Look::Moved => Some(theme::get().diff.moved),
         _ => None,
     };
-    half.child(div().flex_none().w(px(2.)).h_full().when_some(bar, |b, c| b.bg(c)))
+    half.child(div().flex_none().w(z(2.)).h_full().when_some(bar, |b, c| b.bg(c)))
         .child(line_text(l, &[num], look, true))
         .children(moved_hint(l))
 }
@@ -1150,9 +1158,9 @@ fn split_row(l: &Layout, r: SplitRow, g: Geom, style: SplitStyle) -> gpui::Div {
                 .flex()
                 .w_full()
                 .h(g.lh)
-                .pr(px(14.))
+                .pr(z(14.))
                 .child(split_half(left, true, g, ll, clean))
-                .child(div().flex_none().w(px(1.)).h_full().bg(theme::get().border.subtle))
+                .child(div().flex_none().w(z(1.)).h_full().bg(theme::get().border.subtle))
                 .child(split_half(right, false, g, rl, clean))
         }
     }
@@ -1170,7 +1178,7 @@ impl Render for DiffView {
                 Some(o) => format!("{o} → {}", f.path),
                 None => f.path.clone(),
             }))
-            .child(div().text_size(px(text_size::XS)).child(line_counts(f.lines)))
+            .child(div().text_size(z(text_size::XS)).child(line_counts(f.lines)))
             .child(ui::pill(match (f.staged, f.unstaged) {
                 (true, true) => "staged + unstaged",
                 (true, false) => "staged",
@@ -1181,12 +1189,12 @@ impl Render for DiffView {
                 div()
                     .ml_auto()
                     .flex()
-                    .gap(px(space::SM))
+                    .gap(z(space::SM))
                     .child(self.engine_switch())
                     .when(self.split(), |d| d.child(self.style_switch()))
                     .child(self.mode_switch()),
             )
-            .child(div().flex_none().text_size(px(text_size::XS)).text_color(t.text.dim).child("Esc to close"));
+            .child(div().flex_none().text_size(z(text_size::XS)).text_color(t.text.dim).child("Esc to close"));
         let body = match (self.shown(), self.failed) {
             (_, true) => ui::note("Couldn't read the diff").text_color(t.state.error).into_any_element(),
             (None, _) => ui::note("Loading…").into_any_element(),
@@ -1204,7 +1212,7 @@ impl Render for DiffView {
                             if ix >= rows {
                                 return div()
                                     .h(g.lh)
-                                    .pl(px(space::LG))
+                                    .pl(z(space::LG))
                                     .text_color(theme::get().state.needs_you)
                                     .child("… diff truncated (too large to show)");
                             }
@@ -1228,7 +1236,7 @@ impl Render for DiffView {
                 .font_family(MONO_FONT)
                 // One glyph per character: a ligature (`>=` → `≥`) would split under a word highlight.
                 .font_features(gpui::FontFeatures::disable_ligatures())
-                .text_size(px(TERMINAL_FONT_SIZE - 1.))
+                .text_size(self.font_size)
                 .line_height(self.line_height);
                 div()
                     .relative()

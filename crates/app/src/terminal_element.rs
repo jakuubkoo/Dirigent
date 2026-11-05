@@ -7,7 +7,7 @@ use std::time::Instant;
 use gpui::{
     App, Bounds, Element, ElementId, Font, FontStyle, FontWeight, GlobalElementId, Hsla, InspectorElementId,
     IntoElement, LayoutId, Pixels, ShapedLine, SharedString, StrikethroughStyle, Style, TextAlign, TextRun,
-    UnderlineStyle, Window, fill, font, point, px, relative, size,
+    UnderlineStyle, Window, fill, font, point, relative, size,
 };
 use session::alacritty_terminal::grid::Dimensions;
 use session::alacritty_terminal::term::cell::Flags;
@@ -15,24 +15,27 @@ use session::alacritty_terminal::term::color::Colors;
 use session::alacritty_terminal::vte::ansi::{Color, CursorShape, NamedColor};
 use session::Session;
 
-use crate::theme::{self, MONO_FONT, TERMINAL_FONT_SIZE};
+use crate::theme::{z, self, MONO_FONT};
 
 #[derive(Clone)]
 pub struct Metrics {
     font: Font,
-    font_size: Pixels,
+    pub font_size: Pixels,
     pub cell_width: Pixels,
     pub line_height: Pixels,
 }
 
 impl Metrics {
-    pub fn new(window: &mut Window) -> Self {
+    /// `size`: the font size in px at 100 % (Settings → Terminal), scaled by the UI zoom; the line height stays a
+    /// whole pixel.
+    pub fn new(window: &mut Window, size: f32) -> Self {
         let font = font(MONO_FONT);
-        let font_size = px(TERMINAL_FONT_SIZE);
+        let font_size = z(size);
         let ts = window.text_system();
         let id = ts.resolve_font(&font);
-        let cell_width = ts.advance(id, font_size, 'm').map(|s| s.width).unwrap_or(px(TERMINAL_FONT_SIZE * 0.6));
-        Self { font, font_size, cell_width, line_height: px((TERMINAL_FONT_SIZE * 1.2).round()) }
+        let cell_width = ts.advance(id, font_size, 'm').map(|s| s.width).unwrap_or(font_size * 0.6);
+        let line_height = gpui::px((f32::from(font_size) * 1.2).round()); // unscaled: font_size already is
+        Self { font, font_size, cell_width, line_height }
     }
 }
 
@@ -203,11 +206,11 @@ impl Element for TerminalElement {
                 }
                 let underline = flags.intersects(Flags::ALL_UNDERLINES).then(|| UnderlineStyle {
                     color: Some(fg),
-                    thickness: px(1.),
+                    thickness: z(1.),
                     wavy: flags.contains(Flags::UNDERCURL),
                 });
                 let strikethrough =
-                    flags.contains(Flags::STRIKEOUT).then(|| StrikethroughStyle { color: Some(fg), thickness: px(1.) });
+                    flags.contains(Flags::STRIKEOUT).then(|| StrikethroughStyle { color: Some(fg), thickness: z(1.) });
 
                 // Wide glyphs get their own segment so the forced one-cell advance doesn't misplace them.
                 let extend = !wide && segs.last().is_some_and(|s| !s.wide && s.row == row && s.col + s.cells == col);
@@ -232,9 +235,9 @@ impl Element for TerminalElement {
                 let x = bounds.origin.x + m.cell_width * cur_at.1 as f32;
                 let y = bounds.origin.y + m.line_height * cur_at.0 as f32;
                 let (w, h, dy) = match cur.shape {
-                    CursorShape::Beam => (px(2.), m.line_height, px(0.)),
-                    CursorShape::Underline => (m.cell_width, px(2.), m.line_height - px(2.)),
-                    _ => (m.cell_width, m.line_height, px(0.)), // HollowBlock: drawn as outline in paint
+                    CursorShape::Beam => (z(2.), m.line_height, z(0.)),
+                    CursorShape::Underline => (m.cell_width, z(2.), m.line_height - z(2.)),
+                    _ => (m.cell_width, m.line_height, z(0.)), // HollowBlock: drawn as outline in paint
                 };
                 cursor = Some(Bounds::new(point(x, y + dy), size(w, h)));
             }

@@ -9,12 +9,15 @@ mod diff_syntax;
 mod file_tree;
 mod files_panel;
 mod git_panel;
+mod keys;
 mod line_edit;
 mod notify;
 mod perf;
 mod persist;
 mod projects;
 mod scrollbar;
+mod settings;
+mod settings_view;
 mod terminal_element;
 mod text_area;
 mod theme;
@@ -24,8 +27,7 @@ mod window_chrome;
 mod workspace;
 
 use gpui::{
-    App, Bounds, KeyBinding, WindowBackgroundAppearance, WindowBounds, WindowDecorations, WindowOptions, point, prelude::*,
-    px, size,
+    App, Bounds, WindowBackgroundAppearance, WindowBounds, WindowDecorations, WindowOptions, point, prelude::*, px, size,
 };
 use workspace::*;
 
@@ -95,6 +97,9 @@ fn main() {
     // The only synchronous file IO: a small file, read before any window exists.
     let state_path = persist::path();
     let saved = persist::load(&state_path);
+    // Before the state is saved again: a first start takes the preferences over from the old state file.
+    let settings_path = settings::path();
+    let loaded = settings::load(&settings_path, &state_path);
     let translucent = blur::decide(std::env::var("DIRIGENT_BLUR").ok().as_deref(), blur::wayland_globals);
     let t = theme::get();
     let rgb8 = |c: gpui::Rgba| [(c.r * 255.).round() as u8, (c.g * 255.).round() as u8, (c.b * 255.).round() as u8];
@@ -103,41 +108,18 @@ fn main() {
         if let Err(e) = cx.text_system().add_fonts(assets::fonts()) {
             eprintln!("dirigent: bundled fonts failed to load: {e}");
         }
-        let ctx = Some("Workspace");
-        cx.bind_keys([
-            KeyBinding::new("ctrl-shift-t", NewSession, ctx),
-            KeyBinding::new("ctrl-shift-n", NewInProject, ctx),
-            KeyBinding::new("ctrl-shift-w", CloseSession, ctx),
-            KeyBinding::new("ctrl-tab", NextSession, ctx),
-            KeyBinding::new("ctrl-shift-tab", PrevSession, ctx),
-            KeyBinding::new("f2", Rename, ctx),
-            KeyBinding::new("ctrl-shift-b", ToggleSidebar, ctx),
-            KeyBinding::new("ctrl-shift-j", NextNeedsYou, ctx),
-            KeyBinding::new("ctrl-shift-r", ResumeAll, ctx),
-            KeyBinding::new("ctrl-shift-g", ShowChanges, ctx),
-            KeyBinding::new("ctrl-shift-e", ShowFiles, ctx),
-            KeyBinding::new("ctrl-shift-d", ToggleDiffMode, ctx),
-            KeyBinding::new("ctrl-1", Activate1, ctx),
-            KeyBinding::new("ctrl-2", Activate2, ctx),
-            KeyBinding::new("ctrl-3", Activate3, ctx),
-            KeyBinding::new("ctrl-4", Activate4, ctx),
-            KeyBinding::new("ctrl-5", Activate5, ctx),
-            KeyBinding::new("ctrl-6", Activate6, ctx),
-            KeyBinding::new("ctrl-7", Activate7, ctx),
-            KeyBinding::new("ctrl-8", Activate8, ctx),
-            KeyBinding::new("ctrl-9", Activate9, ctx),
-        ]);
+        keys::bind(cx);
         // Wayland doesn't let clients place windows: only size + maximized/fullscreen take effect there.
         let window_bounds = match saved.window {
             Some(w) => {
-                let b = Bounds { origin: point(px(w.x), px(w.y)), size: size(px(w.w.max(400.)), px(w.h.max(300.))) };
+                let b = Bounds { origin: point(px(w.x), px(w.y)), size: size(px(w.w.max(400.)), px(w.h.max(300.))) }; // unscaled: the compositor's window size
                 match w.mode {
                     persist::WindowMode::Windowed => WindowBounds::Windowed(b),
                     persist::WindowMode::Maximized => WindowBounds::Maximized(b),
                     persist::WindowMode::Fullscreen => WindowBounds::Fullscreen(b),
                 }
             }
-            None => WindowBounds::Windowed(Bounds::centered(None, size(px(1200.), px(750.)), cx)),
+            None => WindowBounds::Windowed(Bounds::centered(None, size(px(1200.), px(750.)), cx)), // unscaled: window size
         };
         cx.open_window(
             WindowOptions {
@@ -155,7 +137,7 @@ fn main() {
                 icon: image::load_from_memory(assets::APP_ICON_PNG).ok().map(|i| std::sync::Arc::new(i.into_rgba8())),
                 ..Default::default()
             },
-            |window, cx| cx.new(|cx| Workspace::new(saved.clone(), state_path.clone(), translucent, launch, window, cx)),
+            |window, cx| cx.new(|cx| Workspace::new(saved.clone(), state_path.clone(), (settings_path, loaded), translucent, launch, window, cx)),
         )
         .expect("open window");
         cx.on_window_closed(|cx, _| cx.quit()).detach();

@@ -250,6 +250,11 @@ impl Session {
         self.flags.expecting.store(true, Ordering::Release);
     }
 
+    /// Scrollback limit in lines (alacritty's default is 10 000). Shrinking drops the oldest history lines now.
+    pub fn set_scrollback(&self, lines: usize) {
+        self.term.lock().set_options(Config { scrolling_history: lines, ..Config::default() });
+    }
+
     pub fn write(&self, bytes: &[u8]) {
         let mut w = self.writer.lock().unwrap();
         let _ = w.write_all(bytes).and_then(|_| w.flush());
@@ -373,6 +378,16 @@ mod tests {
         assert!(!s.resize(Size { cols: 20, rows: 3, ..SIZE }), "same size is a no-op");
         let term = s.term.lock();
         assert_eq!((term.columns(), term.screen_lines()), (20, 3));
+    }
+
+    #[test]
+    fn scrollback_limit_applies_live() {
+        let s = Session::spawn_command(sh("seq 1 500; sleep 2"), Path::new("/"), SIZE).unwrap();
+        wait_until("output", || s.term.lock().grid().history_size() >= 400);
+        s.set_scrollback(100);
+        assert_eq!(s.term.lock().grid().history_size(), 100, "shrinking drops the oldest lines now");
+        s.set_scrollback(0);
+        assert_eq!(s.term.lock().grid().history_size(), 0);
     }
 
     #[test]

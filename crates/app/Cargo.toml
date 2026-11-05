@@ -14,6 +14,8 @@ syntax.workspace = true
 serde_json = "1"
 serde = { version = "1", features = ["derive"] }
 async-channel = "2.5"
+# Watches settings.json for hand edits (the workspace's pinned fork, already built for the git crate).
+notify.workspace = true
 # Same version gpui uses; only to see whether the compositor offers blur (blur.rs).
 wayland-client = "0.31.15"
 # Desktop notifications (notify.rs). All already in gpui's graph (same versions/features): nothing new is built.

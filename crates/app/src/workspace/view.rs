@@ -6,11 +6,11 @@ use std::time::Duration;
 
 use gpui::{
     ClickEvent, Context, DragMoveEvent, FontWeight, IntoElement, MouseButton, Render,
-    SharedString, StyleRefinement, Transformation, Window, div, percentage, px,
+    SharedString, StyleRefinement, Transformation, Window, div, percentage,
 };
 
 use super::*;
-use crate::theme::{self, MONO_FONT, UI_FONT, height, radius, space, text_size};
+use crate::theme::{z, self, MONO_FONT, UI_FONT, height, radius, space, text_size};
 use crate::ui::{self, icon, line_counts, tip};
 
 impl Render for Workspace {
@@ -18,6 +18,7 @@ impl Render for Workspace {
         crate::perf::root_render();
         self.flush_pending_open(window, cx);
         self.spinner_drawn.set(false);
+        self.refresh_metrics(window, cx);
         self.schedule_resize(window, cx);
         self.arm_minute_timer(cx);
         let t = theme::get();
@@ -26,6 +27,7 @@ impl Render for Workspace {
         let main = match (&self.overlay, self.tabs.get(self.active)) {
             (Some(Overlay::Diff(v)), _) => v.clone().cached(StyleRefinement::default().size_full()).into_any_element(),
             (Some(Overlay::File(v)), _) => v.clone().cached(StyleRefinement::default().size_full()).into_any_element(),
+            (Some(Overlay::Settings(v)), _) => v.clone().cached(StyleRefinement::default().size_full()).into_any_element(),
             (None, Some(Tab { view: Some(view), .. })) => {
                 view.clone().cached(StyleRefinement::default().size_full()).into_any_element()
             }
@@ -35,14 +37,16 @@ impl Render for Workspace {
                 .flex_col()
                 .items_center()
                 .justify_center()
-                .gap(px(space::MD))
+                .gap(z(space::MD))
                 .child(ui::icon(icon::TERMINAL, 28., t.text.faint))
                 .child(div().text_color(t.text.dim).child("No sessions"))
-                .child(div().text_size(px(text_size::SM)).text_color(t.text.faint).child("Ctrl+Shift+T to start one"))
+                .child(div().text_size(z(text_size::SM)).text_color(t.text.faint).child("Ctrl+Shift+T to start one"))
                 .into_any_element(),
         };
 
+        // Settings belongs to no session: the title says so instead of the active one.
         let mut title = match self.tabs.get(self.active) {
+            _ if self.settings_open() => "Settings — Dirigent".to_string(),
             Some(tab) => format!("{} — Dirigent", tab.name),
             None => "Dirigent".to_string(),
         };
@@ -68,7 +72,7 @@ impl Render for Workspace {
             div()
                 .id("expand")
                 .flex_none()
-                .w(px(COLLAPSED))
+                .w(z(COLLAPSED))
                 .h_full()
                 .cursor_pointer()
                 .bg(self.panel_bg())
@@ -87,7 +91,7 @@ impl Render for Workspace {
                 .child(divider("git-divider", GitPanelDrag))
                 .child(
                     div()
-                        .w(self.git_width)
+                        .w(z(self.git_width))
                         .h_full()
                         .flex()
                         .flex_col()
@@ -115,11 +119,11 @@ impl Render for Workspace {
             .flex_col()
             .size_full()
             .font_family(UI_FONT)
-            .text_size(px(text_size::MD))
+            .text_size(z(text_size::MD))
             .text_color(t.text.primary)
             // With blur the window is transparent where nothing paints: every region paints its own background.
             .when(!self.translucent, |d| d.bg(t.bg.base))
-            .when(chrome.border > px(0.), |d| d.border(chrome.border).border_color(t.border.strong))
+            .when(chrome.border > z(0.), |d| d.border(chrome.border).border_color(t.border.strong))
             // Capture phase: an open modal gets every key first, wherever focus ended up (a click can focus the diff).
             .capture_key_down(cx.listener(Self::modal_key))
             // A click outside the inline session rename field saves it (like Enter).
@@ -140,6 +144,10 @@ impl Render for Workspace {
             .on_action(cx.listener(|w, _: &ShowChanges, window, cx| w.show_panel_tab(PanelTab::Changes, window, cx)))
             .on_action(cx.listener(|w, _: &ShowFiles, window, cx| w.show_panel_tab(PanelTab::Files, window, cx)))
             .on_action(cx.listener(|w, _: &ToggleDiffMode, _, cx| w.toggle_diff_mode(cx)))
+            .on_action(cx.listener(|w, _: &OpenSettings, window, cx| w.open_settings(window, cx)))
+            .on_action(cx.listener(|w, _: &ZoomIn, _, cx| w.zoom(Some(1), cx)))
+            .on_action(cx.listener(|w, _: &ZoomOut, _, cx| w.zoom(Some(-1), cx)))
+            .on_action(cx.listener(|w, _: &ZoomReset, _, cx| w.zoom(None, cx)))
             .on_action(cx.listener(|w, _: &Activate1, window, cx| w.activate_nth(0, window, cx)))
             .on_action(cx.listener(|w, _: &Activate2, window, cx| w.activate_nth(1, window, cx)))
             .on_action(cx.listener(|w, _: &Activate3, window, cx| w.activate_nth(2, window, cx)))
@@ -151,16 +159,18 @@ impl Render for Workspace {
             .on_action(cx.listener(|w, _: &Activate9, window, cx| w.activate_nth(8, window, cx)))
             .on_drag_move::<SidebarDrag>(cx.listener(|w, e: &DragMoveEvent<SidebarDrag>, window, cx| {
                 w.dragging = true;
-                let max = (window.viewport_size().width * 0.5).max(px(MIN_SIDEBAR));
-                w.sidebar_width = (e.event.position.x - e.bounds.left()).clamp(px(MIN_SIDEBAR), max);
+                // Stored at 100 %: the pointer's distance ÷ zoom.
+                let zoom = theme::zoom();
+                let max = (f32::from(window.viewport_size().width) * 0.5 / zoom).max(MIN_SIDEBAR);
+                w.sidebar_width = (f32::from(e.event.position.x - e.bounds.left()) / zoom).clamp(MIN_SIDEBAR, max);
                 cx.notify();
             }))
             .on_drop::<SidebarDrag>(cx.listener(|w, _, _, cx| w.end_drag(cx)))
             .on_drag_move::<GitPanelDrag>(cx.listener(|w, e: &DragMoveEvent<GitPanelDrag>, window, cx| {
                 w.dragging = true;
-                let min = px(git_panel::MIN_WIDTH);
-                let max = (window.viewport_size().width * 0.6).max(min);
-                w.git_width = (e.bounds.right() - e.event.position.x).clamp(min, max);
+                let (zoom, min) = (theme::zoom(), git_panel::MIN_WIDTH);
+                let max = (f32::from(window.viewport_size().width) * 0.6 / zoom).max(min);
+                w.git_width = (f32::from(e.bounds.right() - e.event.position.x) / zoom).clamp(min, max);
                 w.sync_panel(cx);
                 cx.notify();
             }))
@@ -182,12 +192,13 @@ impl Render for Workspace {
                             .min_w_0()
                             .h_full()
                             .bg(t.bg.base)
-                            .child(self.session_header())
+                            // Diff and preview belong to the session; Settings fills the main area from the top.
+                            .when(!self.settings_open(), |d| d.child(self.session_header()))
                             .child(div().flex_1().min_h_0().overflow_hidden().child(main)),
                     )
                     .children(right),
             )
-            .child(self.status_bar())
+            .child(self.status_bar(cx))
             .children(self.modal_view(window, cx))
             .children(self.menu_view(cx))
             .when(chrome.csd, |d| d.children(window_chrome::resize_handles(chrome.tiling)))
@@ -200,14 +211,14 @@ fn divider<D: Clone + 'static>(id: &'static str, drag: D) -> impl IntoElement {
     div()
         .id(id)
         .flex_none()
-        .w(px(DIVIDER))
+        .w(z(DIVIDER))
         .h_full()
         .flex()
         .justify_center()
         .cursor_col_resize()
         .bg(t.bg.panel)
         .hover(|s| s.bg(t.bg.hover))
-        .child(div().w(px(1.)).h_full().bg(t.border.subtle))
+        .child(div().w(z(1.)).h_full().bg(t.border.subtle))
         .on_drag(drag, |_, _, _, cx| cx.new(|_| DragGhost))
 }
 
@@ -217,11 +228,11 @@ fn icon_button(id: impl Into<gpui::ElementId>, glyph: &'static str, active: bool
     div()
         .id(id)
         .flex_none()
-        .size(px(26.))
+        .size(z(26.))
         .flex()
         .items_center()
         .justify_center()
-        .rounded(px(radius::MD))
+        .rounded(z(radius::MD))
         .cursor_pointer()
         .when(active, |d| d.bg(t.bg.selected))
         .hover(|s| s.bg(t.bg.hover))
@@ -284,15 +295,20 @@ impl Workspace {
         div()
             .flex()
             .items_center()
-            .gap(px(space::SM))
+            .gap(z(space::SM))
             .h_full()
-            .px(px(space::MD))
+            .px(z(space::MD))
             .child(ui::icon(icon::TERMINAL, 15., t.accent))
-            .child(div().flex_1().text_size(px(text_size::SM)).font_weight(FontWeight::MEDIUM).child("Dirigent"))
+            .child(div().flex_1().text_size(z(text_size::SM)).font_weight(FontWeight::MEDIUM).child("Dirigent"))
             .child(
                 icon_button("new", icon::PLUS, false)
                     .tooltip(tip("New session  Ctrl+Shift+T"))
                     .on_click(cx.listener(|w, _: &ClickEvent, window, cx| w.open_new_session(window, cx))),
+            )
+            .child(
+                icon_button("settings", icon::SETTINGS, self.settings_open())
+                    .tooltip(tip("Settings  Ctrl+,"))
+                    .on_click(cx.listener(|w, _: &ClickEvent, window, cx| w.open_settings(window, cx))),
             )
             .child(
                 icon_button("collapse", icon::SIDEBAR_CLOSE, false)
@@ -307,7 +323,7 @@ impl Workspace {
         let left = if self.sidebar_open {
             div()
                 .flex_none()
-                .w(self.sidebar_width + px(DIVIDER))
+                .w(z(self.sidebar_width + DIVIDER))
                 .h_full()
                 .bg(self.panel_bg())
                 .border_r_1()
@@ -318,7 +334,7 @@ impl Workspace {
             div()
                 .flex_none()
                 .h_full()
-                .px(px(space::SM))
+                .px(z(space::SM))
                 .flex()
                 .items_center()
                 .child(
@@ -326,16 +342,24 @@ impl Workspace {
                         .tooltip(tip("Show sidebar  Ctrl+Shift+B"))
                         .on_click(cx.listener(|w, _: &ClickEvent, _, cx| w.toggle_sidebar(cx))),
                 )
+                .child(
+                    icon_button("settings-title", icon::SETTINGS, self.settings_open())
+                        .tooltip(tip("Settings  Ctrl+,"))
+                        .on_click(cx.listener(|w, _: &ClickEvent, window, cx| w.open_settings(window, cx))),
+                )
                 .into_any_element()
         };
-        let name = self.tabs.get(self.active).map(|t| t.name.clone()).unwrap_or_default();
+        let name = match self.tabs.get(self.active) {
+            _ if self.settings_open() => "Settings".to_string(),
+            tab => tab.map(|t| t.name.clone()).unwrap_or_default(),
+        };
         div()
             .id("title-bar")
             .flex()
             .flex_none()
             .items_center()
             .w_full()
-            .h(px(height::TITLE_BAR))
+            .h(z(height::TITLE_BAR))
             .bg(t.bg.panel)
             .border_b_1()
             .border_color(t.border.subtle)
@@ -346,7 +370,7 @@ impl Workspace {
                     .min_w_0()
                     .flex()
                     .justify_center()
-                    .text_size(px(text_size::SM))
+                    .text_size(z(text_size::SM))
                     .text_color(t.text.dim)
                     .child(div().truncate().child(name)),
             )
@@ -401,11 +425,11 @@ impl Workspace {
                     div()
                         .id(id)
                         .flex_none()
-                        .size(px(20.))
+                        .size(z(20.))
                         .flex()
                         .items_center()
                         .justify_center()
-                        .rounded(px(radius::SM))
+                        .rounded(z(radius::SM))
                         .cursor_pointer()
                         .hover(|s| s.bg(t.bg.selected))
                         .child(ui::icon(glyph, 13., t.text.muted))
@@ -436,26 +460,26 @@ impl Workspace {
                     .id(SharedString::from(format!("group-{}", id.display())))
                     .flex()
                     .items_center()
-                    .gap(px(space::SM))
-                    .h(px(height::GROUP_HEADER))
-                    .mt(px(space::SM))
-                    .px(px(space::MD))
-                    .mx(px(space::SM))
-                    .rounded(px(radius::MD))
+                    .gap(z(space::SM))
+                    .h(z(height::GROUP_HEADER))
+                    .mt(z(space::SM))
+                    .px(z(space::MD))
+                    .mx(z(space::SM))
+                    .rounded(z(radius::MD))
                     .cursor_pointer()
                     .hover(|s| s.bg(t.bg.hover))
-                    .text_size(px(text_size::SM))
+                    .text_size(z(text_size::SM))
                     .child(ui::icon(if collapsed { icon::CHEVRON_RIGHT } else { icon::CHEVRON_DOWN }, 12., t.text.dim))
                     .group(gname.clone())
                     .child(div().min_w_0().truncate().font_weight(FontWeight::MEDIUM).text_color(t.text.muted).child(name))
                     .when(pinned, |d| d.child(div().flex_none().child(ui::icon(icon::PIN, 10., t.text.dim))))
-                    .child(div().flex_none().text_size(px(text_size::XS)).text_color(t.text.dim).child(members.len().to_string()))
+                    .child(div().flex_none().text_size(z(text_size::XS)).text_color(t.text.dim).child(members.len().to_string()))
                     .when(needs > 0, |d| {
                         d.child(
                             div()
                                 .when(buttons.is_none(), |d| d.ml_auto())
                                 .flex_none()
-                                .text_size(px(text_size::XS))
+                                .text_size(z(text_size::XS))
                                 .text_color(t.state.needs_you)
                                 .child(format!("{needs} need{} you", if needs == 1 { "s" } else { "" })),
                         )
@@ -474,11 +498,11 @@ impl Workspace {
             .flex()
             .flex_col()
             .flex_none()
-            .w(self.sidebar_width)
+            .w(z(self.sidebar_width))
             .h_full()
             .bg(self.panel_bg())
-            .when(with_brand, |d| d.child(div().flex_none().h(px(height::TITLE_BAR)).child(self.brand(cx))))
-            .child(div().id("sessions").flex_1().overflow_y_scroll().pb(px(space::MD)).children(items))
+            .when(with_brand, |d| d.child(div().flex_none().h(z(height::TITLE_BAR)).child(self.brand(cx))))
+            .child(div().id("sessions").flex_1().overflow_y_scroll().pb(z(space::MD)).children(items))
     }
 
     fn session_row(&self, i: usize, now: i64, cx: &mut Context<Self>) -> gpui::AnyElement {
@@ -486,7 +510,8 @@ impl Workspace {
         let tab = &self.tabs[i];
         let session = tab.view.as_ref().map(|v| v.read(cx).session.clone());
         let (unread, exited) = session.as_ref().map_or((false, false), |s| (s.is_unread(), s.is_exited()));
-        let active = i == self.active;
+        // While Settings is open no session is shown, so none is marked active; a click closes Settings.
+        let active = i == self.active && !self.settings_open();
         let agent = if exited { agent::Agent::default() } else { self.agent(i) };
         let needs_you = agent.state == agent::State::NeedsYou;
         if let Some(Modal::Rename { tab: r, edit }) = &self.modal
@@ -494,8 +519,8 @@ impl Workspace {
         {
             return div()
                 .id(("tab", tab.id))
-                .px(px(space::MD))
-                .py(px(space::XS))
+                .px(z(space::MD))
+                .py(z(space::XS))
                 .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation()) // inside: keep editing
                 .child(text_field(edit))
                 .into_any_element();
@@ -505,7 +530,7 @@ impl Workspace {
             _ if exited => div()
                 .id(("restart", tab.id))
                 .flex_none()
-                .rounded(px(radius::SM))
+                .rounded(z(radius::SM))
                 .cursor_pointer()
                 .hover(|s| s.bg(t.bg.hover))
                 .child(ui::icon(icon::RESTART, 14., t.state.error))
@@ -527,21 +552,21 @@ impl Workspace {
                     .into_any_element()
             }
             agent::State::NeedsYou => {
-                div().flex_none().size(px(14.)).flex().items_center().justify_center().child(
-                    div().size(px(8.)).rounded_full().bg(t.state.needs_you),
+                div().flex_none().size(z(14.)).flex().items_center().justify_center().child(
+                    div().size(z(8.)).rounded_full().bg(t.state.needs_you),
                 ).into_any_element()
             }
             agent::State::Done => {
                 ui::icon(icon::DONE, 14., if agent.unseen { t.state.done } else { t.state.done_seen }).into_any_element()
             }
-            agent::State::Ready => div().flex_none().size(px(14.)).flex().items_center().justify_center().child(
-                div().size(px(7.)).rounded_full().border_1().border_color(t.text.dim),
+            agent::State::Ready => div().flex_none().size(z(14.)).flex().items_center().justify_center().child(
+                div().size(z(7.)).rounded_full().border_1().border_color(t.text.dim),
             ).into_any_element(),
             agent::State::NoAgent if tab.claude_session.is_some() => ui::icon(icon::RESUMABLE, 13., t.text.dim).into_any_element(),
-            agent::State::NoAgent if unread && !active => div().flex_none().size(px(14.)).flex().items_center().justify_center().child(
-                div().size(px(6.)).rounded_full().bg(t.accent),
+            agent::State::NoAgent if unread && !active => div().flex_none().size(z(14.)).flex().items_center().justify_center().child(
+                div().size(z(6.)).rounded_full().bg(t.accent),
             ).into_any_element(),
-            agent::State::NoAgent => div().flex_none().size(px(14.)).into_any_element(),
+            agent::State::NoAgent => div().flex_none().size(z(14.)).into_any_element(),
         };
         let ago = agent.last_activity.map(|a| ui::fmt_ago(now - a));
         let (repo_totals, branch) = match &tab.repo {
@@ -559,7 +584,7 @@ impl Workspace {
             div()
                 .flex()
                 .items_center()
-                .gap(px(space::XS))
+                .gap(z(space::XS))
                 .text_color(t.state.needs_you)
                 .child(ui::icon(icon::WARNING, 11., t.state.needs_you))
                 .child(div().min_w_0().truncate().child(format!("missing · {}", tilde(&tab.cwd))))
@@ -569,7 +594,7 @@ impl Workspace {
             div()
                 .flex()
                 .items_center()
-                .gap(px(space::XS))
+                .gap(z(space::XS))
                 // A linked worktree's branch: accent icon (its own checkout; it groups under the main project).
                 .when(matches!(tab.repo, TabRepo::Repo(_)), |d| d.child(ui::icon(icon::BRANCH, 11., if tab.main_root.is_some() { t.accent } else { t.text.dim })))
                 .child(div().min_w_0().truncate().child(label))
@@ -579,7 +604,7 @@ impl Workspace {
                         .ml_auto()
                         .flex_none()
                         .flex()
-                        .gap(px(space::XS))
+                        .gap(z(space::XS))
                         .children(files.map(|n| div().child(if n == 1 { "1 file".to_string() } else { format!("{n} files") })))
                         .child(line_counts(Some((clamp(add), clamp(del)))))
                 }))
@@ -589,18 +614,18 @@ impl Workspace {
         div()
             .id(("tab", tab.id))
             .relative()
-            .h(px(height::SESSION_ROW))
-            .mx(px(space::SM))
-            .px(px(space::MD))
+            .h(z(height::SESSION_ROW))
+            .mx(z(space::SM))
+            .px(z(space::MD))
             .flex()
             .flex_col()
             .justify_center()
-            .gap(px(space::XXS))
-            .rounded(px(radius::MD))
+            .gap(z(space::XXS))
+            .rounded(z(radius::MD))
             .cursor_pointer()
             .when(active, |d| d.bg(t.bg.selected))
             .when(!active, |d| d.hover(|s| s.bg(t.bg.hover)))
-            .children(bar.map(|c| div().absolute().left_0().top(px(10.)).bottom(px(10.)).w(px(2.)).rounded_full().bg(c)))
+            .children(bar.map(|c| div().absolute().left_0().top(z(10.)).bottom(z(10.)).w(z(2.)).rounded_full().bg(c)))
             .on_click(cx.listener(move |w, e: &ClickEvent, window, cx| {
                 if e.click_count() == 2 {
                     w.start_rename(i, window, cx);
@@ -612,21 +637,21 @@ impl Workspace {
                 div()
                     .flex()
                     .items_center()
-                    .gap(px(space::SM))
+                    .gap(z(space::SM))
                     .child(
                         div()
                             .flex_1()
                             .min_w_0()
                             .truncate()
-                            .text_size(px(text_size::MD))
+                            .text_size(z(text_size::MD))
                             .font_weight(if bold { FontWeight::SEMIBOLD } else { FontWeight::NORMAL })
                             .text_color(if active || bold { t.text.primary } else { t.text.muted })
                             .child(tab.name.clone()),
                     )
-                    .children(ago.map(|a| div().flex_none().text_size(px(text_size::XS)).text_color(t.text.dim).child(a)))
+                    .children(ago.map(|a| div().flex_none().text_size(z(text_size::XS)).text_color(t.text.dim).child(a)))
                     .child(state_icon),
             )
-            .child(div().text_size(px(text_size::XS)).text_color(t.text.dim).child(second))
+            .child(div().text_size(z(text_size::XS)).text_color(t.text.dim).child(second))
             .into_any_element()
     }
 
@@ -634,7 +659,7 @@ impl Workspace {
     fn session_header(&self) -> impl IntoElement + use<> {
         let t = theme::get();
         let Some(tab) = self.tabs.get(self.active) else {
-            return div().h(px(height::HEADER)).flex_none().bg(t.bg.elevated);
+            return div().h(z(height::HEADER)).flex_none().bg(t.bg.elevated);
         };
         let agent = self.agent(self.active);
         let since = agent.state_since.map(|s| fmt_for(now_secs() - s));
@@ -655,9 +680,9 @@ impl Workspace {
                     .flex_none()
                     .flex()
                     .items_center()
-                    .gap(px(space::SM))
-                    .text_size(px(text_size::XS))
-                    .child(div().size(px(6.)).rounded_full().bg(color))
+                    .gap(z(space::SM))
+                    .text_size(z(text_size::XS))
+                    .child(div().size(z(6.)).rounded_full().bg(color))
                     .child(div().text_color(t.text.muted).child(match &since {
                         Some(s) => format!("{label} · {s}"),
                         None => label.to_string(),
@@ -690,20 +715,20 @@ impl Workspace {
             .flex()
             .flex_none()
             .items_center()
-            .gap(px(space::XS))
-            .h(px(height::TAB_BAR))
-            .px(px(space::MD))
+            .gap(z(space::XS))
+            .h(z(height::TAB_BAR))
+            .px(z(space::MD))
             .border_b_1()
             .border_color(t.border.subtle)
             .child(tab(self, PanelTab::Files, icon::FILES, "Files  Ctrl+Shift+E", cx))
             .child(tab(self, PanelTab::Changes, icon::CHANGES, "Changes  Ctrl+Shift+G", cx))
             .when(changes > 0, |d| {
-                d.child(div().text_size(px(text_size::XS)).text_color(t.text.dim).child(changes.to_string()))
+                d.child(div().text_size(z(text_size::XS)).text_color(t.text.dim).child(changes.to_string()))
             })
     }
 
     /// Bottom bar: Claude usage limits, session counts, the active branch.
-    fn status_bar(&self) -> impl IntoElement + use<> {
+    fn status_bar(&self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
         let t = theme::get();
         let now = now_secs();
         let (five, seven) = self.agents.as_ref().map_or((None, None), |h| {
@@ -720,7 +745,7 @@ impl Workspace {
                 div()
                     .flex()
                     .items_center()
-                    .gap(px(space::SM))
+                    .gap(z(space::SM))
                     .child(div().text_color(t.text.dim).child(label))
                     .child(ui::meter(pct, 56.))
                     .child(div().text_color(t.text.muted).child(detail))
@@ -736,21 +761,43 @@ impl Workspace {
             .flex()
             .flex_none()
             .items_center()
-            .gap(px(space::XL))
-            .h(px(height::STATUS_BAR))
-            .px(px(space::LG))
+            .gap(z(space::XL))
+            .h(z(height::STATUS_BAR))
+            .px(z(space::LG))
             .bg(t.bg.panel)
             .border_t_1()
             .border_color(t.border.subtle)
-            .text_size(px(text_size::XS))
+            .text_size(z(text_size::XS))
             .children(limit("5h", five))
             .children(limit("Week", seven))
             .child(div().flex_1())
+            .when(self.zoom_flash.is_some(), |d| {
+                d.child(div().text_color(t.text.primary).child(format!("Zoom {}%", self.settings.ui_zoom)))
+            })
+            .when(!self.settings_notes.is_empty(), |d| {
+                let n = self.settings_notes.len();
+                d.child(
+                    div()
+                        .id("settings-notes")
+                        .flex()
+                        .items_center()
+                        .gap(z(space::XS))
+                        .cursor_pointer()
+                        .text_color(t.state.needs_you)
+                        .child(ui::icon(icon::WARNING, 11., t.state.needs_you))
+                        .child(format!("Settings: {n} problem{}", if n == 1 { "" } else { "s" }))
+                        .on_click(cx.listener(|w, _: &ClickEvent, window, cx| {
+                            if !w.settings_open() {
+                                w.open_settings(window, cx);
+                            }
+                        })),
+                )
+            })
             .children(branch.map(|b| {
                 div()
                     .flex()
                     .items_center()
-                    .gap(px(space::XS))
+                    .gap(z(space::XS))
                     .text_color(t.text.muted)
                     .child(ui::icon(icon::BRANCH, 11., t.text.dim))
                     .child(b)
@@ -765,35 +812,35 @@ impl Workspace {
         let t = theme::get();
         let card = || {
             div()
-                .w(px(520.))
+                .w(z(520.))
                 .h_auto()
-                .p(px(space::XL))
+                .p(z(space::XL))
                 .flex()
                 .flex_col()
-                .gap(px(space::MD))
-                .rounded(px(radius::LG))
+                .gap(z(space::MD))
+                .rounded(z(radius::LG))
                 .bg(t.bg.elevated)
                 .border_1()
                 .border_color(t.border.strong)
         };
         // `occlude`: clicks never reach (and focus) what is under the modal.
-        let scrim = || div().absolute().size_full().occlude().flex().justify_center().items_start().pt(px(120.)).bg(t.bg.scrim);
+        let scrim = || div().absolute().size_full().occlude().flex().justify_center().items_start().pt(z(120.)).bg(t.bg.scrim);
         if let Some(Modal::Confirm { title, body, files, ok, danger, .. }) = &self.modal {
             let (ok, danger) = (*ok, *danger);
             // Commit-confirm list: shared / via-command files stand out (they may hold other work).
             let list = (!files.is_empty()).then(|| {
                 div()
                     .id("confirm-files")
-                    .max_h(px(240.))
+                    .max_h(z(240.))
                     .overflow_y_scroll()
                     .flex()
                     .flex_col()
-                    .gap(px(space::XXS))
-                    .p(px(space::SM))
-                    .rounded(px(radius::MD))
+                    .gap(z(space::XXS))
+                    .p(z(space::SM))
+                    .rounded(z(radius::MD))
                     .bg(t.bg.input)
                     .font_family(MONO_FONT)
-                    .text_size(px(text_size::XS))
+                    .text_size(z(text_size::XS))
                     .children(files.iter().map(|(path, m)| {
                         let flagged = m.shared || m.via_command;
                         let tag = |icon_path: &'static str, label: &'static str| {
@@ -801,14 +848,14 @@ impl Workspace {
                                 .flex_none()
                                 .flex()
                                 .items_center()
-                                .gap(px(space::XXS))
+                                .gap(z(space::XXS))
                                 .child(ui::icon(icon_path, 11., t.state.needs_you))
                                 .child(label)
                         };
                         div()
                             .flex()
                             .items_center()
-                            .gap(px(space::SM))
+                            .gap(z(space::SM))
                             .text_color(if flagged { t.state.needs_you } else { t.text.primary })
                             .child(div().min_w_0().flex_1().truncate().child(path.clone()))
                             .when(m.shared, |d| d.child(tag(icon::SHARED, "shared")))
@@ -819,10 +866,10 @@ impl Workspace {
             let button = |id: &'static str, label: &'static str, danger: bool| {
                 div()
                     .id(id)
-                    .px(px(space::MD))
-                    .py(px(space::XS))
-                    .rounded(px(radius::MD))
-                    .text_size(px(text_size::SM))
+                    .px(z(space::MD))
+                    .py(z(space::XS))
+                    .rounded(z(radius::MD))
+                    .text_size(z(text_size::SM))
                     .cursor_pointer()
                     .when(danger, |d| d.bg(t.state.error).text_color(t.text.on_accent))
                     .when(!danger && label != "Cancel", |d| d.bg(t.accent).text_color(t.text.on_accent))
@@ -838,14 +885,14 @@ impl Workspace {
                                 div()
                                     .flex()
                                     .items_center()
-                                    .gap(px(space::SM))
+                                    .gap(z(space::SM))
                                     .child(if danger { ui::icon(icon::WARNING, 15., t.state.error) } else { ui::icon(icon::BRANCH, 15., t.accent) })
                                     .child(div().min_w_0().truncate().font_weight(FontWeight::SEMIBOLD).child(title.clone())),
                             )
-                            .child(div().text_size(px(text_size::SM)).text_color(t.text.muted).child(body.clone()))
+                            .child(div().text_size(z(text_size::SM)).text_color(t.text.muted).child(body.clone()))
                             .children(list)
                             .when(flagged, |d| {
-                                d.child(div().text_size(px(text_size::XS)).text_color(t.state.needs_you).child(
+                                d.child(div().text_size(z(text_size::XS)).text_color(t.state.needs_you).child(
                                     "Highlighted: shared with another session or changed by a shell command (best effort): check they hold only this agent's work.",
                                 ))
                             })
@@ -853,7 +900,7 @@ impl Workspace {
                                 div()
                                     .flex()
                                     .justify_end()
-                                    .gap(px(space::SM))
+                                    .gap(z(space::SM))
                                     .child(button("confirm-cancel", "Cancel", false).on_click(cx.listener(|w, _: &ClickEvent, window, cx| {
                                         w.close_modal(window, cx)
                                     })))
@@ -861,7 +908,7 @@ impl Workspace {
                                         w.confirm_ok(window, cx)
                                     }))),
                             )
-                            .child(div().text_size(px(text_size::XS)).text_color(t.text.dim).child(format!("Enter to {} · Esc to cancel", ok.to_lowercase()))),
+                            .child(div().text_size(z(text_size::XS)).text_color(t.text.dim).child(format!("Enter to {} · Esc to cancel", ok.to_lowercase()))),
                     )
                     .into_any_element(),
             );
@@ -884,9 +931,9 @@ impl Workspace {
                     .child(
                         card()
                             .child(div().font_weight(FontWeight::SEMIBOLD).child(format!("Rename {}", short_path(root))))
-                            .child(div().text_size(px(text_size::SM)).text_color(t.text.muted).child("Shown in the sidebar and the picker. Empty: the folder name."))
+                            .child(div().text_size(z(text_size::SM)).text_color(t.text.muted).child("Shown in the sidebar and the picker. Empty: the folder name."))
                             .child(text_field(edit))
-                            .child(div().text_size(px(text_size::XS)).text_color(t.text.dim).child("Enter to save · Esc to cancel")),
+                            .child(div().text_size(z(text_size::XS)).text_color(t.text.dim).child("Enter to save · Esc to cancel")),
                     )
                     .into_any_element(),
             ),
@@ -895,24 +942,24 @@ impl Workspace {
                 let kept = hook::resume_args(&words);
                 let dropped = dropped_words(&words, &kept);
                 let auto = d.auto;
-                let label = |text: &'static str| div().text_size(px(text_size::SM)).text_color(t.text.muted).child(text);
+                let label = |text: &'static str| div().text_size(z(text_size::SM)).text_color(t.text.muted).child(text);
                 Some(
                     scrim()
                         .child(
                             card()
-                                .w(px(600.))
+                                .w(z(600.))
                                 .child(div().font_weight(FontWeight::SEMIBOLD).child(format!("Defaults for {}", short_path(&d.root))))
                                 .child(
                                     div()
                                         .id("defaults-auto")
                                         .flex()
                                         .items_center()
-                                        .gap(px(space::SM))
-                                        .p(px(2.))
+                                        .gap(z(space::SM))
+                                        .p(z(2.))
                                         .cursor_pointer()
-                                        .text_size(px(text_size::SM))
+                                        .text_size(z(text_size::SM))
                                         .text_color(if d.focus == 0 { t.text.primary } else { t.text.muted })
-                                        .child(div().size(px(12.)).rounded(px(3.)).border_1().border_color(if auto { t.accent } else { t.border.strong }).when(auto, |d| d.bg(t.accent)))
+                                        .child(div().size(z(12.)).rounded(z(3.)).border_1().border_color(if auto { t.accent } else { t.border.strong }).when(auto, |d| d.bg(t.accent)))
                                         .child("Start claude in new sessions")
                                         .on_click(cx.listener(|w, _: &ClickEvent, _, cx| {
                                             if let Some(Modal::ProjectDefaults(d)) = &mut w.modal {
@@ -925,13 +972,13 @@ impl Workspace {
                                 .child(label("Claude flags (e.g. --model opus --effort high). Only flags safe to replay are kept; permission bypasses never."))
                                 .child(setup::text_input(&d.flags, d.focus == 1, "--model opus"))
                                 .when(!dropped.is_empty(), |e| {
-                                    e.child(div().text_size(px(text_size::XS)).text_color(t.state.needs_you).child(format!("Will be dropped (not allowed): {}", dropped.join(" "))))
+                                    e.child(div().text_size(z(text_size::XS)).text_color(t.state.needs_you).child(format!("Will be dropped (not allowed): {}", dropped.join(" "))))
                                 })
                                 .child(label("Setup command for new worktrees (runs in the session before claude)"))
                                 .child(setup::text_input(&d.setup, d.focus == 2, "e.g. pnpm install"))
                                 .child(label("Where new worktrees go (empty: <repo>-worktrees next to the repo)"))
                                 .child(setup::text_input(&d.wt_dir, d.focus == 3, "~/worktrees/project"))
-                                .child(div().text_size(px(text_size::XS)).text_color(t.text.dim).child("Tab next field · Space toggles · Enter save · Esc cancel")),
+                                .child(div().text_size(z(text_size::XS)).text_color(t.text.dim).child("Tab next field · Space toggles · Enter save · Esc cancel")),
                         )
                         .into_any_element(),
                 )
@@ -966,15 +1013,15 @@ fn text_field(edit: &LineEdit) -> impl IntoElement {
     div()
         .flex()
         .items_center()
-        .px(px(space::MD))
-        .py(px(space::SM))
-        .rounded(px(radius::MD))
+        .px(z(space::MD))
+        .py(z(space::SM))
+        .rounded(z(radius::MD))
         .bg(t.bg.input)
         .border_1()
         .border_color(t.accent)
-        .text_size(px(text_size::MD))
+        .text_size(z(text_size::MD))
         .child(edit.before_cursor().to_string())
-        .child(div().w(px(1.5)).h(px(16.)).bg(t.accent))
+        .child(div().w(z(1.5)).h(z(16.)).bg(t.accent))
         .child(edit.after_cursor().to_string())
 }
 
