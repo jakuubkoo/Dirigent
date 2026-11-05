@@ -119,7 +119,8 @@ impl Render for Workspace {
             // With blur the window is transparent where nothing paints: every region paints its own background.
             .when(!self.translucent, |d| d.bg(t.bg.base))
             .when(chrome.border > px(0.), |d| d.border(chrome.border).border_color(t.border.strong))
-            .on_key_down(cx.listener(Self::modal_key))
+            // Capture phase: an open modal gets every key first, wherever focus ended up (a click can focus the diff).
+            .capture_key_down(cx.listener(Self::modal_key))
             .on_action(cx.listener(|w, _: &NewSession, window, cx| w.open_new_session(window, cx)))
             .on_action(cx.listener(|w, _: &CloseSession, window, cx| w.close_active(window, cx)))
             .on_action(cx.listener(|w, _: &NextSession, window, cx| w.cycle(1, window, cx)))
@@ -713,7 +714,8 @@ impl Workspace {
                 .border_1()
                 .border_color(t.border.strong)
         };
-        let scrim = || div().absolute().size_full().flex().justify_center().items_start().pt(px(120.)).bg(t.bg.scrim);
+        // `occlude`: clicks never reach (and focus) what is under the modal.
+        let scrim = || div().absolute().size_full().occlude().flex().justify_center().items_start().pt(px(120.)).bg(t.bg.scrim);
         if let Some(Modal::Confirm { title, body, files, ok, danger, .. }) = &self.modal {
             let (ok, danger) = (*ok, *danger);
             // Commit-confirm list: shared / via-command files stand out (they may hold other work).

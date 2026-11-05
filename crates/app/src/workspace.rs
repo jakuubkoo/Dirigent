@@ -882,9 +882,8 @@ impl Workspace {
 
     fn close_modal(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.modal = None;
-        if let Some(view) = self.tabs.get(self.active).and_then(|t| t.view.as_ref()) {
-            window.focus(&view.read(cx).focus_handle(cx), cx);
-        }
+        // Back to what's shown: an open diff/preview hides the terminal (focusing it would leave no key target).
+        self.focus_main(window, cx);
         cx.notify();
     }
 
