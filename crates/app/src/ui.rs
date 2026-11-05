@@ -1,11 +1,13 @@
 //! Small shared UI pieces built from theme tokens: icons, tooltips, pills, meters, time formatting.
 
 use gpui::{
+    prelude::FluentBuilder as _,
     AnyElement, AnyView, App, AppContext, Context, Div, IntoElement, ParentElement, Render, Rgba, SharedString, Styled, Svg, Window,
     div, px, svg,
 };
 
-use crate::theme::{self, radius, text_size};
+use crate::line_edit::LineEdit;
+use crate::theme::{self, radius, space, text_size};
 
 pub mod icon {
     pub const CHEVRON_RIGHT: &str = "icons/chevron-right.svg";
@@ -47,6 +49,8 @@ pub mod icon {
     pub const GENERATE: &str = "icons/sparkles.svg";
     pub const PIN: &str = "icons/pin.svg";
     pub const MORE: &str = "icons/ellipsis.svg";
+    pub const SETTINGS: &str = "icons/settings.svg";
+    pub const SEARCH: &str = "icons/search.svg";
 }
 
 #[cfg(test)]
@@ -56,7 +60,7 @@ pub const ALL_ICONS: &[&str] = &[
     icon::RESUMABLE, icon::WARNING, icon::BRANCH, icon::REFRESH, icon::RESTART, icon::SHOW, icon::HIDE, icon::FOLDER,
     icon::FOLDER_OPEN, icon::FILE, icon::FILE_CODE, icon::FILE_TEXT, icon::FILE_JSON, icon::FILE_CONFIG,
     icon::FILE_LOCK, icon::FILE_IMAGE, icon::FILE_SHELL, icon::FILE_ARCHIVE, icon::TERMINAL,
-    icon::SHARED, icon::VIA_COMMAND, icon::GENERATE, icon::PIN, icon::MORE,
+    icon::SHARED, icon::VIA_COMMAND, icon::GENERATE, icon::PIN, icon::MORE, icon::SETTINGS, icon::SEARCH,
 ];
 
 /// An icon at `size` px in `color` (rasterized once per path/size, recolored for free).
@@ -100,6 +104,43 @@ impl Render for Tip {
             .text_color(t.text.primary)
             .child(self.0.clone())
     }
+}
+
+/// A one-line text input (caret only when focused, placeholder when empty).
+pub fn text_input(edit: &LineEdit, focused: bool, placeholder: &'static str) -> AnyElement {
+    let t = theme::get();
+    let caret = || div().flex_none().w(px(1.5)).h(px(15.)).bg(t.accent);
+    div()
+        .flex()
+        .items_center()
+        .min_w_0()
+        .overflow_hidden()
+        .px(px(space::MD))
+        .py(px(space::XS + 2.))
+        .rounded(px(radius::MD))
+        .bg(t.bg.input)
+        .border_1()
+        .border_color(if focused { t.accent } else { t.border.subtle })
+        .text_size(px(text_size::SM))
+        .when(edit.text.is_empty(), |d| d.when(focused, |d| d.child(caret())).child(div().text_color(t.text.faint).child(placeholder)))
+        .when(!edit.text.is_empty(), |d| {
+            d.child(div().flex_none().whitespace_nowrap().child(edit.before_cursor().to_string()))
+                .when(focused, |d| d.child(caret()))
+                .child(div().flex_none().whitespace_nowrap().child(edit.after_cursor().to_string()))
+        })
+        .into_any_element()
+}
+
+/// A checkbox's box (12 px; filled with the accent when on).
+pub fn check_box(on: bool) -> Div {
+    let t = theme::get();
+    div()
+        .flex_none()
+        .size(px(12.))
+        .rounded(px(3.))
+        .border_1()
+        .border_color(if on { t.accent } else { t.border.strong })
+        .when(on, |d| d.bg(t.accent))
 }
 
 pub fn tip(text: &'static str) -> impl Fn(&mut Window, &mut App) -> AnyView {

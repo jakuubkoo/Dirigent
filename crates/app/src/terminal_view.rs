@@ -35,6 +35,12 @@ pub enum Banner {
 }
 
 impl TerminalView {
+    /// Settings → Terminal font size: the next paint uses it (the workspace resizes the PTY after).
+    pub fn set_metrics(&mut self, metrics: Metrics, cx: &mut Context<Self>) {
+        self.metrics = metrics;
+        cx.notify();
+    }
+
     pub fn new(session: Session, metrics: Metrics, workspace: WeakEntity<Workspace>, cx: &mut Context<Self>) -> Self {
         let session = Rc::new(session);
         let rx = session.wakeups.clone();

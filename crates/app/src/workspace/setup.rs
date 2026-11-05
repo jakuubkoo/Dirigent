@@ -806,27 +806,4 @@ impl Workspace {
     }
 }
 
-/// A one-line text input (caret only when focused, placeholder when empty).
-pub(super) fn text_input(edit: &LineEdit, focused: bool, placeholder: &'static str) -> AnyElement {
-    let t = theme::get();
-    let caret = || div().flex_none().w(px(1.5)).h(px(15.)).bg(t.accent);
-    div()
-        .flex()
-        .items_center()
-        .min_w_0()
-        .overflow_hidden()
-        .px(px(space::MD))
-        .py(px(space::XS + 2.))
-        .rounded(px(radius::MD))
-        .bg(t.bg.input)
-        .border_1()
-        .border_color(if focused { t.accent } else { t.border.subtle })
-        .text_size(px(text_size::SM))
-        .when(edit.text.is_empty(), |d| d.when(focused, |d| d.child(caret())).child(div().text_color(t.text.faint).child(placeholder)))
-        .when(!edit.text.is_empty(), |d| {
-            d.child(div().flex_none().whitespace_nowrap().child(edit.before_cursor().to_string()))
-                .when(focused, |d| d.child(caret()))
-                .child(div().flex_none().whitespace_nowrap().child(edit.after_cursor().to_string()))
-        })
-        .into_any_element()
-}
+pub(crate) use crate::ui::text_input;

@@ -313,7 +313,11 @@ impl Workspace {
 
     /// The group header's `+`: a session in that project per its default; Shift: the opposite.
     pub(super) fn group_plus(&mut self, root: PathBuf, shift: bool, window: &mut Window, cx: &mut Context<Self>) {
-        let auto = self.projects.get(&root).is_some_and(|p| p.auto_claude);
+        let auto = match self.settings.plus_opens {
+            crate::settings::PlusOpens::Project => self.projects.get(&root).is_some_and(|p| p.auto_claude),
+            crate::settings::PlusOpens::Shell => false,
+            crate::settings::PlusOpens::Claude => true,
+        };
         self.new_session(root, Some(auto != shift), window, cx);
     }
 

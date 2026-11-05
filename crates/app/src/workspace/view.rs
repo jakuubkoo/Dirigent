@@ -18,6 +18,7 @@ impl Render for Workspace {
         crate::perf::root_render();
         self.flush_pending_open(window, cx);
         self.spinner_drawn.set(false);
+        self.refresh_metrics(window, cx);
         self.schedule_resize(window, cx);
         self.arm_minute_timer(cx);
         let t = theme::get();
@@ -26,6 +27,7 @@ impl Render for Workspace {
         let main = match (&self.overlay, self.tabs.get(self.active)) {
             (Some(Overlay::Diff(v)), _) => v.clone().cached(StyleRefinement::default().size_full()).into_any_element(),
             (Some(Overlay::File(v)), _) => v.clone().cached(StyleRefinement::default().size_full()).into_any_element(),
+            (Some(Overlay::Settings(v)), _) => v.clone().cached(StyleRefinement::default().size_full()).into_any_element(),
             (None, Some(Tab { view: Some(view), .. })) => {
                 view.clone().cached(StyleRefinement::default().size_full()).into_any_element()
             }
@@ -140,6 +142,10 @@ impl Render for Workspace {
             .on_action(cx.listener(|w, _: &ShowChanges, window, cx| w.show_panel_tab(PanelTab::Changes, window, cx)))
             .on_action(cx.listener(|w, _: &ShowFiles, window, cx| w.show_panel_tab(PanelTab::Files, window, cx)))
             .on_action(cx.listener(|w, _: &ToggleDiffMode, _, cx| w.toggle_diff_mode(cx)))
+            .on_action(cx.listener(|w, _: &OpenSettings, window, cx| w.open_settings(window, cx)))
+            .on_action(cx.listener(|w, _: &ZoomIn, _, cx| w.zoom(Some(1.), cx)))
+            .on_action(cx.listener(|w, _: &ZoomOut, _, cx| w.zoom(Some(-1.), cx)))
+            .on_action(cx.listener(|w, _: &ZoomReset, _, cx| w.zoom(None, cx)))
             .on_action(cx.listener(|w, _: &Activate1, window, cx| w.activate_nth(0, window, cx)))
             .on_action(cx.listener(|w, _: &Activate2, window, cx| w.activate_nth(1, window, cx)))
             .on_action(cx.listener(|w, _: &Activate3, window, cx| w.activate_nth(2, window, cx)))
@@ -187,7 +193,7 @@ impl Render for Workspace {
                     )
                     .children(right),
             )
-            .child(self.status_bar())
+            .child(self.status_bar(cx))
             .children(self.modal_view(window, cx))
             .children(self.menu_view(cx))
             .when(chrome.csd, |d| d.children(window_chrome::resize_handles(chrome.tiling)))
@@ -295,6 +301,11 @@ impl Workspace {
                     .on_click(cx.listener(|w, _: &ClickEvent, window, cx| w.open_new_session(window, cx))),
             )
             .child(
+                icon_button("settings", icon::SETTINGS, self.settings_open())
+                    .tooltip(tip("Settings  Ctrl+,"))
+                    .on_click(cx.listener(|w, _: &ClickEvent, window, cx| w.open_settings(window, cx))),
+            )
+            .child(
                 icon_button("collapse", icon::SIDEBAR_CLOSE, false)
                     .tooltip(tip("Hide sidebar  Ctrl+Shift+B"))
                     .on_click(cx.listener(|w, _: &ClickEvent, _, cx| w.toggle_sidebar(cx))),
@@ -325,6 +336,11 @@ impl Workspace {
                     icon_button("expand-title", icon::SIDEBAR_OPEN, false)
                         .tooltip(tip("Show sidebar  Ctrl+Shift+B"))
                         .on_click(cx.listener(|w, _: &ClickEvent, _, cx| w.toggle_sidebar(cx))),
+                )
+                .child(
+                    icon_button("settings-title", icon::SETTINGS, self.settings_open())
+                        .tooltip(tip("Settings  Ctrl+,"))
+                        .on_click(cx.listener(|w, _: &ClickEvent, window, cx| w.open_settings(window, cx))),
                 )
                 .into_any_element()
         };
@@ -703,7 +719,7 @@ impl Workspace {
     }
 
     /// Bottom bar: Claude usage limits, session counts, the active branch.
-    fn status_bar(&self) -> impl IntoElement + use<> {
+    fn status_bar(&self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
         let t = theme::get();
         let now = now_secs();
         let (five, seven) = self.agents.as_ref().map_or((None, None), |h| {
@@ -746,6 +762,25 @@ impl Workspace {
             .children(limit("5h", five))
             .children(limit("Week", seven))
             .child(div().flex_1())
+            .when(!self.settings_notes.is_empty(), |d| {
+                let n = self.settings_notes.len();
+                d.child(
+                    div()
+                        .id("settings-notes")
+                        .flex()
+                        .items_center()
+                        .gap(px(space::XS))
+                        .cursor_pointer()
+                        .text_color(t.state.needs_you)
+                        .child(ui::icon(icon::WARNING, 11., t.state.needs_you))
+                        .child(format!("Settings: {n} problem{}", if n == 1 { "" } else { "s" }))
+                        .on_click(cx.listener(|w, _: &ClickEvent, window, cx| {
+                            if !w.settings_open() {
+                                w.open_settings(window, cx);
+                            }
+                        })),
+                )
+            })
             .children(branch.map(|b| {
                 div()
                     .flex()

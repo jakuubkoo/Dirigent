@@ -15,24 +15,25 @@ use session::alacritty_terminal::term::color::Colors;
 use session::alacritty_terminal::vte::ansi::{Color, CursorShape, NamedColor};
 use session::Session;
 
-use crate::theme::{self, MONO_FONT, TERMINAL_FONT_SIZE};
+use crate::theme::{self, MONO_FONT};
 
 #[derive(Clone)]
 pub struct Metrics {
     font: Font,
-    font_size: Pixels,
+    pub font_size: Pixels,
     pub cell_width: Pixels,
     pub line_height: Pixels,
 }
 
 impl Metrics {
-    pub fn new(window: &mut Window) -> Self {
+    /// `size`: the font size in px (Settings → Terminal); the line height stays a whole pixel.
+    pub fn new(window: &mut Window, size: f32) -> Self {
         let font = font(MONO_FONT);
-        let font_size = px(TERMINAL_FONT_SIZE);
+        let font_size = px(size);
         let ts = window.text_system();
         let id = ts.resolve_font(&font);
-        let cell_width = ts.advance(id, font_size, 'm').map(|s| s.width).unwrap_or(px(TERMINAL_FONT_SIZE * 0.6));
-        Self { font, font_size, cell_width, line_height: px((TERMINAL_FONT_SIZE * 1.2).round()) }
+        let cell_width = ts.advance(id, font_size, 'm').map(|s| s.width).unwrap_or(px(size * 0.6));
+        Self { font, font_size, cell_width, line_height: px((size * 1.2).round()) }
     }
 }
 

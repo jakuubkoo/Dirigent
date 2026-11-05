@@ -20,14 +20,6 @@ pub struct State {
     /// Right-side git panel (added after version 1 shipped: missing in older files).
     #[serde(default)]
     pub git_panel: PanelState,
-    #[serde(default)]
-    pub diff_mode: DiffMode,
-    #[serde(default)]
-    pub split_style: SplitStyle,
-    #[serde(default)]
-    pub diff_engine: DiffEngine,
-    #[serde(default)]
-    pub notifications: Notifications,
     /// Remembered projects (added later: missing in older files → seeded from the tabs).
     #[serde(default)]
     pub projects: Option<Vec<crate::projects::Project>>,
@@ -44,10 +36,6 @@ impl Default for State {
             last_dir: None,
             git_panel: PanelState::default(),
             collapsed_groups: Vec::new(),
-            diff_mode: DiffMode::Unified,
-            split_style: SplitStyle::Clean,
-            diff_engine: DiffEngine::Auto,
-            notifications: Notifications::default(),
             projects: None,
         }
     }
@@ -92,52 +80,6 @@ impl Default for PanelState {
     fn default() -> Self {
         Self { width: 340., open: true, tab: PanelTab::Changes, show_ignored: true }
     }
-}
-
-/// How the diff view lays out changes.
-#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq, Default)]
-#[serde(rename_all = "lowercase")]
-pub enum DiffMode {
-    #[default]
-    Unified,
-    Split,
-}
-
-/// How the split diff draws changes: Classic = line backgrounds and +/- markers; Clean = plain code with only the
-/// changed tokens (or whole added/removed lines) colored.
-#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq, Default)]
-#[serde(rename_all = "lowercase")]
-pub enum SplitStyle {
-    Classic,
-    #[default]
-    Clean,
-}
-
-/// Desktop notifications (no settings UI yet: edit the state file). Fields default individually.
-#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq)]
-#[serde(default)]
-pub struct Notifications {
-    /// A session needs you (permission prompt, question).
-    pub needs_you: bool,
-    /// A session finished its turn.
-    pub done: bool,
-    pub sound: bool,
-}
-
-impl Default for Notifications {
-    fn default() -> Self {
-        Self { needs_you: true, done: true, sound: false }
-    }
-}
-
-/// What finds the changes in a diff: Auto = the structural (syntax tree) diff when the file allows it, else the
-/// word diff; Word = always the word diff.
-#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq, Default)]
-#[serde(rename_all = "lowercase")]
-pub enum DiffEngine {
-    #[default]
-    Auto,
-    Word,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -238,6 +180,11 @@ fn backup(path: &Path, why: &str) -> State {
 
 /// Atomic: write `<file>.tmp`, fsync, rename over the old file. A crash leaves either the old or the new state.
 pub fn save(path: &Path, state: &State) -> std::io::Result<()> {
+    write_atomic(path, &serde_json::to_vec_pretty(state).map_err(std::io::Error::other)?)
+}
+
+/// `<file>.tmp`, fsync, rename over `path` (creating its directory).
+pub fn write_atomic(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
     use std::io::Write;
     if let Some(dir) = path.parent() {
         std::fs::create_dir_all(dir)?;
@@ -246,7 +193,7 @@ pub fn save(path: &Path, state: &State) -> std::io::Result<()> {
     tmp.push(".tmp");
     let tmp = PathBuf::from(tmp);
     let mut f = std::fs::File::create(&tmp)?;
-    f.write_all(&serde_json::to_vec_pretty(state).map_err(std::io::Error::other)?)?;
+    f.write_all(bytes)?;
     f.sync_all()?;
     std::fs::rename(&tmp, path)
 }
@@ -318,10 +265,6 @@ mod tests {
             window: Some(WindowState { mode: WindowMode::Maximized, x: 10., y: 20., w: 1200., h: 750. }),
             last_dir: Some("/home/x".into()),
             git_panel: PanelState { width: 400., open: false, tab: PanelTab::Files, show_ignored: false },
-            diff_mode: DiffMode::Split,
-            split_style: SplitStyle::Classic,
-            diff_engine: DiffEngine::Word,
-            notifications: Notifications { needs_you: true, done: false, sound: true },
             ..State::default()
         }
     }
@@ -340,13 +283,13 @@ mod tests {
         assert_eq!(old.tabs[0].claude_session, None);
         assert_eq!(old.git_panel, PanelState::default(), "files from before the git panel load with its defaults");
         assert!(old.tabs[0].expanded.is_empty());
-        assert_eq!(old.diff_mode, DiffMode::Unified);
-        assert_eq!(old.split_style, SplitStyle::Clean, "Clean is the default split style");
-        assert_eq!(old.diff_engine, DiffEngine::Auto, "structural when possible by default");
-        assert_eq!(old.notifications, Notifications { needs_you: true, done: true, sound: false });
+        // Preferences an older file still holds (now in settings.json) are ignored, and the next save drops them.
         std::fs::write(&p, r#"{"version":1,"tabs":[],"active":0,"sidebar":{"width":200,"open":false},"window":null,
-            "last_dir":null,"notifications":{"done":false}}"#).unwrap();
-        assert_eq!(load(&p).notifications, Notifications { done: false, ..Notifications::default() }, "per field");
+            "last_dir":null,"diff_mode":"split","notifications":{"done":false}}"#).unwrap();
+        let st = load(&p);
+        save(&p, &st).unwrap();
+        let text = std::fs::read_to_string(&p).unwrap();
+        assert!(!text.contains("diff_mode") && !text.contains("notifications"), "{text}");
         // A git panel saved before the file tree existed keeps its width/open.
         std::fs::write(&p, r#"{"version":1,"tabs":[],"active":0,"sidebar":{"width":200,"open":false},"window":null,
             "last_dir":null,"git_panel":{"width":280,"open":false}}"#).unwrap();

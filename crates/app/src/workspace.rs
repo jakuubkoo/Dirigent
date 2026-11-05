@@ -20,6 +20,7 @@ use crate::git_panel::{self, DiffView, GitPanel, PanelView, Repos};
 use crate::line_edit::{Edit, LineEdit};
 use crate::notify;
 use crate::persist::{self, PanelTab, State as Saved, TabState, WindowMode, WindowState};
+use crate::settings::{self, Settings};
 use crate::window_chrome::{self, Chrome};
 use crate::terminal_element::Metrics;
 use crate::terminal_view::{Banner, PADDING, TerminalView};
@@ -27,7 +28,7 @@ use crate::terminal_view::{Banner, PADDING, TerminalView};
 actions!(
     dirigent,
     [
-        NewSession, NewInProject, CloseSession, NextSession, PrevSession, Rename, ToggleSidebar, NextNeedsYou, ResumeAll, ShowChanges, ShowFiles, ToggleDiffMode,
+        NewSession, NewInProject, CloseSession, NextSession, PrevSession, Rename, ToggleSidebar, NextNeedsYou, ResumeAll, ShowChanges, ShowFiles, ToggleDiffMode, OpenSettings, ZoomIn, ZoomOut, ZoomReset,
         Activate1, Activate2, Activate3, Activate4, Activate5, Activate6, Activate7, Activate8, Activate9
     ]
 );
@@ -94,11 +95,12 @@ pub(super) struct SessionOpts {
     pub project: Option<PathBuf>,
 }
 
-/// What covers the terminal area: a diff or a file preview. The active session is hidden meanwhile.
+/// What covers the terminal area: a diff, a file preview or Settings. The active session is hidden meanwhile.
 #[derive(Clone)]
 enum Overlay {
     Diff(Entity<DiffView>),
     File(Entity<FileView>),
+    Settings(Entity<crate::settings_view::SettingsView>),
 }
 
 #[derive(Clone, PartialEq)]
@@ -184,12 +186,25 @@ pub struct Workspace {
     /// Git writes per repo (lock, running/failed) and the commit boxes (drafts per repo).
     git_ops: HashMap<PathBuf, crate::git_ops::RepoOps>,
     commit_boxes: HashMap<PathBuf, Entity<crate::commit_box::CommitBox>>,
-    notifications: persist::Notifications,
+    /// Preferences (settings.json), and what's wrong with the file (shown on the Settings page and the status bar).
+    pub(crate) settings: Settings,
+    pub(crate) settings_notes: Vec<String>,
+    /// The file isn't valid JSON: the next UI change keeps it as `.bad-<time>` before writing.
+    settings_broken: bool,
+    pub(crate) settings_path: PathBuf,
+    /// The file's text as we last wrote or read it: a watcher ping with the same text is our own write.
+    settings_text: Option<String>,
+    settings_save_pending: bool,
+    _settings_save: Option<Task<()>>,
+    _settings_watch: Option<::notify::RecommendedWatcher>,
+    _settings_task: Option<Task<()>>,
+    /// The font size changed: metrics are rebuilt at the next render (needs the window).
+    metrics_stale: bool,
     _click_task: Option<Task<()>>,
     /// `dirigent <path>` requests from other processes.
     _cli_task: Option<Task<()>>,
     /// Remembered projects (picker, sidebar groups, per-project defaults).
-    projects: crate::projects::Projects,
+    pub(crate) projects: crate::projects::Projects,
     /// The state file had no project list yet: fill it from the restored tabs' groups (`hint_groups`).
     seed_projects: bool,
     /// An open dropdown (sidebar group header).
@@ -223,10 +238,6 @@ pub struct Workspace {
     files_panel: Entity<FilesPanel>,
     panel_tab: PanelTab,
     show_ignored: bool,
-    /// Unified or split diffs (saved); split falls back to unified while the main area is narrow.
-    diff_mode: persist::DiffMode,
-    split_style: persist::SplitStyle,
-    diff_engine: persist::DiffEngine,
     /// Directory listings shown by any spawned tab's tree.
     tree_cache: file_tree::Cache,
     /// Listing requests in flight: directory → request id (only the newest applies).
@@ -252,12 +263,13 @@ impl Workspace {
     pub fn new(
         saved: Saved,
         state_path: PathBuf,
+        (settings_path, loaded): (PathBuf, settings::Loaded),
         translucent: bool,
         launch: crate::cli::Launch,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
-        let metrics = Metrics::new(window);
+        let metrics = Metrics::new(window, loaded.parsed.settings.font_size);
         let last_dir = saved
             .last_dir
             .clone()
@@ -312,7 +324,16 @@ impl Workspace {
             _changes_task: None,
             git_ops: HashMap::new(),
             commit_boxes: HashMap::new(),
-            notifications: saved.notifications,
+            settings: loaded.parsed.settings,
+            settings_notes: loaded.parsed.notes,
+            settings_broken: loaded.parsed.broken,
+            settings_path,
+            settings_text: loaded.text,
+            settings_save_pending: false,
+            _settings_save: None,
+            _settings_watch: None,
+            _settings_task: None,
+            metrics_stale: false,
             _click_task: None,
             _cli_task: None,
             projects: crate::projects::Projects(saved.projects.clone().unwrap_or_default()),
@@ -341,9 +362,6 @@ impl Workspace {
             files_panel,
             panel_tab: saved.git_panel.tab,
             show_ignored: saved.git_panel.show_ignored,
-            diff_mode: saved.diff_mode,
-            split_style: saved.split_style,
-            diff_engine: saved.diff_engine,
             tree_cache: Default::default(),
             tree_pending: HashMap::new(),
             tree_req: 0,
@@ -439,6 +457,7 @@ impl Workspace {
             async {}
         }));
         this.applied = this.grid_size(window);
+        this.watch_settings(window, cx);
 
         if let Ok(script) = std::env::var("DIRIGENT_RUN") {
             // Perf harness: one (eagerly spawned) session per line, the line typed into it; saved tabs are ignored.
@@ -550,6 +569,22 @@ impl Workspace {
             cx.spawn_in(window, async move |this, cx| {
                 cx.background_executor().timer(Duration::from_millis(ms)).await;
                 let _ = this.update_in(cx, |w, window, cx| w.open_new_session(window, cx));
+            })
+            .detach();
+        }
+
+        if let Ok(spec) = std::env::var("DIRIGENT_PERF_SETTINGS") {
+            // Screenshot harness: `<ms>[:<category or search>]` opens Settings there after `ms` milliseconds.
+            let (ms, what) = spec.split_once(':').unwrap_or((&spec, ""));
+            let (ms, what) = (ms.parse().unwrap_or(500), what.to_string());
+            cx.spawn_in(window, async move |this, cx| {
+                cx.background_executor().timer(Duration::from_millis(ms)).await;
+                let _ = this.update_in(cx, |w, window, cx| {
+                    w.open_settings(window, cx);
+                    if let Some(Overlay::Settings(v)) = &w.overlay {
+                        v.update(cx, |v, cx| v.harness(&what, cx));
+                    }
+                });
             })
             .detach();
         }
@@ -792,6 +827,9 @@ impl Workspace {
             None => Vec::new(),
         };
         let session = Session::spawn(dir, self.applied, &env).expect("spawn shell");
+        if self.settings.scrollback != Settings::default().scrollback {
+            session.set_scrollback(self.settings.scrollback);
+        }
         let (metrics, ws) = (self.metrics.clone(), cx.entity().downgrade());
         cx.new(|cx| TerminalView::new(session, metrics, ws, cx))
     }
@@ -936,8 +974,8 @@ impl Workspace {
             session.write(format!("{line}\r").as_bytes());
             // A folder claude hasn't seen asks "Do you trust the files in this folder?" with "No, exit" selected:
             // Down + Enter picks "Yes, I trust this folder". Only for this start, within 30 s; a trusted folder never
-            // shows it and the watch expires. (To become a setting: on/off.)
-            if claude {
+            // shows it and the watch expires. Off in Settings → General.
+            if claude && self.settings.trust_auto_accept {
                 // Setup may run a while first: a longer watch then.
                 let within = Duration::from_secs(if setup.is_some() { 600 } else { 30 });
                 session.answer_once(TRUST_PROMPT, vec![b"\x1b[B".to_vec(), b"\r".to_vec()], within);
@@ -1149,14 +1187,8 @@ impl Workspace {
                         self.projects.touch(&d.root, now_secs()); // a group that wasn't remembered yet
                     }
                     if let Some(p) = self.projects.get_mut(&d.root) {
-                        p.auto_claude = d.auto;
-                        p.claude_args = hook::resume_args(&hook::split_words(&d.flags.text));
-                        p.setup_cmd = Some(d.setup.text.trim().to_string()).filter(|c| !c.is_empty());
-                        let dir = d.wt_dir.text.trim();
-                        p.worktrees_dir = (!dir.is_empty()).then(|| match dir.strip_prefix('~') {
-                            Some(rest) => home().join(rest.trim_start_matches('/')),
-                            None => d.root.join(dir), // absolute stays absolute
-                        });
+                        let typed = crate::projects::Typed { auto: d.auto, flags: &d.flags.text, setup: &d.setup.text, wt_dir: &d.wt_dir.text };
+                        p.apply_defaults(&typed, &home());
                         self.mark_dirty(cx);
                     }
                     self.close_modal(window, cx);
@@ -1222,7 +1254,7 @@ impl Workspace {
                 continue;
             }
             tab.notified_seq = a.notice_seq;
-            if !notify::should_notify(a.state, self.window_active, i == self.active, self.notifications) {
+            if !notify::should_notify(a.state, self.window_active, i == self.active, self.settings.notifications) {
                 continue;
             }
             let project = match &tab.repo {
@@ -1237,7 +1269,7 @@ impl Workspace {
             let urgent = a.state == agent::State::NeedsYou;
             let body = a.note.clone().unwrap_or_else(|| if urgent { "Needs your input" } else { "Finished" }.into());
             crate::perf::event_with(|| format!("notify tab {}: {body}", tab.id));
-            self.notifier.show(notify::Notice { tab: tab.id as u32, title, body, urgent, sound: self.notifications.sound });
+            self.notifier.show(notify::Notice { tab: tab.id as u32, title, body, urgent, sound: self.settings.notifications.sound });
         }
     }
 
@@ -1371,10 +1403,6 @@ impl Workspace {
                 tab: self.panel_tab,
                 show_ignored: self.show_ignored,
             },
-            diff_mode: self.diff_mode,
-            split_style: self.split_style,
-            diff_engine: self.diff_engine,
-            notifications: self.notifications,
             projects: Some(self.projects.0.clone()),
             ..Saved::default()
         }
@@ -1705,9 +1733,9 @@ impl Workspace {
             }
         }
         let ws = cx.entity().downgrade();
-        let lh = self.metrics.line_height;
-        let mode = (self.diff_mode, self.split_style, self.diff_engine, self.diff_narrow(window));
-        let view = cx.new(|cx| DiffView::new(root, file, lh, mode, ws, cx));
+        let m = self.metrics.clone();
+        let mode = (self.settings.diff_mode, self.settings.split_style, self.settings.diff_engine, self.diff_narrow(window));
+        let view = cx.new(|cx| DiffView::new(root, file, &m, mode, ws, cx));
         self.show_overlay(Overlay::Diff(view), window, cx);
     }
 
@@ -1718,35 +1746,183 @@ impl Workspace {
     /// Ctrl+Shift+D (only while a diff is open) and the diff header's switch.
     pub fn toggle_diff_mode(&mut self, cx: &mut Context<Self>) {
         if matches!(self.overlay, Some(Overlay::Diff(_))) {
-            let mode = match self.diff_mode {
-                persist::DiffMode::Unified => persist::DiffMode::Split,
-                persist::DiffMode::Split => persist::DiffMode::Unified,
+            let mode = match self.settings.diff_mode {
+                settings::DiffMode::Unified => settings::DiffMode::Split,
+                settings::DiffMode::Split => settings::DiffMode::Unified,
             };
             self.set_diff_mode(mode, cx);
         }
     }
 
-    pub fn set_diff_mode(&mut self, mode: persist::DiffMode, cx: &mut Context<Self>) {
-        if mode != self.diff_mode {
-            self.diff_mode = mode;
-            self.mark_dirty(cx);
-            self.sync_diff_mode(cx);
+    pub fn set_diff_mode(&mut self, mode: settings::DiffMode, cx: &mut Context<Self>) {
+        self.change_settings(|s| s.diff_mode = mode, cx);
+    }
+
+    pub fn set_split_style(&mut self, style: settings::SplitStyle, cx: &mut Context<Self>) {
+        self.change_settings(|s| s.split_style = style, cx);
+    }
+
+    pub fn set_diff_engine(&mut self, engine: settings::DiffEngine, cx: &mut Context<Self>) {
+        self.change_settings(|s| s.diff_engine = engine, cx);
+    }
+
+    /// A change from the Settings page or a diff header switch: applied now, written to settings.json.
+    pub fn change_settings(&mut self, f: impl FnOnce(&mut Settings), cx: &mut Context<Self>) {
+        let mut new = self.settings;
+        f(&mut new);
+        if new != self.settings {
+            self.apply_settings(new, cx);
+            self.save_settings(cx);
         }
     }
 
-    pub fn set_split_style(&mut self, style: persist::SplitStyle, cx: &mut Context<Self>) {
-        if style != self.split_style {
-            self.split_style = style;
-            self.mark_dirty(cx);
+    /// Makes `new` the live settings, touching only what changed.
+    fn apply_settings(&mut self, new: Settings, cx: &mut Context<Self>) {
+        let old = std::mem::replace(&mut self.settings, new);
+        if old.font_size != new.font_size {
+            self.metrics_stale = true; // rebuilt in render (needs the window)
+        }
+        if old.scrollback != new.scrollback {
+            for view in self.tabs.iter().filter_map(|t| t.view.as_ref()) {
+                view.read(cx).session.set_scrollback(new.scrollback);
+            }
+        }
+        if (old.diff_mode, old.split_style, old.diff_engine) != (new.diff_mode, new.split_style, new.diff_engine) {
             self.sync_diff_mode(cx);
+        }
+        self.sync_settings_view(cx);
+        cx.notify();
+    }
+
+    /// The open Settings page re-renders (it's a cached view).
+    pub(crate) fn sync_settings_view(&self, cx: &mut Context<Self>) {
+        if let Some(Overlay::Settings(v)) = &self.overlay {
+            v.update(cx, |_, cx| cx.notify());
         }
     }
 
-    pub fn set_diff_engine(&mut self, engine: persist::DiffEngine, cx: &mut Context<Self>) {
-        if engine != self.diff_engine {
-            self.diff_engine = engine;
+    /// Writes settings.json shortly after a change (the latest values; one write at a time), off the UI thread.
+    fn save_settings(&mut self, cx: &mut Context<Self>) {
+        // What we write is the whole truth now: the old file's problems are gone with it.
+        self.settings_notes = if self.settings_broken {
+            vec!["settings.json wasn't valid JSON: kept as settings.json.bad-<time>, written fresh".into()]
+        } else {
+            Vec::new()
+        };
+        if self.settings_save_pending {
+            return;
+        }
+        self.settings_save_pending = true;
+        self._settings_save = Some(cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(Duration::from_millis(50)).await;
+            let Ok((path, text, broken)) = this.update(cx, |w, _| {
+                w.settings_save_pending = false;
+                let text = w.settings.to_json();
+                w.settings_text = Some(text.clone());
+                (w.settings_path.clone(), text, std::mem::take(&mut w.settings_broken))
+            }) else {
+                return;
+            };
+            let result = cx.background_executor().spawn(async move { settings::save(&path, &text, broken) }).await;
+            if let Err(e) = result {
+                eprintln!("dirigent: saving settings failed: {e}");
+                let _ = this.update(cx, |w, cx| {
+                    w.settings_notes = vec![format!("Couldn't write settings.json: {e}")];
+                    w.sync_settings_view(cx);
+                    cx.notify();
+                });
+            }
+        }));
+    }
+
+    /// Hand edits of settings.json apply live: the watcher pings, the file is read off the UI thread.
+    fn watch_settings(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let (watcher, pings) = match settings::watch(&self.settings_path) {
+            Ok(w) => w,
+            Err(e) => return eprintln!("dirigent: settings.json is not watched (edits apply after a restart): {e}"),
+        };
+        self._settings_watch = Some(watcher);
+        let path = self.settings_path.clone();
+        self._settings_task = Some(cx.spawn_in(window, async move |this, cx| {
+            while pings.recv().await.is_ok() {
+                let p = path.clone();
+                let text = cx.background_executor().spawn(async move { std::fs::read_to_string(p) }).await;
+                let applied = this.update(cx, |w, cx| {
+                    let text = match text {
+                        Ok(t) => Some(t),
+                        Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
+                        Err(e) => {
+                            w.settings_notes = vec![format!("settings.json: {e}")];
+                            return cx.notify();
+                        }
+                    };
+                    if text == w.settings_text {
+                        return; // our own write
+                    }
+                    let parsed = match &text {
+                        Some(t) => settings::parse(t, &w.settings),
+                        None => settings::Parsed { settings: Settings::default(), notes: Vec::new(), broken: false },
+                    };
+                    crate::perf::event("settings reloaded");
+                    w.settings_text = text;
+                    w.settings_notes = parsed.notes;
+                    w.settings_broken = parsed.broken;
+                    w.apply_settings(parsed.settings, cx);
+                });
+                if applied.is_err() {
+                    return;
+                }
+            }
+        }));
+    }
+
+    /// Settings → Projects: a project's defaults as typed there (state file, not settings.json).
+    pub(crate) fn set_project_defaults(&mut self, root: &Path, typed: &crate::projects::Typed, cx: &mut Context<Self>) {
+        if let Some(p) = self.projects.get_mut(root) {
+            p.apply_defaults(typed, &home());
             self.mark_dirty(cx);
-            self.sync_diff_mode(cx);
+            self.sync_settings_view(cx);
+        }
+    }
+
+    /// Ctrl+= / Ctrl++ / Ctrl+- (1 px steps, 8–32) and Ctrl+0 (default): the terminal font size setting.
+    pub(crate) fn zoom(&mut self, step: Option<f32>, cx: &mut Context<Self>) {
+        let (min, max) = settings::FONT_SIZE;
+        self.change_settings(
+            |s| s.font_size = step.map_or(Settings::default().font_size, |d| (s.font_size + d).clamp(min, max)),
+            cx,
+        );
+    }
+
+    pub(crate) fn settings_open(&self) -> bool {
+        matches!(self.overlay, Some(Overlay::Settings(_)))
+    }
+
+    /// Ctrl+, and the gear: the Settings page over the main area (again: closes it).
+    pub fn open_settings(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if matches!(self.overlay, Some(Overlay::Settings(_))) {
+            return self.close_overlay(window, cx);
+        }
+        let ws = cx.entity().downgrade();
+        let view = cx.new(|cx| crate::settings_view::SettingsView::new(ws, cx));
+        self.show_overlay(Overlay::Settings(view), window, cx);
+    }
+
+    /// After a font size change: new metrics for every terminal and the open diff/preview, then the PTY resize.
+    pub(crate) fn refresh_metrics(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if !std::mem::take(&mut self.metrics_stale) {
+            return;
+        }
+        self.metrics = Metrics::new(window, self.settings.font_size);
+        let m = self.metrics.clone();
+        for view in self.tabs.iter().filter_map(|t| t.view.clone()) {
+            let m = m.clone();
+            view.update(cx, |v, cx| v.set_metrics(m, cx));
+        }
+        match &self.overlay {
+            Some(Overlay::Diff(v)) => v.update(cx, |v, cx| v.set_metrics(&m, cx)),
+            Some(Overlay::File(v)) => v.update(cx, |v, cx| v.set_metrics(&m, cx)),
+            _ => {}
         }
     }
 
@@ -1755,7 +1931,7 @@ impl Workspace {
     fn sync_diff_mode(&self, cx: &mut Context<Self>) {
         if let Some(Overlay::Diff(v)) = &self.overlay {
             let narrow = self.applied.cols < git_panel::MIN_SPLIT_COLS;
-            let (mode, style, engine) = (self.diff_mode, self.split_style, self.diff_engine);
+            let (mode, style, engine) = (self.settings.diff_mode, self.settings.split_style, self.settings.diff_engine);
             v.update(cx, |v, cx| v.set_mode(mode, style, engine, narrow, cx));
         }
     }
@@ -1777,8 +1953,8 @@ impl Workspace {
         };
         let base = tab.and_then(Self::tree_root).filter(|r| path.starts_with(r));
         let ws = cx.entity().downgrade();
-        let m = (self.metrics.line_height, self.metrics.cell_width);
-        let view = cx.new(|cx| FileView::new(path, repo, base, m, ws, cx));
+        let m = self.metrics.clone();
+        let view = cx.new(|cx| FileView::new(path, repo, base, &m, ws, cx));
         self.show_overlay(Overlay::File(view), window, cx);
     }
 
@@ -1792,6 +1968,7 @@ impl Workspace {
         let focus = match &overlay {
             Overlay::Diff(v) => v.focus_handle(cx),
             Overlay::File(v) => v.focus_handle(cx),
+            Overlay::Settings(v) => v.focus_handle(cx),
         };
         self.overlay = Some(overlay);
         self.overlay_seen = self.overlay_repo(cx).map_or(0, |r| self.repos.refreshes(&r));
@@ -1806,6 +1983,7 @@ impl Workspace {
         match self.overlay.as_ref()? {
             Overlay::Diff(d) => Some(d.read(cx).root.clone()),
             Overlay::File(f) => f.read(cx).repo.clone(),
+            Overlay::Settings(_) => None,
         }
     }
 
@@ -1841,7 +2019,7 @@ impl Workspace {
         self.overlay_cancel = Default::default();
         let (cancel, cache) = (self.overlay_cancel.clone(), self.syntax_cache.clone());
         match self.overlay.clone() {
-            None => {}
+            None | Some(Overlay::Settings(_)) => {}
             Some(Overlay::Diff(view)) => {
                 let (root, old, prev, settled) = {
                     let v = view.read(cx);
@@ -2219,6 +2397,7 @@ impl Workspace {
         let focus = match &self.overlay {
             Some(Overlay::Diff(v)) => Some(v.focus_handle(cx)),
             Some(Overlay::File(v)) => Some(v.focus_handle(cx)),
+            Some(Overlay::Settings(v)) => Some(v.focus_handle(cx)),
             None => self.tabs.get(self.active).and_then(|t| t.view.as_ref()).map(|v| v.focus_handle(cx)),
         };
         if let Some(f) = focus {
@@ -2299,11 +2478,11 @@ fn with_pinned(mut groups: Vec<(Option<PathBuf>, Vec<usize>)>, pinned: &[PathBuf
     groups
 }
 
-fn home() -> PathBuf {
+pub(crate) fn home() -> PathBuf {
     std::env::var_os("HOME").map(PathBuf::from).unwrap_or_else(|| PathBuf::from("/"))
 }
 
-fn tilde(p: &Path) -> String {
+pub(crate) fn tilde(p: &Path) -> String {
     match p.strip_prefix(home()) {
         Ok(rest) if rest.as_os_str().is_empty() => "~".into(),
         Ok(rest) => format!("~/{}", rest.display()),

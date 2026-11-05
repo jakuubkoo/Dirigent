@@ -10,7 +10,7 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex, mpsc};
 
 use crate::agent::State;
-use crate::persist::Notifications;
+use crate::settings::Notifications;
 
 pub struct Notice {
     pub tab: u32,

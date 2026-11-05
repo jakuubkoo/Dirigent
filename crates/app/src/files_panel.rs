@@ -12,7 +12,7 @@ use gpui::{
 };
 
 use crate::file_tree::{Key, Marks, Row};
-use crate::theme::{self, MONO_FONT, TERMINAL_FONT_SIZE, height, radius, space, text_size};
+use crate::theme::{self, MONO_FONT, height, radius, space, text_size};
 use crate::ui::{self, icon, line_counts, tip};
 use crate::scrollbar::{self, scrollbar};
 use crate::workspace::Workspace;
@@ -300,6 +300,8 @@ pub struct FileView {
     workspace: WeakEntity<Workspace>,
     line_height: Pixels,
     cell_width: Pixels,
+    /// One px under the terminal's font size (Settings → Terminal).
+    font_size: Pixels,
 }
 
 impl FileView {
@@ -307,7 +309,7 @@ impl FileView {
         path: PathBuf,
         repo: Option<PathBuf>,
         base: Option<PathBuf>,
-        metrics: (Pixels, Pixels),
+        m: &crate::terminal_element::Metrics,
         workspace: WeakEntity<Workspace>,
         cx: &mut Context<Self>,
     ) -> Self {
@@ -323,9 +325,15 @@ impl FileView {
             drag: Default::default(),
             focus: cx.focus_handle(),
             workspace,
-            line_height: metrics.0,
-            cell_width: metrics.1,
+            line_height: m.line_height,
+            cell_width: m.cell_width,
+            font_size: m.font_size - px(1.),
         }
+    }
+
+    pub fn set_metrics(&mut self, m: &crate::terminal_element::Metrics, cx: &mut Context<Self>) {
+        (self.line_height, self.cell_width, self.font_size) = (m.line_height, m.cell_width, m.font_size - px(1.));
+        cx.notify();
     }
 
     pub fn set_content(&mut self, content: Option<Content>, change: Option<git::FileChange>, cx: &mut Context<Self>) {
@@ -475,7 +483,7 @@ impl Render for FileView {
                 .track_scroll(&self.scroll)
                 .font_family(MONO_FONT)
                 .font_features(gpui::FontFeatures::disable_ligatures())
-                .text_size(px(TERMINAL_FONT_SIZE - 1.))
+                .text_size(self.font_size)
                 .line_height(lh);
                 div()
                     .relative()

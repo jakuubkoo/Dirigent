@@ -15,9 +15,9 @@ use gpui::{
 };
 
 use crate::scrollbar::{self, scrollbar};
-use crate::theme::{self, MONO_FONT, TERMINAL_FONT_SIZE, height, radius, space, text_size};
+use crate::theme::{self, MONO_FONT, height, radius, space, text_size};
 use crate::ui::{self, icon, line_counts, tip};
-use crate::persist::{DiffEngine, DiffMode, SplitStyle};
+use crate::settings::{DiffEngine, DiffMode, SplitStyle};
 use crate::workspace::Workspace;
 use syntax::structural::Fail;
 
@@ -652,13 +652,15 @@ pub struct DiffView {
     focus: FocusHandle,
     workspace: WeakEntity<Workspace>,
     line_height: gpui::Pixels,
+    /// One px under the terminal's font size (Settings → Terminal).
+    font_size: gpui::Pixels,
 }
 
 impl DiffView {
     pub fn new(
         root: PathBuf,
         file: FileChange,
-        line_height: gpui::Pixels,
+        m: &crate::terminal_element::Metrics,
         (mode, split_style, engine, narrow): (DiffMode, SplitStyle, DiffEngine, bool),
         workspace: WeakEntity<Workspace>,
         cx: &mut Context<Self>,
@@ -679,8 +681,14 @@ impl DiffView {
             drag: Default::default(),
             focus: cx.focus_handle(),
             workspace,
-            line_height,
+            line_height: m.line_height,
+            font_size: m.font_size - px(1.),
         }
+    }
+
+    pub fn set_metrics(&mut self, m: &crate::terminal_element::Metrics, cx: &mut Context<Self>) {
+        (self.line_height, self.font_size) = (m.line_height, m.font_size - px(1.));
+        cx.notify();
     }
 
     /// The current layout, handed to the next read so an unchanged diff isn't laid out again.
@@ -873,7 +881,7 @@ impl DiffView {
 }
 
 /// A small segmented control (the diff header's switches).
-fn segmented() -> gpui::Div {
+pub(crate) fn segmented() -> gpui::Div {
     let t = theme::get();
     div()
         .flex()
@@ -885,7 +893,7 @@ fn segmented() -> gpui::Div {
         .border_color(t.border.subtle)
 }
 
-fn segment(id: &'static str, label: &'static str, on: bool, enabled: bool) -> gpui::Stateful<gpui::Div> {
+pub(crate) fn segment(id: &'static str, label: &'static str, on: bool, enabled: bool) -> gpui::Stateful<gpui::Div> {
     let t = theme::get();
     div()
         .id(id)
@@ -1228,7 +1236,7 @@ impl Render for DiffView {
                 .font_family(MONO_FONT)
                 // One glyph per character: a ligature (`>=` → `≥`) would split under a word highlight.
                 .font_features(gpui::FontFeatures::disable_ligatures())
-                .text_size(px(TERMINAL_FONT_SIZE - 1.))
+                .text_size(self.font_size)
                 .line_height(self.line_height);
                 div()
                     .relative()
