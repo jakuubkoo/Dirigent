@@ -15,29 +15,7 @@ use session::alacritty_terminal::term::color::Colors;
 use session::alacritty_terminal::vte::ansi::{Color, CursorShape, NamedColor};
 use session::Session;
 
-pub mod palette {
-    use gpui::Rgba;
-    const fn rgb(hex: u32) -> Rgba {
-        Rgba {
-            r: ((hex >> 16) & 0xff) as f32 / 255.,
-            g: ((hex >> 8) & 0xff) as f32 / 255.,
-            b: (hex & 0xff) as f32 / 255.,
-            a: 1.,
-        }
-    }
-    pub const BG: Rgba = rgb(0x1e1e24);
-    pub const FG: Rgba = rgb(0xd8d8d8);
-    pub const CURSOR: Rgba = rgb(0xe8e8e8);
-    pub const ANSI: [Rgba; 16] = [
-        rgb(0x2a2a31), rgb(0xe0626c), rgb(0x8cc265), rgb(0xd9b25f),
-        rgb(0x5fa2e6), rgb(0xc27adf), rgb(0x4fb8c8), rgb(0xc8c8cc),
-        rgb(0x5c5c66), rgb(0xf07882), rgb(0xa5d97f), rgb(0xf0ca78),
-        rgb(0x7ab8f5), rgb(0xd696ef), rgb(0x6cd0de), rgb(0xf4f4f6),
-    ];
-}
-
-pub const FONT_FAMILY: &str = "DejaVu Sans Mono"; // ponytail: hard-coded; make it a setting when settings exist
-pub const FONT_SIZE: f32 = 14.;
+use crate::theme::{self, MONO_FONT, TERMINAL_FONT_SIZE};
 
 #[derive(Clone)]
 pub struct Metrics {
@@ -49,12 +27,12 @@ pub struct Metrics {
 
 impl Metrics {
     pub fn new(window: &mut Window) -> Self {
-        let font = font(FONT_FAMILY);
-        let font_size = px(FONT_SIZE);
+        let font = font(MONO_FONT);
+        let font_size = px(TERMINAL_FONT_SIZE);
         let ts = window.text_system();
         let id = ts.resolve_font(&font);
-        let cell_width = ts.advance(id, font_size, 'm').map(|s| s.width).unwrap_or(px(FONT_SIZE * 0.6));
-        Self { font, font_size, cell_width, line_height: px((FONT_SIZE * 1.2).round()) }
+        let cell_width = ts.advance(id, font_size, 'm').map(|s| s.width).unwrap_or(px(TERMINAL_FONT_SIZE * 0.6));
+        Self { font, font_size, cell_width, line_height: px((TERMINAL_FONT_SIZE * 1.2).round()) }
     }
 }
 
@@ -64,7 +42,7 @@ fn rgb_hsla(r: u8, g: u8, b: u8) -> Hsla {
 
 fn xterm256(i: u8) -> Hsla {
     match i {
-        0..16 => palette::ANSI[i as usize].into(),
+        0..16 => theme::get().terminal.ansi[i as usize].into(),
         16..232 => {
             let i = i - 16;
             let v = |c: u8| if c == 0 { 0 } else { 55 + c * 40 };
@@ -85,14 +63,14 @@ fn resolve(c: Color, colors: &Colors) -> Hsla {
         Color::Named(n) => over(n as usize).unwrap_or_else(|| {
             let i = n as usize;
             match n {
-                _ if i < 16 => palette::ANSI[i].into(),
-                NamedColor::Background => palette::BG.into(),
-                NamedColor::Cursor => palette::CURSOR.into(),
-                NamedColor::DimForeground => palette::FG.into(),
+                _ if i < 16 => theme::get().terminal.ansi[i].into(),
+                NamedColor::Background => theme::get().terminal.bg.into(),
+                NamedColor::Cursor => theme::get().terminal.cursor.into(),
+                NamedColor::DimForeground => theme::get().terminal.fg.into(),
                 _ if (NamedColor::DimBlack as usize..=NamedColor::DimWhite as usize).contains(&i) => {
-                    palette::ANSI[i - NamedColor::DimBlack as usize].into()
+                    theme::get().terminal.ansi[i - NamedColor::DimBlack as usize].into()
                 }
-                _ => palette::FG.into(),
+                _ => theme::get().terminal.fg.into(),
             }
         }),
     }
@@ -171,7 +149,7 @@ impl Element for TerminalElement {
         let mut rects: Vec<(usize, usize, usize, Hsla)> = Vec::new();
         let mut segs: Vec<Segment> = Vec::new();
         let mut cursor = None;
-        let default_bg: Hsla = palette::BG.into();
+        let default_bg: Hsla = theme::get().terminal.bg.into();
         {
             let term = self.session.term.lock();
             let content = term.renderable_content();
@@ -195,7 +173,7 @@ impl Element for TerminalElement {
                     std::mem::swap(&mut fg, &mut bg);
                 }
                 if cur_visible && cur.shape == CursorShape::Block && (row, col) == cur_at {
-                    (fg, bg) = (bg, palette::CURSOR.into());
+                    (fg, bg) = (bg, theme::get().terminal.cursor.into());
                 }
                 if flags.contains(Flags::DIM) {
                     fg.a *= 0.66;
@@ -296,7 +274,7 @@ impl Element for TerminalElement {
             let _ = line.paint(origin, m.line_height, TextAlign::Left, None, window, cx);
         }
         if let Some(c) = p.cursor {
-            window.paint_quad(fill(c, palette::CURSOR));
+            window.paint_quad(fill(c, theme::get().terminal.cursor));
         }
         crate::perf::term_paint(p.started);
     }

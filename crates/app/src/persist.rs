@@ -14,6 +14,9 @@ pub struct State {
     pub sidebar: SidebarState,
     pub window: Option<WindowState>,
     pub last_dir: Option<PathBuf>,
+    /// Collapsed sidebar groups: repo roots, `""` for "Other".
+    #[serde(default)]
+    pub collapsed_groups: Vec<PathBuf>,
     /// Right-side git panel (added after version 1 shipped: missing in older files).
     #[serde(default)]
     pub git_panel: PanelState,
@@ -29,6 +32,7 @@ impl Default for State {
             window: None,
             last_dir: None,
             git_panel: PanelState::default(),
+            collapsed_groups: Vec::new(),
         }
     }
 }

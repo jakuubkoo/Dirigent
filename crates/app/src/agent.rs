@@ -37,6 +37,14 @@ pub struct Agent {
     pub resume_failed: Option<String>,
     /// Claude Code's working directory, from its last hook (None when no claude runs).
     pub cwd: Option<PathBuf>,
+    /// Unix secs of the last hook from this tab's claude (kept after it exits).
+    pub last_activity: Option<i64>,
+    /// Unix secs when `state` last changed.
+    pub state_since: Option<i64>,
+}
+
+fn now_secs() -> i64 {
+    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs() as i64)
 }
 
 #[derive(Default, Debug)]
@@ -59,6 +67,7 @@ impl Board {
                 agent.started = false;
             }
             Kind::Hook { event, notification_type, session_id, cwd } => {
+                agent.last_activity = Some(now_secs());
                 if let Some(cwd) = cwd {
                     agent.cwd = Some(cwd.into());
                 }
@@ -84,6 +93,8 @@ impl Board {
                             session_id: agent.session_id.take(),
                             args: agent.args.take(),
                             resume_failed: failed,
+                            last_activity: agent.last_activity,
+                            state_since: Some(now_secs()),
                             ..Agent::default()
                         };
                         None
@@ -92,12 +103,16 @@ impl Board {
                 };
                 if let Some(next) = next {
                     agent.unseen = next == State::Done && (agent.state != State::Done || agent.unseen);
+                    if next != agent.state {
+                        agent.state_since = Some(now_secs());
+                    }
                     agent.state = next;
                 }
             }
             Kind::Status { model, context_pct, five_hour, seven_day } => {
                 if agent.state == State::NoAgent {
                     agent.state = State::Ready;
+                    agent.state_since = Some(now_secs());
                 }
                 if model.is_some() {
                     agent.model = model;
@@ -119,7 +134,12 @@ impl Board {
     /// The tab's shell restarted: live agent state is gone, the resumable session id and args stay.
     pub fn reset_live(&mut self, tab: u32) {
         if let Some(a) = self.tabs.get_mut(&tab) {
-            *a = Agent { session_id: a.session_id.take(), args: a.args.take(), ..Agent::default() };
+            *a = Agent {
+                session_id: a.session_id.take(),
+                args: a.args.take(),
+                last_activity: a.last_activity,
+                ..Agent::default()
+            };
         }
     }
 

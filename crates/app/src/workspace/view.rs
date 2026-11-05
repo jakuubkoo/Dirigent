@@ -1,0 +1,758 @@
+//! Rendering of the workspace: title bar, grouped session sidebar, slim header, main area, right panel, status
+//! bar and modals. All styling comes from `theme` tokens. State changes live in the parent module.
+
+use std::path::{Path, PathBuf};
+use std::time::Duration;
+
+use gpui::{
+    ClickEvent, Context, DragMoveEvent, FontWeight, IntoElement, MouseButton, Render,
+    SharedString, StyleRefinement, Transformation, Window, div, percentage, px,
+};
+
+use super::*;
+use crate::theme::{self, UI_FONT, height, radius, space, text_size};
+use crate::ui::{self, icon, line_counts, tip};
+
+impl Render for Workspace {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        crate::perf::root_render();
+        self.spinner_drawn.set(false);
+        self.schedule_resize(window, cx);
+        self.arm_minute_timer(cx);
+        let t = theme::get();
+        let chrome = Chrome::of(window);
+
+        let main = match (&self.overlay, self.tabs.get(self.active)) {
+            (Some(Overlay::Diff(v)), _) => v.clone().cached(StyleRefinement::default().size_full()).into_any_element(),
+            (Some(Overlay::File(v)), _) => v.clone().cached(StyleRefinement::default().size_full()).into_any_element(),
+            (None, Some(Tab { view: Some(view), .. })) => {
+                view.clone().cached(StyleRefinement::default().size_full()).into_any_element()
+            }
+            _ => div()
+                .size_full()
+                .flex()
+                .flex_col()
+                .items_center()
+                .justify_center()
+                .gap(px(space::MD))
+                .child(ui::icon(icon::TERMINAL, 28., t.text.faint))
+                .child(div().text_color(t.text.dim).child("No sessions"))
+                .child(div().text_size(px(text_size::SM)).text_color(t.text.faint).child("Ctrl+Shift+T to start one"))
+                .into_any_element(),
+        };
+
+        let mut title = match self.tabs.get(self.active) {
+            Some(tab) => format!("{} — agent-ide", tab.name),
+            None => "agent-ide".to_string(),
+        };
+        match self.needs_you_count() {
+            0 => {}
+            1 => title.push_str(" · 1 needs you"),
+            n => title.push_str(&format!(" · {n} need you")),
+        }
+        if title != self.window_title {
+            window.set_window_title(&title);
+            self.window_title = title;
+        }
+
+        let side = if self.sidebar_open {
+            div()
+                .flex()
+                .flex_none()
+                .h_full()
+                .child(self.sidebar(!chrome.csd, cx))
+                .child(divider("divider", SidebarDrag))
+                .into_any_element()
+        } else {
+            div()
+                .id("expand")
+                .flex_none()
+                .w(px(COLLAPSED))
+                .h_full()
+                .cursor_pointer()
+                .bg(self.panel_bg())
+                .border_r_1()
+                .border_color(t.border.subtle)
+                .hover(|s| s.bg(t.bg.hover))
+                .on_click(cx.listener(|w, _: &ClickEvent, _, cx| w.toggle_sidebar(cx)))
+                .into_any_element()
+        };
+
+        let right = self.git_open.then(|| {
+            div()
+                .flex()
+                .flex_none()
+                .h_full()
+                .child(divider("git-divider", GitPanelDrag))
+                .child(
+                    div()
+                        .w(self.git_width)
+                        .h_full()
+                        .flex()
+                        .flex_col()
+                        .bg(t.bg.panel)
+                        .child(self.panel_tabs(cx))
+                        .child(div().flex_1().min_h_0().child(match self.panel_tab {
+                            PanelTab::Changes => {
+                                self.git_panel.clone().cached(StyleRefinement::default().size_full()).into_any_element()
+                            }
+                            PanelTab::Files => {
+                                self.files_panel.clone().cached(StyleRefinement::default().size_full()).into_any_element()
+                            }
+                        })),
+                )
+        });
+
+        let title_bar = if chrome.csd { Some(self.title_bar(window, cx)) } else { None };
+        self.spin_tick(cx);
+
+        div()
+            .key_context("Workspace")
+            .track_focus(&self.focus)
+            .relative()
+            .flex()
+            .flex_col()
+            .size_full()
+            .font_family(UI_FONT)
+            .text_size(px(text_size::MD))
+            .text_color(t.text.primary)
+            // With blur the window is transparent where nothing paints: every region paints its own background.
+            .when(!self.translucent, |d| d.bg(t.bg.base))
+            .when(chrome.border > px(0.), |d| d.border(chrome.border).border_color(t.border.strong))
+            .on_key_down(cx.listener(Self::modal_key))
+            .on_action(cx.listener(|w, _: &NewSession, window, cx| w.open_new_session(window, cx)))
+            .on_action(cx.listener(|w, _: &CloseSession, window, cx| w.close_active(window, cx)))
+            .on_action(cx.listener(|w, _: &NextSession, window, cx| w.cycle(1, window, cx)))
+            .on_action(cx.listener(|w, _: &PrevSession, window, cx| w.cycle(-1, window, cx)))
+            .on_action(cx.listener(|w, _: &Rename, window, cx| w.start_rename(w.active, window, cx)))
+            .on_action(cx.listener(|w, _: &ToggleSidebar, _, cx| w.toggle_sidebar(cx)))
+            .on_action(cx.listener(|w, _: &NextNeedsYou, window, cx| w.next_needs_you(window, cx)))
+            .on_action(cx.listener(|w, _: &ResumeAll, window, cx| w.resume_all(window, cx)))
+            .on_action(cx.listener(|w, _: &ShowChanges, window, cx| w.show_panel_tab(PanelTab::Changes, window, cx)))
+            .on_action(cx.listener(|w, _: &ShowFiles, window, cx| w.show_panel_tab(PanelTab::Files, window, cx)))
+            .on_action(cx.listener(|w, _: &Activate1, window, cx| w.activate_nth(0, window, cx)))
+            .on_action(cx.listener(|w, _: &Activate2, window, cx| w.activate_nth(1, window, cx)))
+            .on_action(cx.listener(|w, _: &Activate3, window, cx| w.activate_nth(2, window, cx)))
+            .on_action(cx.listener(|w, _: &Activate4, window, cx| w.activate_nth(3, window, cx)))
+            .on_action(cx.listener(|w, _: &Activate5, window, cx| w.activate_nth(4, window, cx)))
+            .on_action(cx.listener(|w, _: &Activate6, window, cx| w.activate_nth(5, window, cx)))
+            .on_action(cx.listener(|w, _: &Activate7, window, cx| w.activate_nth(6, window, cx)))
+            .on_action(cx.listener(|w, _: &Activate8, window, cx| w.activate_nth(7, window, cx)))
+            .on_action(cx.listener(|w, _: &Activate9, window, cx| w.activate_nth(8, window, cx)))
+            .on_drag_move::<SidebarDrag>(cx.listener(|w, e: &DragMoveEvent<SidebarDrag>, window, cx| {
+                w.dragging = true;
+                let max = (window.viewport_size().width * 0.5).max(px(MIN_SIDEBAR));
+                w.sidebar_width = (e.event.position.x - e.bounds.left()).clamp(px(MIN_SIDEBAR), max);
+                cx.notify();
+            }))
+            .on_drop::<SidebarDrag>(cx.listener(|w, _, _, cx| w.end_drag(cx)))
+            .on_drag_move::<GitPanelDrag>(cx.listener(|w, e: &DragMoveEvent<GitPanelDrag>, window, cx| {
+                w.dragging = true;
+                let min = px(git_panel::MIN_WIDTH);
+                let max = (window.viewport_size().width * 0.6).max(min);
+                w.git_width = (e.bounds.right() - e.event.position.x).clamp(min, max);
+                w.sync_panel(cx);
+                cx.notify();
+            }))
+            .on_drop::<GitPanelDrag>(cx.listener(|w, _, _, cx| w.end_drag(cx)))
+            .on_mouse_up(MouseButton::Left, cx.listener(|w, _, _, cx| w.end_drag(cx)))
+            .children(title_bar)
+            .child(
+                div()
+                    .flex()
+                    .flex_1()
+                    .min_h_0()
+                    .w_full()
+                    .child(side)
+                    .child(
+                        div()
+                            .flex()
+                            .flex_col()
+                            .flex_1()
+                            .min_w_0()
+                            .h_full()
+                            .bg(t.bg.base)
+                            .child(self.session_header())
+                            .child(div().flex_1().min_h_0().overflow_hidden().child(main)),
+                    )
+                    .children(right),
+            )
+            .child(self.status_bar())
+            .children(self.modal_view())
+            .when(chrome.csd, |d| d.children(window_chrome::resize_handles(chrome.tiling)))
+    }
+}
+
+/// A draggable 4 px divider with a 1 px hairline.
+fn divider<D: Clone + 'static>(id: &'static str, drag: D) -> impl IntoElement {
+    let t = theme::get();
+    div()
+        .id(id)
+        .flex_none()
+        .w(px(DIVIDER))
+        .h_full()
+        .flex()
+        .justify_center()
+        .cursor_col_resize()
+        .bg(t.bg.panel)
+        .hover(|s| s.bg(t.bg.hover))
+        .child(div().w(px(1.)).h_full().bg(t.border.subtle))
+        .on_drag(drag, |_, _, _, cx| cx.new(|_| DragGhost))
+}
+
+/// A square icon button (title bar, panel tabs).
+fn icon_button(id: impl Into<gpui::ElementId>, glyph: &'static str, active: bool) -> gpui::Stateful<gpui::Div> {
+    let t = theme::get();
+    div()
+        .id(id)
+        .flex_none()
+        .size(px(26.))
+        .flex()
+        .items_center()
+        .justify_center()
+        .rounded(px(radius::MD))
+        .cursor_pointer()
+        .when(active, |d| d.bg(t.bg.selected))
+        .hover(|s| s.bg(t.bg.hover))
+        .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation()) // never starts a window move
+        .child(ui::icon(glyph, 15., if active { t.accent } else { t.text.muted }))
+}
+
+/// `~/Code/project/crates/app/src` → `~/Code/…/app/src` (keeps the first two and the last two components).
+pub(super) fn short_path(p: &Path) -> String {
+    let full = tilde(p);
+    let parts: Vec<&str> = full.split('/').collect();
+    if parts.len() <= 5 {
+        return full;
+    }
+    format!("{}/{}/…/{}/{}", parts[0], parts[1], parts[parts.len() - 2], parts[parts.len() - 1])
+}
+
+/// "<1m", "4m", "2h", "3d".
+static SPIN_EPOCH: std::sync::LazyLock<std::time::Instant> = std::sync::LazyLock::new(std::time::Instant::now);
+const SPIN_FRAME: Duration = Duration::from_millis(100);
+
+fn fmt_for(secs: i64) -> String {
+    if secs < 60 { "<1m".into() } else { ui::fmt_ago(secs) }
+}
+
+impl Workspace {
+    /// One 10 fps re-render while a spinner is on screen and the window is visible; stops by itself otherwise.
+    fn spin_tick(&mut self, cx: &mut Context<Self>) {
+        if !(self.spinner_drawn.get() && self.window_visible) {
+            self._spin = None;
+            return;
+        }
+        if self._spin.is_none() {
+            self._spin = Some(cx.spawn(async move |this, cx| {
+                loop {
+                    cx.background_executor().timer(SPIN_FRAME).await;
+                    let alive = this.update(cx, |w, cx| {
+                        let on = w.spinner_drawn.get() && w.window_visible;
+                        if on {
+                            cx.notify();
+                        }
+                        on
+                    });
+                    if !matches!(alive, Ok(true)) {
+                        break;
+                    }
+                }
+            }));
+        }
+    }
+
+    fn panel_bg(&self) -> gpui::Rgba {
+        let t = theme::get();
+        if self.translucent { t.bg.panel_translucent } else { t.bg.panel }
+    }
+
+    /// App mark, new-session and collapse buttons: in the title bar (CSD) or atop the sidebar.
+    fn brand(&self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
+        let t = theme::get();
+        div()
+            .flex()
+            .items_center()
+            .gap(px(space::SM))
+            .h_full()
+            .px(px(space::MD))
+            .child(ui::icon(icon::TERMINAL, 15., t.accent))
+            .child(div().flex_1().text_size(px(text_size::SM)).font_weight(FontWeight::MEDIUM).child("agent-ide"))
+            .child(
+                icon_button("new", icon::PLUS, false)
+                    .tooltip(tip("New session  Ctrl+Shift+T"))
+                    .on_click(cx.listener(|w, _: &ClickEvent, window, cx| w.open_new_session(window, cx))),
+            )
+            .child(
+                icon_button("collapse", icon::SIDEBAR_CLOSE, false)
+                    .tooltip(tip("Hide sidebar  Ctrl+Shift+B"))
+                    .on_click(cx.listener(|w, _: &ClickEvent, _, cx| w.toggle_sidebar(cx))),
+            )
+    }
+
+    /// Client-side title bar: the left part continues the sidebar, the rest carries the session name and controls.
+    fn title_bar(&self, window: &Window, cx: &mut Context<Self>) -> impl IntoElement + use<> {
+        let t = theme::get();
+        let left = if self.sidebar_open {
+            div()
+                .flex_none()
+                .w(self.sidebar_width + px(DIVIDER))
+                .h_full()
+                .bg(self.panel_bg())
+                .border_r_1()
+                .border_color(t.border.subtle)
+                .child(self.brand(cx))
+                .into_any_element()
+        } else {
+            div()
+                .flex_none()
+                .h_full()
+                .px(px(space::SM))
+                .flex()
+                .items_center()
+                .child(
+                    icon_button("expand-title", icon::SIDEBAR_OPEN, false)
+                        .tooltip(tip("Show sidebar  Ctrl+Shift+B"))
+                        .on_click(cx.listener(|w, _: &ClickEvent, _, cx| w.toggle_sidebar(cx))),
+                )
+                .into_any_element()
+        };
+        let name = self.tabs.get(self.active).map(|t| t.name.clone()).unwrap_or_default();
+        div()
+            .id("title-bar")
+            .flex()
+            .flex_none()
+            .items_center()
+            .w_full()
+            .h(px(height::TITLE_BAR))
+            .bg(t.bg.panel)
+            .border_b_1()
+            .border_color(t.border.subtle)
+            .child(left)
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .flex()
+                    .justify_center()
+                    .text_size(px(text_size::SM))
+                    .text_color(t.text.dim)
+                    .child(div().truncate().child(name)),
+            )
+            .child(window_chrome::window_controls(window))
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|w, e: &gpui::MouseDownEvent, window, _| {
+                    if e.click_count == 2 {
+                        w.title_pressed = false;
+                        window.zoom_window();
+                    } else {
+                        w.title_pressed = true;
+                    }
+                }),
+            )
+            .on_mouse_move(cx.listener(|w, e: &gpui::MouseMoveEvent, window, _| {
+                if w.title_pressed && e.pressed_button == Some(MouseButton::Left) {
+                    w.title_pressed = false;
+                    window.start_window_move();
+                }
+            }))
+            .on_mouse_up(MouseButton::Left, cx.listener(|w, _, _, _| w.title_pressed = false))
+            .on_click(|e, window, _| {
+                if e.is_right_click() {
+                    window.show_window_menu(e.position());
+                }
+            })
+    }
+
+    fn sidebar(&mut self, with_brand: bool, cx: &mut Context<Self>) -> impl IntoElement + use<> {
+        let t = theme::get();
+        let now = now_secs();
+        let mut items: Vec<gpui::AnyElement> = Vec::new();
+        for (key, members) in self.groups() {
+            let collapsed = self.collapsed.contains(&group_id(&key));
+            let needs = members.iter().filter(|&&i| self.agent(i).state == agent::State::NeedsYou).count();
+            let name: SharedString = match &key {
+                Some(root) => root.file_name().map_or(root.display().to_string(), |n| n.to_string_lossy().into_owned()).into(),
+                None => "Other".into(),
+            };
+            let id = group_id(&key);
+            items.push(
+                div()
+                    .id(SharedString::from(format!("group-{}", id.display())))
+                    .flex()
+                    .items_center()
+                    .gap(px(space::SM))
+                    .h(px(height::GROUP_HEADER))
+                    .mt(px(space::SM))
+                    .px(px(space::MD))
+                    .mx(px(space::SM))
+                    .rounded(px(radius::MD))
+                    .cursor_pointer()
+                    .hover(|s| s.bg(t.bg.hover))
+                    .text_size(px(text_size::SM))
+                    .child(ui::icon(if collapsed { icon::CHEVRON_RIGHT } else { icon::CHEVRON_DOWN }, 12., t.text.dim))
+                    .child(div().min_w_0().truncate().font_weight(FontWeight::MEDIUM).text_color(t.text.muted).child(name))
+                    .child(div().flex_none().text_size(px(text_size::XS)).text_color(t.text.dim).child(members.len().to_string()))
+                    .when(needs > 0, |d| {
+                        d.child(
+                            div()
+                                .ml_auto()
+                                .flex_none()
+                                .text_size(px(text_size::XS))
+                                .text_color(t.state.needs_you)
+                                .child(format!("{needs} need{} you", if needs == 1 { "s" } else { "" })),
+                        )
+                    })
+                    .on_click(cx.listener(move |w, _: &ClickEvent, _, cx| w.toggle_group(id.clone(), cx)))
+                    .into_any_element(),
+            );
+            if !collapsed {
+                for i in members {
+                    items.push(self.session_row(i, now, cx));
+                }
+            }
+        }
+        div()
+            .flex()
+            .flex_col()
+            .flex_none()
+            .w(self.sidebar_width)
+            .h_full()
+            .bg(self.panel_bg())
+            .when(with_brand, |d| d.child(div().flex_none().h(px(height::TITLE_BAR)).child(self.brand(cx))))
+            .child(div().id("sessions").flex_1().overflow_y_scroll().pb(px(space::MD)).children(items))
+    }
+
+    fn session_row(&self, i: usize, now: i64, cx: &mut Context<Self>) -> gpui::AnyElement {
+        let t = theme::get();
+        let tab = &self.tabs[i];
+        let session = tab.view.as_ref().map(|v| v.read(cx).session.clone());
+        let (unread, exited) = session.as_ref().map_or((false, false), |s| (s.is_unread(), s.is_exited()));
+        let active = i == self.active;
+        let agent = if exited { agent::Agent::default() } else { self.agent(i) };
+        let needs_you = agent.state == agent::State::NeedsYou;
+        if let Some(Modal::Rename { tab: r, edit }) = &self.modal
+            && *r == i
+        {
+            return div().id(("tab", tab.id)).px(px(space::MD)).py(px(space::XS)).child(text_field(edit)).into_any_element();
+        }
+        let bold = agent.unseen || (unread && !active);
+        let state_icon: gpui::AnyElement = match agent.state {
+            _ if exited => div()
+                .id(("restart", tab.id))
+                .flex_none()
+                .rounded(px(radius::SM))
+                .cursor_pointer()
+                .hover(|s| s.bg(t.bg.hover))
+                .child(ui::icon(icon::RESTART, 14., t.state.error))
+                .tooltip(tip("Exited: click to restart"))
+                .on_click(cx.listener(move |w, _: &ClickEvent, window, cx| {
+                    if let Some(id) = w.tabs.get(i).and_then(|t| t.view.as_ref()).map(|v| v.entity_id()) {
+                        w.restart(id, window, cx);
+                    }
+                    cx.stop_propagation();
+                }))
+                .into_any_element(),
+            agent::State::Working => {
+                // All spinners share one 10 fps tick (`spin_tick`), whatever their number; the angle comes from a
+                // common clock, so they turn in step.
+                self.spinner_drawn.set(true);
+                let phase = (SPIN_EPOCH.elapsed().as_millis() % 1000) as f32 / 1000.;
+                ui::icon(icon::SPINNER, 14., t.state.working)
+                    .with_transformation(Transformation::rotate(percentage(phase)))
+                    .into_any_element()
+            }
+            agent::State::NeedsYou => {
+                div().flex_none().size(px(14.)).flex().items_center().justify_center().child(
+                    div().size(px(8.)).rounded_full().bg(t.state.needs_you),
+                ).into_any_element()
+            }
+            agent::State::Done => {
+                ui::icon(icon::DONE, 14., if agent.unseen { t.state.done } else { t.state.done_seen }).into_any_element()
+            }
+            agent::State::Ready => div().flex_none().size(px(14.)).flex().items_center().justify_center().child(
+                div().size(px(7.)).rounded_full().border_1().border_color(t.text.dim),
+            ).into_any_element(),
+            agent::State::NoAgent if tab.claude_session.is_some() => ui::icon(icon::RESUMABLE, 13., t.text.dim).into_any_element(),
+            agent::State::NoAgent if unread && !active => div().flex_none().size(px(14.)).flex().items_center().justify_center().child(
+                div().size(px(6.)).rounded_full().bg(t.accent),
+            ).into_any_element(),
+            agent::State::NoAgent => div().flex_none().size(px(14.)).into_any_element(),
+        };
+        let ago = agent.last_activity.map(|a| ui::fmt_ago(now - a));
+        let (status, branch) = match &tab.repo {
+            TabRepo::Repo(root) => {
+                let st = self.repos.status(root);
+                (st.as_ref().map(|s| s.totals()).filter(|t| t.0 > 0), st.map(|s| s.branch.clone()))
+            }
+            _ => (None, None),
+        };
+        let second: gpui::AnyElement = if tab.dir_missing {
+            div()
+                .flex()
+                .items_center()
+                .gap(px(space::XS))
+                .text_color(t.state.needs_you)
+                .child(ui::icon(icon::WARNING, 11., t.state.needs_you))
+                .child(div().min_w_0().truncate().child(format!("missing · {}", tilde(&tab.cwd))))
+                .into_any_element()
+        } else {
+            let label = branch.unwrap_or_else(|| short_path(&tab.cwd));
+            div()
+                .flex()
+                .items_center()
+                .gap(px(space::XS))
+                .when(matches!(tab.repo, TabRepo::Repo(_)), |d| d.child(ui::icon(icon::BRANCH, 11., t.text.dim)))
+                .child(div().min_w_0().truncate().child(label))
+                .children(status.map(|(_, add, del)| {
+                    let clamp = |v: u64| v.min(u32::MAX as u64) as u32;
+                    div().ml_auto().flex_none().child(line_counts(Some((clamp(add), clamp(del)))))
+                }))
+                .into_any_element()
+        };
+        let bar = if needs_you { Some(t.state.needs_you) } else if active { Some(t.accent) } else { None };
+        div()
+            .id(("tab", tab.id))
+            .relative()
+            .h(px(height::SESSION_ROW))
+            .mx(px(space::SM))
+            .px(px(space::MD))
+            .flex()
+            .flex_col()
+            .justify_center()
+            .gap(px(space::XXS))
+            .rounded(px(radius::MD))
+            .cursor_pointer()
+            .when(active, |d| d.bg(t.bg.selected))
+            .when(!active, |d| d.hover(|s| s.bg(t.bg.hover)))
+            .children(bar.map(|c| div().absolute().left_0().top(px(10.)).bottom(px(10.)).w(px(2.)).rounded_full().bg(c)))
+            .on_click(cx.listener(move |w, e: &ClickEvent, window, cx| {
+                if e.click_count() == 2 {
+                    w.start_rename(i, window, cx);
+                } else {
+                    w.activate(i, window, cx);
+                }
+            }))
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap(px(space::SM))
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .truncate()
+                            .text_size(px(text_size::MD))
+                            .font_weight(if bold { FontWeight::SEMIBOLD } else { FontWeight::NORMAL })
+                            .text_color(if active || bold { t.text.primary } else { t.text.muted })
+                            .child(tab.name.clone()),
+                    )
+                    .children(ago.map(|a| div().flex_none().text_size(px(text_size::XS)).text_color(t.text.dim).child(a)))
+                    .child(state_icon),
+            )
+            .child(div().text_size(px(text_size::XS)).text_color(t.text.dim).child(second))
+            .into_any_element()
+    }
+
+    /// Above the terminal: session name, short path, and the agent state with how long it's been in it.
+    fn session_header(&self) -> impl IntoElement + use<> {
+        let t = theme::get();
+        let Some(tab) = self.tabs.get(self.active) else {
+            return div().h(px(height::HEADER)).flex_none().bg(t.bg.elevated);
+        };
+        let agent = self.agent(self.active);
+        let since = agent.state_since.map(|s| fmt_for(now_secs() - s));
+        let state = match agent.state {
+            agent::State::Working => Some(("Working", t.state.working)),
+            agent::State::NeedsYou => Some(("Needs you", t.state.needs_you)),
+            agent::State::Done => Some(("Done", t.state.done)),
+            agent::State::Ready => Some(("Claude ready", t.text.muted)),
+            agent::State::NoAgent => None,
+        };
+        ui::overlay_header()
+            .child(ui::icon(icon::TERMINAL, 13., t.text.dim))
+            .child(div().flex_none().font_weight(FontWeight::MEDIUM).child(tab.name.clone()))
+            .child(div().min_w_0().truncate().text_color(t.text.dim).child(short_path(&tab.cwd)))
+            .children(state.map(|(label, color)| {
+                div()
+                    .ml_auto()
+                    .flex_none()
+                    .flex()
+                    .items_center()
+                    .gap(px(space::SM))
+                    .text_size(px(text_size::XS))
+                    .child(div().size(px(6.)).rounded_full().bg(color))
+                    .child(div().text_color(t.text.muted).child(match &since {
+                        Some(s) => format!("{label} · {s}"),
+                        None => label.to_string(),
+                    }))
+            }))
+    }
+
+    /// Right panel tabs: Files and Changes as icon buttons.
+    fn panel_tabs(&self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
+        let t = theme::get();
+        let changes = match self.tabs.get(self.active).map(|t| &t.repo) {
+            Some(TabRepo::Repo(root)) => self.repos.status(root).map_or(0, |s| s.totals().0),
+            _ => 0,
+        };
+        let tab = |w: &Self, which: PanelTab, glyph, hint, cx: &mut Context<Self>| {
+            let active = w.panel_tab == which;
+            div()
+                .flex()
+                .items_center()
+                .h_full()
+                .border_b_2()
+                .border_color(if active { t.accent } else { gpui::transparent_black().into() })
+                .child(
+                    icon_button(SharedString::from(hint), glyph, active)
+                        .tooltip(tip(hint))
+                        .on_click(cx.listener(move |w, _: &ClickEvent, _, cx| w.set_panel_tab(which, cx))),
+                )
+        };
+        div()
+            .flex()
+            .flex_none()
+            .items_center()
+            .gap(px(space::XS))
+            .h(px(height::TAB_BAR))
+            .px(px(space::MD))
+            .border_b_1()
+            .border_color(t.border.subtle)
+            .child(tab(self, PanelTab::Files, icon::FILES, "Files  Ctrl+Shift+E", cx))
+            .child(tab(self, PanelTab::Changes, icon::CHANGES, "Changes  Ctrl+Shift+G", cx))
+            .when(changes > 0, |d| {
+                d.child(div().text_size(px(text_size::XS)).text_color(t.text.dim).child(changes.to_string()))
+            })
+    }
+
+    /// Bottom bar: Claude usage limits, session counts, the active branch.
+    fn status_bar(&self) -> impl IntoElement + use<> {
+        let t = theme::get();
+        let now = now_secs();
+        let (five, seven) = self.agents.as_ref().map_or((None, None), |h| {
+            let b = h.board.lock().unwrap();
+            (b.five_hour, b.seven_day)
+        });
+        let limit = |label: &'static str, l: Option<hook::Limit>| {
+            l.map(|l| {
+                let (pct, detail) = if l.resets_at > now {
+                    (l.used_pct, format!("{:.0}% · {}", l.used_pct, fmt_remaining(l.resets_at - now)))
+                } else {
+                    (0., "reset".to_string())
+                };
+                div()
+                    .flex()
+                    .items_center()
+                    .gap(px(space::SM))
+                    .child(div().text_color(t.text.dim).child(label))
+                    .child(ui::meter(pct, 56.))
+                    .child(div().text_color(t.text.muted).child(detail))
+            })
+        };
+        let needs = self.needs_you_count();
+        let branch = match self.tabs.get(self.active).map(|t| &t.repo) {
+            Some(TabRepo::Repo(root)) => self.repos.status(root).map(|s| s.branch.clone()),
+            _ => None,
+        };
+        let n = self.tabs.len();
+        div()
+            .flex()
+            .flex_none()
+            .items_center()
+            .gap(px(space::XL))
+            .h(px(height::STATUS_BAR))
+            .px(px(space::LG))
+            .bg(t.bg.panel)
+            .border_t_1()
+            .border_color(t.border.subtle)
+            .text_size(px(text_size::XS))
+            .children(limit("5h", five))
+            .children(limit("Week", seven))
+            .child(div().flex_1())
+            .children(branch.map(|b| {
+                div()
+                    .flex()
+                    .items_center()
+                    .gap(px(space::XS))
+                    .text_color(t.text.muted)
+                    .child(ui::icon(icon::BRANCH, 11., t.text.dim))
+                    .child(b)
+            }))
+            .child(div().text_color(t.text.dim).child(format!("{n} session{}", if n == 1 { "" } else { "s" })))
+            .when(needs > 0, |d| {
+                d.child(div().text_color(t.state.needs_you).child(format!("{needs} need{} you", if needs == 1 { "s" } else { "" })))
+            })
+    }
+
+    fn modal_view(&self) -> Option<impl IntoElement + use<>> {
+        let t = theme::get();
+        let Some(Modal::NewSession { edit, error }) = &self.modal else { return None };
+        Some(
+            div().absolute().size_full().flex().justify_center().items_start().pt(px(120.)).bg(t.bg.scrim).child(
+                div()
+                    .w(px(520.))
+                    .h_auto()
+                    .p(px(space::XL))
+                    .flex()
+                    .flex_col()
+                    .gap(px(space::MD))
+                    .rounded(px(radius::LG))
+                    .bg(t.bg.elevated)
+                    .border_1()
+                    .border_color(t.border.strong)
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap(px(space::SM))
+                            .child(ui::icon(icon::PLUS, 15., t.accent))
+                            .child(div().font_weight(FontWeight::SEMIBOLD).child("New session")),
+                    )
+                    .child(div().text_size(px(text_size::SM)).text_color(t.text.muted).child("Working directory the shell starts in."))
+                    .child(text_field(edit))
+                    .children(error.clone().map(|e| div().text_size(px(text_size::SM)).text_color(t.state.error).child(e)))
+                    .child(div().text_size(px(text_size::XS)).text_color(t.text.dim).child("Enter to create · Esc to cancel")),
+            ),
+        )
+    }
+}
+
+fn text_field(edit: &LineEdit) -> impl IntoElement {
+    let t = theme::get();
+    div()
+        .flex()
+        .items_center()
+        .px(px(space::MD))
+        .py(px(space::SM))
+        .rounded(px(radius::MD))
+        .bg(t.bg.input)
+        .border_1()
+        .border_color(t.accent)
+        .text_size(px(text_size::MD))
+        .child(edit.before_cursor().to_string())
+        .child(div().w(px(1.5)).h(px(16.)).bg(t.accent))
+        .child(edit.after_cursor().to_string())
+}
+
+/// Collapsed-state key of a group (`""` for "Other").
+pub(super) fn group_id(key: &Option<PathBuf>) -> PathBuf {
+    key.clone().unwrap_or_default()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn short_paths() {
+        assert_eq!(short_path(Path::new("/a/b")), "/a/b");
+        let home = home();
+        assert_eq!(short_path(&home.join("Code/x")), "~/Code/x");
+        assert_eq!(short_path(&home.join("Code/proj/crates/app/src")), "~/Code/…/app/src");
+        assert_eq!(fmt_for(5), "<1m");
+        assert_eq!(fmt_for(125), "2m");
+    }
+}

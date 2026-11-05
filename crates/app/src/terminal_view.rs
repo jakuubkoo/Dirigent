@@ -2,13 +2,14 @@ use std::rc::Rc;
 
 use gpui::{
     Context, FocusHandle, Focusable, KeyDownEvent, Pixels, ScrollEvent, Task, WeakEntity, Window, div, prelude::*, px,
-    rgb,
 };
 use session::{Session, Size};
 use session::alacritty_terminal::term::TermMode;
 use session::keys::{Mods, encode};
 
-use crate::terminal_element::{Metrics, TerminalElement, palette};
+use crate::terminal_element::{Metrics, TerminalElement};
+use crate::theme::{self, MONO_FONT, radius, space, text_size};
+use crate::ui::{self, icon};
 use crate::workspace::Workspace;
 
 pub struct TerminalView {
@@ -170,56 +171,62 @@ impl Focusable for TerminalView {
 impl Render for TerminalView {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         crate::perf::event("term view render");
+        let t = theme::get();
         let banner = self.banner.as_ref().map(|b| {
-            let (label, cmd, hint) = match b {
-                Banner::Resume(cmd) => ("Resume Claude session?", Some(cmd.clone()), "Enter = resume  ·  Esc = plain shell"),
-                Banner::Gone => ("That Claude session no longer exists.", None, "Esc to dismiss"),
+            let (glyph, label, cmd, hint) = match b {
+                Banner::Resume(cmd) => (icon::RESUMABLE, "Resume Claude session?", Some(cmd.clone()), "Enter resume · Esc plain shell"),
+                Banner::Gone => (icon::WARNING, "That Claude session no longer exists.", None, "Esc to dismiss"),
             };
             div()
                 .flex()
-                .gap_3()
+                .gap(px(space::MD))
+                .child(ui::icon(glyph, 14., t.accent))
                 .child(div().flex_none().child(label))
                 .children(cmd.map(|c| {
-                    div()
-                        .flex_1()
-                        .min_w_0()
-                        .truncate()
-                        .font_family(crate::terminal_element::FONT_FAMILY)
-                        .text_color(rgb(0xc8d3ee))
-                        .child(c)
+                    div().flex_1().min_w_0().truncate().font_family(MONO_FONT).text_color(t.text.muted).child(c)
                 }))
-                .child(div().flex_none().ml_auto().text_color(rgb(0x9aa3b8)).child(hint))
+                .child(ui::hint(hint))
                 // Exactly one terminal row tall: the grid is one row shorter while it's shown.
                 .flex_none()
                 .items_center()
                 .overflow_hidden()
                 .h(self.metrics.line_height)
                 .line_height(self.metrics.line_height)
-                .px_3()
-                .bg(rgb(0x2b3348))
-                .text_color(palette::FG)
-                .text_sm()
+                .px(px(space::LG))
+                .bg(t.bg.elevated)
+                .border_b_1()
+                .border_color(t.border.subtle)
+                .text_color(t.text.primary)
+                .text_size(px(text_size::SM))
         });
         let exited = self.session.is_exited().then(|| {
             let code = self.session.exit_code().map_or(String::new(), |c| format!(" (code {c})"));
             div()
                 .absolute()
-                .bottom_0()
-                .left_0()
-                .right_0()
-                .px_3()
-                .py_1()
-                .bg(rgb(0x3a2a2e))
-                .text_color(palette::FG)
-                .text_sm()
-                .child(format!("Process exited{code} — press Enter to restart"))
+                .bottom(px(space::LG))
+                .left(px(space::LG))
+                .right(px(space::LG))
+                .px(px(space::LG))
+                .py(px(space::MD))
+                .flex()
+                .items_center()
+                .gap(px(space::MD))
+                .rounded(px(radius::LG))
+                .bg(t.bg.elevated)
+                .border_1()
+                .border_color(t.border.strong)
+                .text_color(t.text.primary)
+                .text_size(px(text_size::SM))
+                .child(ui::icon(icon::RESTART, 14., t.state.error))
+                .child(format!("Process exited{code}"))
+                .child(ui::hint("Enter to restart"))
         });
         div()
             .relative()
             .flex()
             .flex_col()
             .size_full()
-            .bg(palette::BG)
+            .bg(t.terminal.bg)
             .track_focus(&self.focus)
             .on_key_down(cx.listener(Self::key_down))
             .on_scroll(cx.listener(Self::scroll))

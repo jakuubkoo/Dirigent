@@ -3,11 +3,13 @@
 //! No `window.refresh()` here: resize cursors come from plain hitboxes, so mouse movement never repaints.
 
 use gpui::{
-    AnyElement, CursorStyle, Decorations, Div, Hsla, MouseButton, Pixels, ResizeEdge, Stateful, Tiling, Window, div,
-    prelude::*, px, rgb,
+    AnyElement, CursorStyle, Decorations, Div, MouseButton, Pixels, ResizeEdge, Stateful, Tiling, Window, div,
+    prelude::*, px,
 };
 
-pub const TITLE_BAR: f32 = 30.;
+use crate::ui::{self, icon};
+
+pub const TITLE_BAR: f32 = crate::theme::height::TITLE_BAR;
 const EDGE: f32 = 5.; // grab width for resizing
 const CORNER: f32 = 12.;
 
@@ -38,10 +40,11 @@ impl Chrome {
     }
 }
 
-/// The title bar; the caller attaches the drag/double-click handlers (they need workspace state).
-pub fn title_bar(title: String, window: &Window, bg: Hsla, dim: Hsla, hover: Hsla) -> Stateful<Div> {
+/// Minimize / maximize-restore / close, for the client-side title bar.
+pub fn window_controls(window: &Window) -> impl IntoElement {
+    let t = crate::theme::get();
     let controls = window.window_controls();
-    let button = |id: &'static str, label: &'static str, hover_bg: Hsla| {
+    let button = |id: &'static str, glyph: &'static str, hover_bg: gpui::Rgba| {
         div()
             .id(id)
             .w(px(40.))
@@ -50,30 +53,23 @@ pub fn title_bar(title: String, window: &Window, bg: Hsla, dim: Hsla, hover: Hsl
             .items_center()
             .justify_center()
             .cursor_pointer()
-            .text_color(dim)
-            .hover(move |s| s.bg(hover_bg).text_color(gpui::white()))
+            .hover(move |s| s.bg(hover_bg))
             // Buttons must not start a window move.
             .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-            .child(label)
+            .child(ui::icon(glyph, 14., t.text.muted))
     };
     div()
-        .id("title-bar")
         .flex()
         .flex_none()
-        .items_center()
-        .w_full()
-        .h(px(TITLE_BAR))
-        .bg(bg)
-        .text_sm()
-        .child(div().flex_1().pl_3().text_color(dim).truncate().child(title))
+        .h_full()
         .when(controls.minimize, |d| {
-            d.child(button("minimize", "─", hover).on_click(|_, window, _| window.minimize_window()))
+            d.child(button("minimize", icon::MINIMIZE, t.bg.hover).on_click(|_, window, _| window.minimize_window()))
         })
         .when(controls.maximize, |d| {
-            let label = if window.is_maximized() { "❐" } else { "□" };
-            d.child(button("maximize", label, hover).on_click(|_, window, _| window.zoom_window()))
+            let glyph = if window.is_maximized() { icon::RESTORE } else { icon::MAXIMIZE };
+            d.child(button("maximize", glyph, t.bg.hover).on_click(|_, window, _| window.zoom_window()))
         })
-        .child(button("close", "✕", rgb(0xc4314b).into()).on_click(|_, window, _| window.remove_window()))
+        .child(button("close", icon::CLOSE, t.danger_hover).on_click(|_, window, _| window.remove_window()))
 }
 
 /// Invisible strips along the window edges that start a compositor-driven resize. Hidden on tiled edges.

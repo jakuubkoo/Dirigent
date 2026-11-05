@@ -9,14 +9,14 @@ use std::sync::{Arc, Mutex};
 use async_channel::{Receiver, Sender};
 use git::{Diff, FileChange, LineKind, Status};
 use gpui::{
-    AnyView, App, ClickEvent, Context, FocusHandle, Focusable, KeyDownEvent, SharedString, UniformListScrollHandle,
-    WeakEntity, Window, div, prelude::*, px, rgb, uniform_list,
+    ClickEvent, Context, FocusHandle, Focusable, KeyDownEvent, SharedString, UniformListScrollHandle, WeakEntity,
+    Window, div, prelude::*, px, uniform_list,
 };
 
 use crate::scrollbar::{self, scrollbar};
-
-use crate::terminal_element::{FONT_FAMILY, FONT_SIZE, palette};
-use crate::workspace::{Workspace, colors};
+use crate::theme::{self, MONO_FONT, TERMINAL_FONT_SIZE, height, radius, space, text_size};
+use crate::ui::{self, icon, line_counts, tip};
+use crate::workspace::Workspace;
 
 /// One watcher per repo root, refcounted by the tabs whose cwd is in it. The last tab leaving drops it (and its
 /// inotify watches).
@@ -147,36 +147,13 @@ pub struct GitPanel {
     workspace: WeakEntity<Workspace>,
 }
 
-const ROW_H: f32 = 22.;
 /// The panel can't be dragged narrower than this.
 pub const MIN_WIDTH: f32 = 240.;
 /// Below this width the header legend is hidden.
 pub const LEGEND_WIDTH: f32 = 330.;
 
-/// Hover text for small labels (gpui shows it after its usual delay, next to the cursor).
-struct Tip(SharedString);
-
-impl Render for Tip {
-    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
-        div()
-            .px_2()
-            .py_1()
-            .rounded_sm()
-            .bg(rgb(colors::MODAL))
-            .border_1()
-            .border_color(rgb(colors::DIVIDER_HOVER))
-            .text_xs()
-            .text_color(palette::FG)
-            .child(self.0.clone())
-    }
-}
-
-pub fn tip(text: &'static str) -> impl Fn(&mut Window, &mut App) -> AnyView {
-    move |_, cx| cx.new(|_| Tip(text.into())).into()
-}
-
 /// Flex shrink weight: within a row the directory gives up its width long before the file name does.
-fn shrink<E: Styled>(mut e: E, weight: f32) -> E {
+pub fn shrink<E: Styled>(mut e: E, weight: f32) -> E {
     e.style().flex_shrink = Some(weight);
     e
 }
@@ -204,16 +181,9 @@ impl GitPanel {
     }
 
     fn row(&self, ix: usize, root: &Path, st: &Status) -> gpui::AnyElement {
+        let t = theme::get();
         let Some(f) = st.files.get(ix) else {
-            return div()
-                .h(px(ROW_H))
-                .px_3()
-                .flex()
-                .items_center()
-                .text_xs()
-                .text_color(rgb(colors::DIM))
-                .child(format!("+{} more files not listed", st.more))
-                .into_any_element();
+            return ui::note(format!("+{} more files not listed", st.more)).h(px(height::LIST_ROW)).into_any_element();
         };
         let (name, dir) = match f.path.rsplit_once('/') {
             Some((d, n)) => (n.to_string(), format!("{d}/")),
@@ -225,102 +195,87 @@ impl GitPanel {
         };
         let selected = self.selected.as_deref() == Some(f.path.as_str());
         let (file, root, ws) = (f.clone(), root.to_path_buf(), self.workspace.clone());
-        let tag = |id: &'static str, label: &'static str, color: u32, hint: &'static str| {
-            div().id((id, ix)).flex_none().text_xs().text_color(rgb(color)).child(label).tooltip(tip(hint))
+        let tag = |id: &'static str, label: &'static str, color, hint: &'static str| {
+            div().id((id, ix)).flex_none().text_size(px(text_size::XS)).text_color(color).child(label).tooltip(tip(hint))
         };
+        let kind_color = theme::git_kind(f.kind);
         div()
             .id(("git-file", ix))
             .w_full() // a uniform_list row is laid out as a root: without this it takes its min-content width
             .overflow_hidden()
-            .h(px(ROW_H))
-            .pl_3()
+            .h(px(height::LIST_ROW))
+            .pl(px(space::LG))
             .pr(px(14.)) // room for the scrollbar
             .flex()
             .items_center()
-            .gap_2()
+            .gap(px(space::SM))
             .cursor_pointer()
-            .text_sm()
-            .when(selected, |d| d.bg(rgb(colors::ROW_ACTIVE)))
-            .when(!selected, |d| d.hover(|s| s.bg(rgb(colors::ROW_HOVER))))
+            .text_size(px(text_size::MD))
+            .when(selected, |d| d.bg(t.bg.selected))
+            .when(!selected, |d| d.hover(|s| s.bg(t.bg.hover)))
             // Not `cx.listener`: the workspace updates this panel in response, which must not happen while the
             // panel itself is being updated (gpui panics on re-entrant updates).
             .on_click(move |_: &ClickEvent, window, cx| {
                 let (root, file) = (root.clone(), file.clone());
                 let _ = ws.update(cx, |w, cx| w.toggle_diff(root, file, window, cx));
             })
-            .child(div().flex_none().w(px(12.)).text_xs().text_color(rgb(kind_color(f.kind))).child(f.kind.to_string()))
+            .child(ui::icon(ui::file_icon(&name), 14., kind_color))
             // Name and directory share what's left; counts and S/U never shrink. The directory truncates first.
-            .child(shrink(div().min_w_0().truncate(), 1.).child(name))
-            .child(shrink(div().flex_grow(1.).min_w_0().truncate().text_xs().text_color(rgb(colors::DIM)), 10_000.).child(dir))
-            .when(f.staged, |d| d.child(tag("tag-s", "S", colors::DONE, "Staged: has changes in the index")))
-            .when(f.unstaged, |d| d.child(tag("tag-u", "U", colors::NEEDS_YOU, "Unstaged: has changes not added to the index")))
-            .child(div().flex_none().text_xs().child(line_counts(f.lines)))
+            .child(shrink(div().min_w_0().truncate().text_color(t.text.primary), 1.).child(name))
+            .child(
+                shrink(div().flex_grow(1.).min_w_0().truncate().text_size(px(text_size::XS)).text_color(t.text.dim), 10_000.)
+                    .child(dir),
+            )
+            .when(f.staged, |d| d.child(tag("tag-s", "S", t.git.added, "Staged: has changes in the index")))
+            .when(f.unstaged, |d| d.child(tag("tag-u", "U", t.git.modified, "Unstaged: has changes not added to the index")))
+            .child(div().flex_none().text_size(px(text_size::XS)).child(line_counts(f.lines)))
             .into_any_element()
-    }
-}
-
-pub fn kind_color(kind: char) -> u32 {
-    match kind {
-        'A' | '?' => colors::DONE,
-        'D' => colors::EXITED,
-        'R' | 'C' => colors::WORKING,
-        'U' => colors::NEEDS_YOU,
-        _ => 0xd0b060,
-    }
-}
-
-/// "+12 −3" (colored), "bin" for binary/too-big files.
-pub fn line_counts(lines: Option<(u32, u32)>) -> gpui::AnyElement {
-    match lines {
-        Some((a, d)) => div()
-            .flex()
-            .gap_1()
-            .child(div().text_color(rgb(colors::DONE)).child(format!("+{a}")))
-            .child(div().text_color(rgb(colors::EXITED)).child(format!("−{d}")))
-            .into_any_element(),
-        None => div().text_color(rgb(colors::DIM)).child("bin").into_any_element(),
     }
 }
 
 impl Render for GitPanel {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         crate::perf::event("git panel render");
-        let note = |text: &'static str| div().px_3().py_2().text_xs().text_color(rgb(colors::DIM)).child(text);
-        let mut header = div().flex().items_center().gap_2().px_3().py_2().child(
-            div().flex_none().text_xs().text_color(rgb(colors::DIM)).child("Changes"),
-        );
+        let t = theme::get();
         let body = match &self.view {
-            PanelView::NoSession => note("No session").into_any_element(),
-            PanelView::Pending => note("…").into_any_element(),
-            PanelView::NotRepo => note("Not a git repository").into_any_element(),
-            PanelView::GitMissing => note("git not found on PATH").into_any_element(),
-            PanelView::Repo { status: None, .. } => note("Reading status…").into_any_element(),
+            PanelView::NoSession => ui::note("No session").into_any_element(),
+            PanelView::Pending => ui::note("…").into_any_element(),
+            PanelView::NotRepo => ui::note("Not a git repository").into_any_element(),
+            PanelView::GitMissing => ui::note("git not found on PATH").into_any_element(),
+            PanelView::Repo { status: None, .. } => ui::note("Reading status…").into_any_element(),
             PanelView::Repo { root, status: Some(st) } => {
-                header = header.child(div().flex_1().min_w_0().flex().justify_end().child(
-                    div().min_w_0().text_xs().truncate().child(format!("⎇ {}", st.branch)),
-                ));
                 let (n, add, del) = st.totals();
                 let (root, st) = (root.clone(), st.clone());
+                let clamp = |v: u64| v.min(u32::MAX as u64) as u32;
                 let summary = div()
                     .flex()
-                    .gap_2()
-                    .px_3()
-                    .pb_1()
-                    .text_xs()
-                    .text_color(rgb(colors::DIM))
-                    .child(format!("{n} file{}", if n == 1 { "" } else { "s" }))
-                    .when(n > 0, |d| d.child(line_counts(Some((add.min(u32::MAX as u64) as u32, del.min(u32::MAX as u64) as u32)))))
-                    .when(n > 0 && !self.narrow, |d| d.child(div().ml_auto().flex_none().child("S staged · U unstaged")));
+                    .items_center()
+                    .gap(px(space::SM))
+                    .px(px(space::LG))
+                    .py(px(space::SM))
+                    .text_size(px(text_size::XS))
+                    .text_color(t.text.muted)
+                    .child(ui::icon(icon::BRANCH, 12., t.text.muted))
+                    .child(div().min_w_0().truncate().text_color(t.text.primary).child(st.branch.clone()))
+                    .child(div().flex_none().text_color(t.text.dim).child(format!("{n} file{}", if n == 1 { "" } else { "s" })))
+                    .when(n > 0, |d| d.child(line_counts(Some((clamp(add), clamp(del))))))
+                    .when(n > 0 && !self.narrow, |d| d.child(ui::hint("S staged · U unstaged")));
                 let warning = st.watch_error.clone().map(|e| {
                     let (root, ws) = (root.clone(), self.workspace.clone());
                     div()
                         .id("git-refresh")
-                        .px_3()
-                        .py_1()
-                        .text_xs()
-                        .text_color(rgb(colors::NEEDS_YOU))
+                        .mx(px(space::MD))
+                        .px(px(space::MD))
+                        .py(px(space::XS))
+                        .flex()
+                        .gap(px(space::SM))
+                        .rounded(px(radius::MD))
+                        .bg(t.bg.elevated)
+                        .text_size(px(text_size::XS))
+                        .text_color(t.state.needs_you)
                         .cursor_pointer()
-                        .hover(|s| s.bg(rgb(colors::ROW_HOVER)))
+                        .hover(|s| s.bg(t.bg.hover))
+                        .child(ui::icon(icon::REFRESH, 12., t.state.needs_you))
                         .child(format!("{e}. Click to refresh."))
                         .on_click(move |_: &ClickEvent, _, cx| {
                             let _ = ws.update(cx, |w, _| w.refresh_repo(&root));
@@ -328,7 +283,7 @@ impl Render for GitPanel {
                 });
                 let count = st.files.len() + (st.more > 0) as usize;
                 let list = if st.files.is_empty() {
-                    note("No changes").into_any_element()
+                    ui::note("No changes").into_any_element()
                 } else {
                     let rows = uniform_list(
                         "git-files",
@@ -350,7 +305,7 @@ impl Render for GitPanel {
                 div().flex().flex_col().flex_1().min_h_0().child(summary).children(warning).child(list).into_any_element()
             }
         };
-        div().flex().flex_col().size_full().bg(rgb(colors::SIDEBAR)).child(header).child(body)
+        div().flex().flex_col().size_full().bg(t.bg.panel).child(body)
     }
 }
 
@@ -429,7 +384,6 @@ impl DiffView {
         self.scroll.scroll_to_item(ix, gpui::ScrollStrategy::Top);
         cx.notify();
     }
-
 }
 
 impl Focusable for DiffView {
@@ -441,61 +395,53 @@ impl Focusable for DiffView {
 impl Render for DiffView {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         crate::perf::event("diff view render");
+        let t = theme::get();
         let f = &self.file;
-        let header = div()
-            .flex()
-            .flex_none()
-            .items_center()
-            .gap_3()
-            .px_3()
-            .py_1()
-            .bg(rgb(colors::SIDEBAR))
-            .text_sm()
-            .child(div().text_color(rgb(kind_color(f.kind))).child(f.kind.to_string()))
-            .child(div().min_w_0().truncate().child(match &f.orig {
+        let name = f.path.rsplit_once('/').map_or(f.path.as_str(), |(_, n)| n);
+        let header = ui::overlay_header()
+            .child(ui::icon(ui::file_icon(name), 14., theme::git_kind(f.kind)))
+            .child(div().min_w_0().truncate().text_color(t.text.primary).child(match &f.orig {
                 Some(o) => format!("{o} → {}", f.path),
                 None => f.path.clone(),
             }))
-            .child(div().text_xs().child(line_counts(f.lines)))
-            .child(div().text_xs().text_color(rgb(colors::DIM)).child(match (f.staged, f.unstaged) {
+            .child(div().text_size(px(text_size::XS)).child(line_counts(f.lines)))
+            .child(ui::pill(match (f.staged, f.unstaged) {
                 (true, true) => "staged + unstaged",
                 (true, false) => "staged",
                 _ if f.kind == '?' => "untracked",
                 _ => "unstaged",
             }))
-            .child(div().ml_auto().flex_none().text_xs().text_color(rgb(colors::DIM)).child("Esc to close"));
+            .child(ui::hint("Esc to close"));
         let body = match (&self.lines, self.failed) {
-            (_, true) => div().p_3().text_color(rgb(colors::EXITED)).child("Couldn't read the diff").into_any_element(),
-            (None, _) => div().p_3().text_color(rgb(colors::DIM)).child("Loading…").into_any_element(),
-            (Some(lines), _) if lines.is_empty() => {
-                div().p_3().text_color(rgb(colors::DIM)).child("No textual changes (mode change or binary)").into_any_element()
-            }
+            (_, true) => ui::note("Couldn't read the diff").text_color(t.state.error).into_any_element(),
+            (None, _) => ui::note("Loading…").into_any_element(),
+            (Some(lines), _) if lines.is_empty() => ui::note("No textual changes (mode change or binary)").into_any_element(),
             (Some(lines), _) => {
                 let (lines, lh, truncated) = (lines.clone(), self.line_height, self.truncated);
                 let count = lines.len() + truncated as usize;
                 let list = uniform_list("diff-lines", count, move |range, _, _| {
+                    let d = &theme::get().diff;
                     range
                         .map(|ix| {
-                            let row = div().h(lh).pl_3().pr(px(14.)).whitespace_nowrap().overflow_hidden();
+                            let row = div().h(lh).pl(px(space::LG)).pr(px(14.)).whitespace_nowrap().overflow_hidden();
                             let Some((kind, text)) = lines.get(ix) else {
-                                return row.text_color(rgb(colors::NEEDS_YOU)).child("… diff truncated (too large to show)");
+                                return row.text_color(theme::get().state.needs_you).child("… diff truncated (too large to show)");
                             };
                             let (bg, fg) = match kind {
-                                LineKind::Add => (Some(0x1d3324), 0xb8e0b0),
-                                LineKind::Del => (Some(0x3a1f24), 0xf0b0b0),
-                                LineKind::Hunk => (None, 0x5c6a88),
-                                LineKind::Header | LineKind::Meta => (None, colors::DIM),
-                                LineKind::Context => (None, 0xc8c8c8),
+                                LineKind::Add => (Some(d.add_bg), d.add_fg),
+                                LineKind::Del => (Some(d.del_bg), d.del_fg),
+                                LineKind::Hunk => (None, d.hunk),
+                                LineKind::Header | LineKind::Meta => (None, theme::get().text.dim),
+                                LineKind::Context => (None, d.context),
                             };
-                            row.when_some(bg, |d, bg| d.bg(rgb(bg))).text_color(rgb(fg)).child(text.clone())
+                            row.when_some(bg, |r, bg| r.bg(bg)).text_color(fg).child(text.clone())
                         })
                         .collect::<Vec<_>>()
                 })
                 .track_scroll(&self.scroll)
-                .font_family(FONT_FAMILY)
-                .text_size(px(FONT_SIZE - 1.))
-                .line_height(lh)
-                ;
+                .font_family(MONO_FONT)
+                .text_size(px(TERMINAL_FONT_SIZE - 1.))
+                .line_height(lh);
                 div()
                     .relative()
                     .flex_1()
@@ -509,7 +455,7 @@ impl Render for DiffView {
             .flex()
             .flex_col()
             .size_full()
-            .bg(palette::BG)
+            .bg(t.bg.base)
             .track_focus(&self.focus)
             .on_key_down({
                 // Plain closure, not `cx.listener`: closing re-enters the workspace, which reads this view.

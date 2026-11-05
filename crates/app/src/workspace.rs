@@ -7,19 +7,19 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 use gpui::{
-    ClickEvent, Context, DragMoveEvent, Entity, EntityId, FocusHandle, Focusable, KeyDownEvent, MouseButton, Pixels, Render,
-    SharedString, StyleRefinement, Task, Window, actions, div, prelude::*, px, rgb,
+    Context, Entity, EntityId, FocusHandle, Focusable, KeyDownEvent, Pixels, Render, Task, Window, actions, div,
+    prelude::*, px,
 };
 use session::{Session, Size};
 
 use crate::agent::{self, Hub};
 use crate::file_tree::{self, Marks, Row};
 use crate::files_panel::{Content, FileView, FilesPanel, TreeData};
-use crate::git_panel::{self, DiffView, GitPanel, PanelView, Repos, line_counts};
+use crate::git_panel::{self, DiffView, GitPanel, PanelView, Repos};
 use crate::line_edit::{Edit, LineEdit};
 use crate::persist::{self, PanelTab, State as Saved, TabState, WindowMode, WindowState};
 use crate::window_chrome::{self, Chrome};
-use crate::terminal_element::{Metrics, palette};
+use crate::terminal_element::Metrics;
 use crate::terminal_view::{Banner, PADDING, TerminalView};
 
 actions!(
@@ -32,25 +32,9 @@ actions!(
 
 const DIVIDER: f32 = 4.;
 const COLLAPSED: f32 = 10.;
+const MIN_SIDEBAR: f32 = 180.;
 const RESIZE_DEBOUNCE: Duration = Duration::from_millis(100);
 const SAVE_DEBOUNCE: Duration = Duration::from_millis(500);
-
-pub(crate) mod colors {
-    pub const SIDEBAR: u32 = 0x17171c;
-    pub const ROW_ACTIVE: u32 = 0x2b2b35;
-    pub const ROW_HOVER: u32 = 0x212129;
-    pub const DIM: u32 = 0x8a8a96;
-    pub const DOT: u32 = 0x5fa2e6;
-    pub const EXITED: u32 = 0xe0626c;
-    pub const DIVIDER: u32 = 0x26262e;
-    pub const DIVIDER_HOVER: u32 = 0x4a4a58;
-    pub const MODAL: u32 = 0x24242c;
-    pub const WORKING: u32 = 0x5fa2e6;
-    pub const NEEDS_YOU: u32 = 0xf0a030;
-    pub const DONE: u32 = 0x8cc265;
-    pub const BAR_BG: u32 = 0x2b2b35;
-    pub const INPUT: u32 = 0x1a1a20;
-}
 
 struct Tab {
     id: usize,
@@ -70,6 +54,8 @@ struct Tab {
     hook_cwd: Option<PathBuf>,
     /// File tree: expanded directories (persisted) and the selection.
     tree: file_tree::TreeState,
+    /// Sidebar group of a tab that isn't spawned yet (nearest ancestor with `.git`; no git call, no watcher).
+    group_hint: Option<PathBuf>,
 }
 
 /// What covers the terminal area: a diff or a file preview. The active session is hidden meanwhile.
@@ -167,10 +153,17 @@ pub struct Workspace {
     /// Watches the shown directories of trees outside any repo (repos use their own watcher).
     dir_watcher: Option<git::DirWatcher>,
     dir_watched: HashSet<PathBuf>,
+    /// Collapsed sidebar groups (repo roots; `""` = "Other"), persisted.
+    collapsed: HashSet<PathBuf>,
+    /// The compositor blurs behind the window: the sidebar is painted translucent.
+    translucent: bool,
+    /// The last render drew a "working" spinner (set during render, read by the spin tick).
+    spinner_drawn: std::cell::Cell<bool>,
+    _spin: Option<Task<()>>,
 }
 
 impl Workspace {
-    pub fn new(saved: Saved, state_path: PathBuf, window: &mut Window, cx: &mut Context<Self>) -> Self {
+    pub fn new(saved: Saved, state_path: PathBuf, translucent: bool, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let metrics = Metrics::new(window);
         let last_dir = saved
             .last_dir
@@ -202,7 +195,7 @@ impl Workspace {
             active: 0,
             next_id: 1,
             focus: cx.focus_handle(),
-            sidebar_width: px(saved.sidebar.width.clamp(140., 2000.)),
+            sidebar_width: px(saved.sidebar.width.clamp(MIN_SIDEBAR, 2000.)),
             sidebar_open: saved.sidebar.open,
             dragging: false,
             flush_resize: false,
@@ -244,6 +237,10 @@ impl Workspace {
             tree_marks: None,
             dir_watcher,
             dir_watched: HashSet::new(),
+            collapsed: saved.collapsed_groups.iter().cloned().collect(),
+            translucent,
+            spinner_drawn: Default::default(),
+            _spin: None,
         };
         match Hub::start() {
             Ok(hub) => {
@@ -312,6 +309,7 @@ impl Workspace {
             let active = saved.active.min(this.tabs.len() - 1);
             this.activate(active, window, cx);
             this.check_resumable(cx);
+            this.hint_groups(cx);
         }
 
         if let Ok(path) = std::env::var("AGENT_IDE_PERF_DIFF") {
@@ -357,6 +355,15 @@ impl Workspace {
                     });
                 }
                 eprintln!("[perf] diff scroll end");
+            })
+            .detach();
+        }
+
+        if let Some(ms) = std::env::var("AGENT_IDE_PERF_MODAL").ok().and_then(|v| v.parse().ok()) {
+            // Screenshot harness: open the new-session modal after `ms` milliseconds.
+            cx.spawn_in(window, async move |this, cx| {
+                cx.background_executor().timer(Duration::from_millis(ms)).await;
+                let _ = this.update_in(cx, |w, window, cx| w.open_new_session(window, cx));
             })
             .detach();
         }
@@ -461,7 +468,9 @@ impl Workspace {
         let m = &self.metrics;
         let chrome = Chrome::of(window);
         let w = vp.width - side - right - px(PADDING) - chrome.horizontal();
-        let h = vp.height - px(PADDING) - chrome.vertical();
+        // Slim session header above the terminal and the status bar below everything.
+        let bars = px(crate::theme::height::HEADER + crate::theme::height::STATUS_BAR);
+        let h = vp.height - px(PADDING) - chrome.vertical() - bars;
         Size {
             cols: (w / m.cell_width).floor().max(2.) as u16,
             rows: (h / m.line_height).floor().max(1.) as u16,
@@ -529,6 +538,7 @@ impl Workspace {
             repo_gen: 0,
             hook_cwd: None,
             tree: file_tree::TreeState { expanded: expanded.into_iter().collect(), selected: None },
+            group_hint: None,
         });
         self.tabs.len() - 1
     }
@@ -574,6 +584,14 @@ impl Workspace {
             old.read(cx).session.set_visible(false);
         }
         let view = self.ensure_spawned(idx, window, cx);
+        // Showing a session reveals its group.
+        let group = match &self.tabs[idx].repo {
+            TabRepo::Repo(root) => root.clone(),
+            _ => PathBuf::new(),
+        };
+        if self.collapsed.remove(&group) {
+            self.mark_dirty(cx);
+        }
         let new = &self.tabs[idx];
         view.read(cx).session.set_visible(true);
         if let Some(hub) = &self.agents {
@@ -592,10 +610,77 @@ impl Workspace {
         cx.notify();
     }
 
+    /// Ctrl+Tab / Ctrl+Shift+Tab, in the sidebar's (grouped) order.
     fn cycle(&mut self, step: isize, window: &mut Window, cx: &mut Context<Self>) {
-        let n = self.tabs.len() as isize;
-        if n > 0 {
-            self.activate((self.active as isize + step).rem_euclid(n) as usize, window, cx);
+        let order = self.visual_order();
+        let Some(pos) = order.iter().position(|&i| i == self.active) else { return };
+        let next = order[(pos as isize + step).rem_euclid(order.len() as isize) as usize];
+        self.activate(next, window, cx);
+    }
+
+    /// Ctrl+1..9: the n-th session as the sidebar lists it.
+    fn activate_nth(&mut self, n: usize, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(&i) = self.visual_order().get(n) {
+            self.activate(i, window, cx);
+        }
+    }
+
+    /// Restored tabs that aren't spawned get their sidebar group from the nearest ancestor holding `.git` (stat
+    /// calls off the UI thread), so groups are right before each tab's shell (and real repo lookup) starts.
+    fn hint_groups(&mut self, cx: &mut Context<Self>) {
+        let dirs: Vec<(usize, PathBuf)> = self.tabs.iter().map(|t| (t.id, t.cwd.clone())).collect();
+        cx.spawn(async move |this, cx| {
+            let hints: Vec<(usize, Option<PathBuf>)> = cx
+                .background_executor()
+                .spawn(async move {
+                    dirs.into_iter()
+                        .map(|(id, d)| (id, d.ancestors().find(|a| a.join(".git").exists()).map(Path::to_path_buf)))
+                        .collect()
+                })
+                .await;
+            let _ = this.update(cx, |w, cx| {
+                for (id, hint) in hints {
+                    if let Some(t) = w.tabs.iter_mut().find(|t| t.id == id) {
+                        t.group_hint = hint;
+                    }
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    /// Sidebar groups: (repo root or None for "Other", tab indices), see `group_order`.
+    fn groups(&self) -> Vec<(Option<PathBuf>, Vec<usize>)> {
+        let keys: Vec<Option<PathBuf>> = self
+            .tabs
+            .iter()
+            .map(|t| match &t.repo {
+                TabRepo::Repo(root) => Some(root.clone()),
+                TabRepo::Unknown | TabRepo::Pending => t.group_hint.clone(),
+                TabRepo::NotRepo | TabRepo::GitMissing => None,
+            })
+            .collect();
+        group_order(&keys)
+    }
+
+    fn visual_order(&self) -> Vec<usize> {
+        self.groups().into_iter().flat_map(|(_, members)| members).collect()
+    }
+
+    fn toggle_group(&mut self, id: PathBuf, cx: &mut Context<Self>) {
+        if !self.collapsed.remove(&id) {
+            self.collapsed.insert(id);
+        }
+        self.mark_dirty(cx);
+        cx.notify();
+    }
+
+    /// The agent state shown for tab `i` (default when the integration is off).
+    fn agent(&self, i: usize) -> agent::Agent {
+        match (&self.agents, self.tabs.get(i)) {
+            (Some(h), Some(t)) => h.board.lock().unwrap().get(t.id as u32),
+            _ => agent::Agent::default(),
         }
     }
 
@@ -711,170 +796,6 @@ impl Workspace {
         cx.notify();
     }
 
-    fn sidebar(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
-        let board = self.agents.as_ref().map(|h| h.board.lock().unwrap());
-        let rows = self.tabs.iter().enumerate().map(|(i, tab)| {
-            let session = tab.view.as_ref().map(|v| v.read(cx).session.clone());
-            let (unread, exited) = session.as_ref().map_or((false, false), |s| (s.is_unread(), s.is_exited()));
-            let cwd = if tab.dir_missing { format!("⚠ missing · {}", tilde(&tab.cwd)) } else { tilde(&tab.cwd) };
-            let active = i == self.active;
-            let agent = match &board {
-                Some(b) if !exited => b.get(tab.id as u32),
-                _ => agent::Agent::default(),
-            };
-            let name: SharedString = match &self.modal {
-                Some(Modal::Rename { tab: r, edit }) if *r == i => {
-                    return div().id(("tab", tab.id)).px_2().py_1().child(text_field(edit)).into_any_element();
-                }
-                _ => tab.name.clone().into(),
-            };
-            let needs_you = agent.state == agent::State::NeedsYou;
-            let badge = match agent.state {
-                agent::State::NoAgent if tab.claude_session.is_some() => Some(("resumable", colors::DIM)),
-                agent::State::NoAgent => None,
-                agent::State::Ready => Some(("claude", colors::DIM)),
-                agent::State::Working => Some(("working", colors::WORKING)),
-                agent::State::NeedsYou => Some(("needs you", colors::NEEDS_YOU)),
-                agent::State::Done => Some(("done", colors::DONE)),
-            };
-            let changes = match &tab.repo {
-                TabRepo::Repo(root) => self.repos.status(root).map(|s| s.totals()).filter(|t| t.0 > 0),
-                _ => None,
-            };
-            let model_line = (agent.state != agent::State::NoAgent).then(|| {
-                let mut parts = vec![agent.model.clone().unwrap_or_else(|| "claude".into())];
-                if let Some(p) = agent.context_pct {
-                    parts.push(format!("ctx {p}%"));
-                }
-                parts.join(" · ")
-            });
-            div()
-                .id(("tab", tab.id))
-                .flex()
-                .items_center()
-                .gap_2()
-                .pl(px(9.))
-                .pr_3()
-                .py_1()
-                .cursor_pointer()
-                // Needs you stands out: amber accent bar on the left edge (transparent otherwise, no layout shift).
-                .border_l(px(3.))
-                .border_color(if needs_you { rgb(colors::NEEDS_YOU).into() } else { gpui::transparent_black() })
-                .when(active, |d| d.bg(rgb(colors::ROW_ACTIVE)))
-                .when(!active, |d| d.hover(|s| s.bg(rgb(colors::ROW_HOVER))))
-                .on_click(cx.listener(move |w, e: &ClickEvent, window, cx| {
-                    if e.click_count() == 2 {
-                        w.start_rename(i, window, cx);
-                    } else {
-                        w.activate(i, window, cx);
-                    }
-                }))
-                .child(
-                    div()
-                        .flex()
-                        .flex_col()
-                        .flex_1()
-                        .overflow_hidden()
-                        .child(
-                            div()
-                                .flex()
-                                .items_center()
-                                .gap_2()
-                                .child(div().flex_1().text_sm().truncate().child(name))
-                                .children(badge.map(|(label, color)| {
-                                    div()
-                                        .flex_none()
-                                        .text_xs()
-                                        .text_color(rgb(color))
-                                        .when(needs_you || agent.unseen, |d| d.font_weight(gpui::FontWeight::BOLD))
-                                        .child(label)
-                                })),
-                        )
-                        .child(
-                            div()
-                                .text_xs()
-                                .truncate()
-                                .text_color(rgb(if tab.dir_missing { colors::NEEDS_YOU } else { colors::DIM }))
-                                .child(cwd),
-                        )
-                        .children(
-                            model_line.map(|m| div().text_xs().truncate().text_color(rgb(colors::DIM)).child(m)),
-                        )
-                        .children(changes.map(|(n, add, del)| {
-                            let clamp = |v: u64| v.min(u32::MAX as u64) as u32;
-                            div()
-                                .flex()
-                                .gap_1()
-                                .text_xs()
-                                .text_color(rgb(colors::DIM))
-                                .child(format!("{n} file{}", if n == 1 { "" } else { "s" }))
-                                .child(line_counts(Some((clamp(add), clamp(del)))))
-                        })),
-                )
-                .when(exited, |d| {
-                    d.child(div().text_xs().text_color(rgb(colors::EXITED)).child("exited")).child(
-                        div()
-                            .id(("restart", tab.id))
-                            .px_1()
-                            .rounded_sm()
-                            .cursor_pointer()
-                            .hover(|s| s.bg(rgb(colors::DIVIDER_HOVER)))
-                            .child("⟳")
-                            .on_click(cx.listener(move |w, _: &ClickEvent, window, cx| {
-                                if let Some(id) = w.tabs[i].view.as_ref().map(|v| v.entity_id()) {
-                                    w.restart(id, window, cx);
-                                }
-                                cx.stop_propagation();
-                            })),
-                    )
-                })
-                .when(unread && !active && !exited && badge.is_none(), |d| {
-                    d.child(div().size(px(7.)).rounded_full().bg(rgb(colors::DOT)))
-                })
-                .into_any_element()
-        });
-        let rows: Vec<_> = rows.collect();
-        let limits = board.as_ref().map(|b| (b.five_hour, b.seven_day));
-        drop(board);
-
-        let header = div()
-            .flex()
-            .items_center()
-            .px_3()
-            .py_2()
-            .child(div().flex_1().text_xs().text_color(rgb(colors::DIM)).child("Sessions"))
-            .child(icon_button("new", "+").on_click(cx.listener(|w, _: &ClickEvent, window, cx| w.open_new_session(window, cx))))
-            .child(icon_button("collapse", "‹").on_click(cx.listener(|w, _: &ClickEvent, _, cx| w.toggle_sidebar(cx))));
-
-        let now = now_secs();
-        let footer = match limits {
-            Some((five, seven)) if five.is_some() || seven.is_some() => Some(
-                div()
-                    .flex()
-                    .flex_col()
-                    .gap_2()
-                    .px_3()
-                    .py_2()
-                    .border_t_1()
-                    .border_color(rgb(colors::DIVIDER))
-                    .child(limit_row("5h limit", five, now))
-                    .child(limit_row("Weekly limit", seven, now)),
-            ),
-            _ => None,
-        };
-
-        div()
-            .flex()
-            .flex_col()
-            .flex_none()
-            .w(self.sidebar_width)
-            .h_full()
-            .bg(rgb(colors::SIDEBAR))
-            .child(header)
-            .child(div().id("tabs").flex_1().overflow_y_scroll().children(rows))
-            .children(footer)
-    }
-
     /// Agent states/limits changed (listener thread). The tab being looked at is never "unseen".
     fn agents_changed(&mut self, cx: &mut Context<Self>) {
         let Some(hub) = &self.agents else { return };
@@ -961,6 +882,7 @@ impl Workspace {
             sidebar: persist::SidebarState { width: f32::from(self.sidebar_width), open: self.sidebar_open },
             window: self.window_state,
             last_dir: Some(self.last_dir.clone()),
+            collapsed_groups: self.collapsed.iter().cloned().collect(),
             git_panel: persist::PanelState {
                 width: f32::from(self.git_width),
                 open: self.git_open,
@@ -1092,11 +1014,12 @@ impl Workspace {
 
     /// Keeps the limits countdown fresh: one wakeup per minute boundary, only while it's shown and visible.
     fn arm_minute_timer(&mut self, cx: &mut Context<Self>) {
-        let known = self.agents.as_ref().is_some_and(|h| {
+        // Limits countdowns, "2m ago" and "Working · 3m" all have minute granularity.
+        let shown = self.agents.as_ref().is_some_and(|h| {
             let b = h.board.lock().unwrap();
-            b.five_hour.is_some() || b.seven_day.is_some()
+            b.five_hour.is_some() || b.seven_day.is_some() || b.tabs.values().any(|a| a.last_activity.is_some() || a.state_since.is_some())
         });
-        if !known || !self.window_visible || !self.sidebar_open || self._minute.is_some() {
+        if !shown || !self.window_visible || self._minute.is_some() {
             return;
         }
         let wait = 60 - now_secs().rem_euclid(60) as u64;
@@ -1116,232 +1039,9 @@ impl Workspace {
         cx.notify();
     }
 
-    fn modal_view(&self) -> Option<impl IntoElement> {
-        let Some(Modal::NewSession { edit, error }) = &self.modal else { return None };
-        Some(
-            div().absolute().size_full().flex().justify_center().pt(px(120.)).bg(gpui::rgba(0x00000066)).child(
-                div()
-                    .w(px(520.))
-                    .h_auto()
-                    .p_4()
-                    .flex()
-                    .flex_col()
-                    .gap_2()
-                    .rounded_md()
-                    .bg(rgb(colors::MODAL))
-                    .child(div().text_sm().child("New session"))
-                    .child(div().text_xs().text_color(rgb(colors::DIM)).child("Working directory the shell starts in."))
-                    .child(text_field(edit))
-                    .children(error.clone().map(|e| div().text_xs().text_color(rgb(colors::EXITED)).child(e)))
-                    .child(div().text_xs().text_color(rgb(colors::DIM)).child("Enter to create · Esc to cancel")),
-            ),
-        )
-    }
 }
 
-impl Render for Workspace {
-    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        crate::perf::root_render();
-        self.schedule_resize(window, cx);
-        self.arm_minute_timer(cx);
-
-        let terminal = match (&self.overlay, self.tabs.get(self.active)) {
-            (Some(Overlay::Diff(v)), _) => v.clone().cached(StyleRefinement::default().size_full()).into_any_element(),
-            (Some(Overlay::File(v)), _) => v.clone().cached(StyleRefinement::default().size_full()).into_any_element(),
-            (None, Some(Tab { view: Some(view), .. })) => {
-                view.clone().cached(StyleRefinement::default().size_full()).into_any_element()
-            }
-            _ => div()
-                .size_full()
-                .flex()
-                .items_center()
-                .justify_center()
-                .text_color(rgb(colors::DIM))
-                .child("No sessions — Ctrl+Shift+T to start one")
-                .into_any_element(),
-        };
-        let side = if self.sidebar_open {
-            div()
-                .flex()
-                .h_full()
-                .child(self.sidebar(cx))
-                .child(
-                    div()
-                        .id("divider")
-                        .w(px(DIVIDER))
-                        .h_full()
-                        .cursor_col_resize()
-                        .bg(rgb(colors::DIVIDER))
-                        .hover(|s| s.bg(rgb(colors::DIVIDER_HOVER)))
-                        .on_drag(SidebarDrag, |_, _, _, cx| cx.new(|_| DragGhost)),
-                )
-                .into_any_element()
-        } else {
-            div()
-                .id("expand")
-                .w(px(COLLAPSED))
-                .h_full()
-                .cursor_pointer()
-                .bg(rgb(colors::SIDEBAR))
-                .hover(|s| s.bg(rgb(colors::DIVIDER_HOVER)))
-                .on_click(cx.listener(|w, _: &ClickEvent, _, cx| w.toggle_sidebar(cx)))
-                .into_any_element()
-        };
-
-        let git_panel = self.git_open.then(|| {
-            div()
-                .flex()
-                .flex_none()
-                .h_full()
-                .child(
-                    div()
-                        .id("git-divider")
-                        .w(px(DIVIDER))
-                        .h_full()
-                        .cursor_col_resize()
-                        .bg(rgb(colors::DIVIDER))
-                        .hover(|s| s.bg(rgb(colors::DIVIDER_HOVER)))
-                        .on_drag(GitPanelDrag, |_, _, _, cx| cx.new(|_| DragGhost)),
-                )
-                .child(
-                    div()
-                        .w(self.git_width)
-                        .h_full()
-                        .flex()
-                        .flex_col()
-                        .bg(rgb(colors::SIDEBAR))
-                        .child(
-                            div()
-                                .flex()
-                                .flex_none()
-                                .gap_1()
-                                .px_2()
-                                .pt_1()
-                                .border_b_1()
-                                .border_color(rgb(colors::DIVIDER))
-                                .child(self.panel_tab_label(PanelTab::Changes, "Changes", "Ctrl+Shift+G", cx))
-                                .child(self.panel_tab_label(PanelTab::Files, "Files", "Ctrl+Shift+E", cx)),
-                        )
-                        .child(div().flex_1().min_h_0().child(match self.panel_tab {
-                            PanelTab::Changes => {
-                                self.git_panel.clone().cached(StyleRefinement::default().size_full()).into_any_element()
-                            }
-                            PanelTab::Files => {
-                                self.files_panel.clone().cached(StyleRefinement::default().size_full()).into_any_element()
-                            }
-                        })),
-                )
-        });
-
-        let chrome = Chrome::of(window);
-        let mut title = match self.tabs.get(self.active) {
-            Some(tab) => format!("{} — agent-ide", tab.name),
-            None => "agent-ide".to_string(),
-        };
-        match self.needs_you_count() {
-            0 => {}
-            1 => title.push_str(" · 1 needs you"),
-            n => title.push_str(&format!(" · {n} need you")),
-        }
-        if title != self.window_title {
-            window.set_window_title(&title);
-            self.window_title = title.clone();
-        }
-        let title_bar = chrome.csd.then(|| {
-            window_chrome::title_bar(
-                title,
-                window,
-                rgb(colors::SIDEBAR).into(),
-                rgb(colors::DIM).into(),
-                rgb(colors::ROW_HOVER).into(),
-            )
-            .on_mouse_down(
-                MouseButton::Left,
-                cx.listener(|w, e: &gpui::MouseDownEvent, window, _| {
-                    if e.click_count == 2 {
-                        w.title_pressed = false;
-                        window.zoom_window();
-                    } else {
-                        w.title_pressed = true;
-                    }
-                }),
-            )
-            .on_mouse_move(cx.listener(|w, e: &gpui::MouseMoveEvent, window, _| {
-                if w.title_pressed && e.pressed_button == Some(MouseButton::Left) {
-                    w.title_pressed = false;
-                    window.start_window_move();
-                }
-            }))
-            .on_mouse_up(MouseButton::Left, cx.listener(|w, _, _, _| w.title_pressed = false))
-            .on_click(|e, window, _| {
-                if e.is_right_click() {
-                    window.show_window_menu(e.position());
-                }
-            })
-        });
-
-        div()
-            .key_context("Workspace")
-            .track_focus(&self.focus)
-            .relative()
-            .flex()
-            .flex_col()
-            .size_full()
-            .bg(palette::BG)
-            .text_color(palette::FG)
-            .when(chrome.border > px(0.), |d| d.border(chrome.border).border_color(rgb(colors::DIVIDER_HOVER)))
-            .on_key_down(cx.listener(Self::modal_key))
-            .on_action(cx.listener(|w, _: &NewSession, window, cx| w.open_new_session(window, cx)))
-            .on_action(cx.listener(|w, _: &CloseSession, window, cx| w.close_active(window, cx)))
-            .on_action(cx.listener(|w, _: &NextSession, window, cx| w.cycle(1, window, cx)))
-            .on_action(cx.listener(|w, _: &PrevSession, window, cx| w.cycle(-1, window, cx)))
-            .on_action(cx.listener(|w, _: &Rename, window, cx| w.start_rename(w.active, window, cx)))
-            .on_action(cx.listener(|w, _: &ToggleSidebar, _, cx| w.toggle_sidebar(cx)))
-            .on_action(cx.listener(|w, _: &NextNeedsYou, window, cx| w.next_needs_you(window, cx)))
-            .on_action(cx.listener(|w, _: &ResumeAll, window, cx| w.resume_all(window, cx)))
-            .on_action(cx.listener(|w, _: &ShowChanges, window, cx| w.show_panel_tab(PanelTab::Changes, window, cx)))
-            .on_action(cx.listener(|w, _: &ShowFiles, window, cx| w.show_panel_tab(PanelTab::Files, window, cx)))
-            .on_action(cx.listener(|w, _: &Activate1, window, cx| w.activate(0, window, cx)))
-            .on_action(cx.listener(|w, _: &Activate2, window, cx| w.activate(1, window, cx)))
-            .on_action(cx.listener(|w, _: &Activate3, window, cx| w.activate(2, window, cx)))
-            .on_action(cx.listener(|w, _: &Activate4, window, cx| w.activate(3, window, cx)))
-            .on_action(cx.listener(|w, _: &Activate5, window, cx| w.activate(4, window, cx)))
-            .on_action(cx.listener(|w, _: &Activate6, window, cx| w.activate(5, window, cx)))
-            .on_action(cx.listener(|w, _: &Activate7, window, cx| w.activate(6, window, cx)))
-            .on_action(cx.listener(|w, _: &Activate8, window, cx| w.activate(7, window, cx)))
-            .on_action(cx.listener(|w, _: &Activate9, window, cx| w.activate(8, window, cx)))
-            .on_drag_move::<SidebarDrag>(cx.listener(|w, e: &DragMoveEvent<SidebarDrag>, window, cx| {
-                w.dragging = true;
-                let max = (window.viewport_size().width * 0.5).max(px(140.));
-                w.sidebar_width = (e.event.position.x - e.bounds.left()).clamp(px(140.), max);
-                cx.notify();
-            }))
-            .on_drop::<SidebarDrag>(cx.listener(|w, _, _, cx| w.end_drag(cx)))
-            .on_drag_move::<GitPanelDrag>(cx.listener(|w, e: &DragMoveEvent<GitPanelDrag>, window, cx| {
-                w.dragging = true;
-                let min = px(git_panel::MIN_WIDTH);
-                let max = (window.viewport_size().width * 0.6).max(min);
-                w.git_width = (e.bounds.right() - e.event.position.x).clamp(min, max);
-                w.sync_panel(cx);
-                cx.notify();
-            }))
-            .on_drop::<GitPanelDrag>(cx.listener(|w, _, _, cx| w.end_drag(cx)))
-            .on_mouse_up(MouseButton::Left, cx.listener(|w, _, _, cx| w.end_drag(cx)))
-            .children(title_bar)
-            .child(
-                div()
-                    .flex()
-                    .flex_1()
-                    .min_h_0()
-                    .w_full()
-                    .child(side)
-                    .child(div().flex_1().min_w_0().h_full().overflow_hidden().child(terminal))
-                    .children(git_panel),
-            )
-            .children(self.modal_view())
-            .when(chrome.csd, |d| d.children(window_chrome::resize_handles(chrome.tiling)))
-    }
-}
+mod view;
 
 /// Git: repo resolution per tab, cwd following, the panel and the diff view.
 impl Workspace {
@@ -1447,23 +1147,6 @@ impl Workspace {
         let narrow = self.git_width < px(git_panel::LEGEND_WIDTH);
         self.git_panel.update(cx, |p, cx| p.set(view, selected, narrow, cx));
         self.sync_files(false, cx);
-    }
-
-    fn panel_tab_label(&self, tab: PanelTab, label: &'static str, keys: &'static str, cx: &mut Context<Self>) -> impl IntoElement {
-        let active = self.panel_tab == tab;
-        div()
-            .id(label)
-            .px_2()
-            .py_1()
-            .text_xs()
-            .cursor_pointer()
-            .border_b_2()
-            .border_color(if active { rgb(colors::WORKING).into() } else { gpui::transparent_black() })
-            .text_color(if active { palette::FG } else { rgb(colors::DIM) })
-            .hover(|s| s.text_color(palette::FG))
-            .child(label)
-            .tooltip(git_panel::tip(keys))
-            .on_click(cx.listener(move |w, _: &ClickEvent, _, cx| w.set_panel_tab(tab, cx)))
     }
 
     pub fn refresh_repo(&self, root: &Path) {
@@ -1888,29 +1571,17 @@ impl Workspace {
     }
 }
 
-fn icon_button(id: &'static str, label: &'static str) -> gpui::Stateful<gpui::Div> {
-    div()
-        .id(id)
-        .px_1()
-        .rounded_sm()
-        .cursor_pointer()
-        .text_color(rgb(colors::DIM))
-        .hover(|s| s.bg(rgb(colors::ROW_HOVER)).text_color(palette::FG))
-        .child(label)
-}
-
-fn text_field(edit: &LineEdit) -> impl IntoElement {
-    div()
-        .flex()
-        .items_center()
-        .px_2()
-        .py_1()
-        .rounded_sm()
-        .bg(rgb(colors::INPUT))
-        .text_sm()
-        .child(edit.before_cursor().to_string())
-        .child(div().w(px(1.5)).h(px(16.)).bg(palette::CURSOR))
-        .child(edit.after_cursor().to_string())
+/// Groups in order of their first session; "Other" (None) last. Sessions keep their order within a group.
+fn group_order(keys: &[Option<PathBuf>]) -> Vec<(Option<PathBuf>, Vec<usize>)> {
+    let mut groups: Vec<(Option<PathBuf>, Vec<usize>)> = Vec::new();
+    for (i, k) in keys.iter().enumerate() {
+        match groups.iter_mut().find(|(g, _)| g == k) {
+            Some((_, members)) => members.push(i),
+            None => groups.push((k.clone(), vec![i])),
+        }
+    }
+    groups.sort_by_key(|(k, _)| k.is_none()); // stable: keeps first-appearance order otherwise
+    groups
 }
 
 fn home() -> PathBuf {
@@ -1947,34 +1618,6 @@ fn fmt_remaining(secs: i64) -> String {
     }
 }
 
-fn limit_row(label: &'static str, limit: Option<hook::Limit>, now: i64) -> impl IntoElement {
-    let (pct, detail) = match limit {
-        Some(l) if l.resets_at > now => (l.used_pct, format!("{:.0}% · resets in {}", l.used_pct, fmt_remaining(l.resets_at - now))),
-        Some(_) => (0., "reset".to_string()),
-        None => (0., "—".to_string()),
-    };
-    let color = if pct >= 90. { colors::EXITED } else if pct >= 70. { colors::NEEDS_YOU } else { colors::WORKING };
-    div()
-        .flex()
-        .flex_col()
-        .gap_1()
-        .child(
-            div()
-                .flex()
-                .text_xs()
-                .child(div().flex_1().child(label))
-                .child(div().text_color(rgb(colors::DIM)).child(detail)),
-        )
-        .child(
-            div()
-                .h(px(3.))
-                .w_full()
-                .rounded_full()
-                .bg(rgb(colors::BAR_BG))
-                .child(div().h_full().rounded_full().bg(rgb(color)).w(gpui::relative(pct.clamp(0., 100.) / 100.))),
-        )
-}
-
 fn window_state(window: &Window) -> Option<WindowState> {
     let (mode, b) = match window.window_bounds() {
         gpui::WindowBounds::Windowed(b) => (WindowMode::Windowed, b),
@@ -2007,7 +1650,18 @@ fn sh_word(s: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{fmt_remaining, sh_word};
+    use super::{fmt_remaining, group_order, sh_word};
+    use std::path::PathBuf;
+
+    #[test]
+    fn grouping_and_order() {
+        let a = Some(PathBuf::from("/a"));
+        let b = Some(PathBuf::from("/b"));
+        let groups = group_order(&[None, b.clone(), a.clone(), b.clone(), None]);
+        assert_eq!(groups, vec![(b, vec![1, 3]), (a, vec![2]), (None, vec![0, 4])]);
+        let order: Vec<usize> = groups.into_iter().flat_map(|(_, m)| m).collect();
+        assert_eq!(order, vec![1, 3, 2, 0, 4], "Ctrl+Tab / Ctrl+N follow this order");
+    }
 
     #[test]
     fn shell_words() {

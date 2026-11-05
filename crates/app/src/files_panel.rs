@@ -8,16 +8,15 @@ use std::sync::Arc;
 use git::text::FileText;
 use gpui::{
     ClickEvent, Context, FocusHandle, Focusable, KeyDownEvent, Pixels, ScrollStrategy, SharedString,
-    UniformListScrollHandle, WeakEntity, Window, div, prelude::*, px, rgb, uniform_list,
+    UniformListScrollHandle, WeakEntity, Window, div, prelude::*, px, uniform_list,
 };
 
 use crate::file_tree::{Key, Marks, Row};
-use crate::git_panel::{kind_color, line_counts};
+use crate::theme::{self, MONO_FONT, TERMINAL_FONT_SIZE, height, radius, space, text_size};
+use crate::ui::{self, icon, line_counts, tip};
 use crate::scrollbar::{self, scrollbar};
-use crate::terminal_element::{FONT_FAMILY, FONT_SIZE, palette};
-use crate::workspace::{Workspace, colors};
+use crate::workspace::Workspace;
 
-const ROW_H: f32 = 22.;
 const INDENT: f32 = 14.;
 /// Rows per PageUp/PageDown. ponytail: fixed; use the list's visible row count if it ever feels off.
 const PAGE: usize = 20;
@@ -90,48 +89,52 @@ impl FilesPanel {
     }
 
     fn row(&self, ix: usize, row: &Row) -> gpui::AnyElement {
+        let t = theme::get();
         let e = row.entry();
         let d = &self.data;
         let selected = d.selected.as_ref() == Some(&e.path);
         let open = d.open.as_ref() == Some(&e.path);
         let kind = d.marks.files.get(&e.path).copied();
         let color = match kind {
-            _ if row.ignored => 0x5a5a66,
-            Some(k) => kind_color(k),
-            None => 0xc8c8c8,
+            _ if row.ignored => t.text.faint,
+            Some(k) => theme::git_kind(k),
+            None => t.text.primary,
         };
-        let chevron = if !e.is_dir {
-            ""
-        } else if row.expanded {
-            "▾"
-        } else {
-            "▸"
+        let icon_color = if row.ignored { t.text.faint } else if kind.is_some() { color } else { t.text.dim };
+        let (chevron, file_icon) = match (e.is_dir, row.expanded) {
+            (true, true) => (Some(icon::CHEVRON_DOWN), icon::FOLDER_OPEN),
+            (true, false) => (Some(icon::CHEVRON_RIGHT), icon::FOLDER),
+            (false, _) => (None, ui::file_icon(&e.name)),
         };
         let (path, is_dir, ws, focus) = (e.path.clone(), e.is_dir, self.workspace.clone(), self.focus.clone());
         div()
             .id(("tree-row", ix))
             .w_full()
             .overflow_hidden()
-            .h(px(ROW_H))
-            .pl(px(8. + INDENT * row.depth as f32))
+            .h(px(height::LIST_ROW))
+            .pl(px(space::MD + INDENT * row.depth as f32))
             .pr(px(14.)) // room for the scrollbar
             .flex()
             .items_center()
-            .gap_1()
+            .gap(px(space::XS))
             .cursor_pointer()
-            .text_sm()
-            .when(selected, |d| d.bg(rgb(0x2f3a52)))
-            .when(!selected && open, |d| d.bg(rgb(colors::ROW_ACTIVE)))
-            .when(!selected && !open, |d| d.hover(|s| s.bg(rgb(colors::ROW_HOVER))))
+            .text_size(px(text_size::MD))
+            .when(selected, |d| d.bg(t.bg.selected_focus))
+            .when(!selected && open, |d| d.bg(t.bg.selected))
+            .when(!selected && !open, |d| d.hover(|s| s.bg(t.bg.hover)))
             .on_click(move |_: &ClickEvent, window, cx| {
                 window.focus(&focus, cx);
                 let path = path.clone();
                 let _ = ws.update(cx, |w, cx| w.tree_click(path, is_dir, window, cx));
             })
-            .child(div().flex_none().w(px(12.)).text_xs().text_color(rgb(colors::DIM)).child(chevron))
-            .child(div().min_w_0().truncate().text_color(rgb(color)).child(e.name.clone()))
+            .child(match chevron {
+                Some(c) => ui::icon(c, 12., t.text.dim).into_any_element(),
+                None => div().flex_none().w(px(12.)).into_any_element(),
+            })
+            .child(ui::icon(file_icon, 14., icon_color))
+            .child(div().min_w_0().truncate().text_color(color).child(e.name.clone()))
             .when(e.is_dir && d.marks.dirs.contains(&e.path), |d| {
-                d.child(div().flex_none().size(px(5.)).rounded_full().bg(rgb(0xd0b060)))
+                d.child(div().flex_none().size(px(5.)).rounded_full().bg(t.git.modified))
             })
             .into_any_element()
     }
@@ -147,31 +150,35 @@ impl Render for FilesPanel {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         crate::perf::event("files panel render");
         let d = &self.data;
-        let note = |text: &'static str| div().px_3().py_2().text_xs().text_color(rgb(colors::DIM)).child(text);
+        let t = theme::get();
         let root_name = d.root.as_ref().map(|r| r.file_name().map_or(r.display().to_string(), |n| n.to_string_lossy().into_owned()));
         let ws = self.workspace.clone();
         let header = div()
             .flex()
+            .flex_none()
             .items_center()
-            .gap_2()
-            .px_3()
-            .py_1()
-            .child(div().flex_1().min_w_0().truncate().text_xs().text_color(rgb(colors::DIM)).child(root_name.unwrap_or_default()))
+            .gap(px(space::SM))
+            .h(px(height::LIST_ROW))
+            .px(px(space::LG))
+            .text_size(px(text_size::XS))
+            .text_color(t.text.muted)
+            .child(ui::icon(icon::FOLDER_OPEN, 12., t.text.dim))
+            .child(div().flex_1().min_w_0().truncate().child(root_name.unwrap_or_default()))
             .child(
                 div()
                     .id("toggle-ignored")
                     .flex_none()
-                    .px_1()
-                    .rounded_sm()
+                    .p(px(space::XXS))
+                    .rounded(px(radius::SM))
                     .cursor_pointer()
-                    .text_xs()
-                    .text_color(rgb(colors::DIM))
-                    .hover(|s| s.bg(rgb(colors::ROW_HOVER)))
-                    .child(if d.show_ignored { "Hide ignored" } else { "Show ignored" })
+                    .hover(|s| s.bg(t.bg.hover))
+                    .child(ui::icon(if d.show_ignored { icon::SHOW } else { icon::HIDE }, 14., t.text.dim))
+                    .tooltip(tip(if d.show_ignored { "Ignored files shown: click to hide" } else { "Ignored files hidden: click to show" }))
                     .on_click(move |_: &ClickEvent, _, cx| {
                         let _ = ws.update(cx, |w, cx| w.toggle_show_ignored(cx));
                     }),
             );
+        let note = |text: &'static str| ui::note(text);
         let body = if d.root.is_none() {
             note("…").into_any_element()
         } else if d.loading {
@@ -202,7 +209,7 @@ impl Render for FilesPanel {
             .flex()
             .flex_col()
             .size_full()
-            .bg(rgb(colors::SIDEBAR))
+            .bg(t.bg.panel)
             .track_focus(&self.focus)
             .on_key_down(move |ev: &KeyDownEvent, window, cx| {
                 let ks = &ev.keystroke;
@@ -340,66 +347,73 @@ fn rel(path: &Path, base: Option<&Path>) -> String {
 impl Render for FileView {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         crate::perf::event("file view render");
+        let t = theme::get();
         let ws = self.workspace.clone();
         let show_diff = self.change.clone().zip(self.repo.clone()).map(|(change, root)| {
             let ws = ws.clone();
             div()
                 .id("show-diff")
                 .flex_none()
-                .px_2()
-                .rounded_sm()
+                .flex()
+                .items_center()
+                .gap(px(space::XS))
+                .px(px(space::MD))
+                .py(px(space::XXS))
+                .rounded(px(radius::SM))
                 .cursor_pointer()
-                .bg(rgb(colors::ROW_ACTIVE))
-                .hover(|s| s.bg(rgb(colors::DIVIDER_HOVER)))
-                .text_xs()
+                .bg(t.bg.selected)
+                .hover(|s| s.bg(t.bg.hover))
+                .text_size(px(text_size::XS))
+                .child(ui::icon(icon::CHANGES, 12., t.accent))
                 .child("Show diff")
                 .on_click(move |_: &ClickEvent, window, cx| {
                     let (root, change) = (root.clone(), change.clone());
                     let _ = ws.update(cx, |w, cx| w.toggle_diff(root, change, window, cx));
                 })
         });
-        let header = div()
-            .flex()
-            .flex_none()
-            .items_center()
-            .gap_3()
-            .px_3()
-            .py_1()
-            .bg(rgb(colors::SIDEBAR))
-            .text_sm()
-            .children(self.change.as_ref().map(|c| div().text_color(rgb(kind_color(c.kind))).child(c.kind.to_string())))
-            .child(div().min_w_0().truncate().child(rel(&self.path, self.base.as_deref())))
-            .children(self.change.as_ref().map(|c| div().flex_none().text_xs().child(line_counts(c.lines))))
+        let name = self.path.file_name().map_or(String::new(), |n| n.to_string_lossy().into_owned());
+        let icon_color = self.change.as_ref().map_or(t.text.dim, |c| theme::git_kind(c.kind));
+        let header = ui::overlay_header()
+            .child(ui::icon(ui::file_icon(&name), 14., icon_color))
+            .child(div().min_w_0().truncate().text_color(t.text.primary).child(rel(&self.path, self.base.as_deref())))
+            .children(self.change.as_ref().map(|c| div().flex_none().text_size(px(text_size::XS)).child(line_counts(c.lines))))
             .children(show_diff)
-            .child(div().ml_auto().flex_none().text_xs().text_color(rgb(colors::DIM)).child("Esc to close"));
-        let note = |text: &'static str, color: u32| div().p_3().text_color(rgb(color)).child(text).into_any_element();
+            .child(ui::hint("Esc to close"));
         let body = match (&self.content, self.failed) {
-            (_, true) => note("Couldn't read the file", colors::EXITED),
-            (None, _) => note("Loading…", colors::DIM),
-            (Some(Content::Binary), _) => note("Binary file", colors::DIM),
-            (Some(Content::Lines { lines, .. }), _) if lines.is_empty() => note("Empty file", colors::DIM),
+            (_, true) => ui::note("Couldn't read the file").text_color(t.state.error).into_any_element(),
+            (None, _) => ui::note("Loading…").into_any_element(),
+            (Some(Content::Binary), _) => ui::note("Binary file").into_any_element(),
+            (Some(Content::Lines { lines, .. }), _) if lines.is_empty() => ui::note("Empty file").into_any_element(),
             (Some(Content::Lines { lines, truncated }), _) => {
                 let (lines, lh, truncated) = (lines.clone(), self.line_height, *truncated);
                 let digits = lines.len().to_string().len().max(3) as f32;
-                let gutter = self.cell_width * digits + px(16.);
+                let gutter = self.cell_width * digits + px(space::XL);
                 let count = lines.len() + truncated as usize;
                 let list = uniform_list("file-lines", count, move |range, _, _| {
+                    let t = theme::get();
                     range
                         .map(|ix| {
                             let row = div().h(lh).flex().whitespace_nowrap().overflow_hidden();
                             let Some(text) = lines.get(ix) else {
-                                return row.pl_3().text_color(rgb(colors::NEEDS_YOU)).child("… file truncated (too large to show)");
+                                return row.pl(px(space::LG)).text_color(t.state.needs_you).child("… file truncated (too large to show)");
                             };
                             row.child(
-                                div().flex_none().w(gutter).pr_3().flex().justify_end().text_color(rgb(0x5a5a66)).child((ix + 1).to_string()),
+                                div()
+                                    .flex_none()
+                                    .w(gutter)
+                                    .pr(px(space::LG))
+                                    .flex()
+                                    .justify_end()
+                                    .text_color(t.text.faint)
+                                    .child((ix + 1).to_string()),
                             )
-                            .child(div().pr(px(14.)).text_color(rgb(0xc8c8c8)).child(text.clone()))
+                            .child(div().pr(px(14.)).text_color(t.diff.context).child(text.clone()))
                         })
                         .collect::<Vec<_>>()
                 })
                 .track_scroll(&self.scroll)
-                .font_family(FONT_FAMILY)
-                .text_size(px(FONT_SIZE - 1.))
+                .font_family(MONO_FONT)
+                .text_size(px(TERMINAL_FONT_SIZE - 1.))
                 .line_height(lh);
                 div()
                     .relative()
@@ -414,7 +428,7 @@ impl Render for FileView {
             .flex()
             .flex_col()
             .size_full()
-            .bg(palette::BG)
+            .bg(t.bg.base)
             .track_focus(&self.focus)
             .on_key_down(move |ev: &KeyDownEvent, window, cx| {
                 let ks = &ev.keystroke;

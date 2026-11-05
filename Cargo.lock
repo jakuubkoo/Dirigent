@@ -121,6 +121,7 @@ dependencies = [
  "serde",
  "serde_json",
  "session",
+ "wayland-client",
 ]
 
 [[package]]

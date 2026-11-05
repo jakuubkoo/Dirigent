@@ -8,7 +8,7 @@ use std::rc::Rc;
 
 use gpui::{
     Bounds, CursorStyle, EntityId, HitboxBehavior, IntoElement, MouseButton, MouseDownEvent, MouseMoveEvent,
-    MouseUpEvent, Pixels, Styled, UniformListScrollHandle, canvas, point, px, rgba,
+    MouseUpEvent, Pixels, Styled, UniformListScrollHandle, canvas, point, px,
 };
 
 const WIDTH: f32 = 8.;
@@ -46,7 +46,8 @@ pub fn scrollbar(handle: UniformListScrollHandle, drag: Drag, view: EntityId) ->
             let Some((t, _)) = thumb(track, &handle) else { return };
             let hitbox = window.insert_hitbox(track, HitboxBehavior::Normal);
             window.set_cursor_style(CursorStyle::Arrow, &hitbox);
-            let color = if drag.get().is_some() { rgba(0x8a8a96cc) } else { rgba(0x8a8a9666) };
+            let s = &crate::theme::get().scrollbar;
+            let color = if drag.get().is_some() { s.active } else { s.thumb };
             let inset = Bounds { origin: point(t.origin.x + px(2.), t.origin.y), size: gpui::size(px(WIDTH - 3.), t.size.height) };
             window.paint_quad(gpui::fill(inset, color).corner_radii(px(3.)));
 

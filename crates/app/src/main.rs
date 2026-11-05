@@ -1,4 +1,6 @@
 mod agent;
+mod assets;
+mod blur;
 mod file_tree;
 mod files_panel;
 mod git_panel;
@@ -7,11 +9,16 @@ mod perf;
 mod persist;
 mod scrollbar;
 mod terminal_element;
+mod theme;
+mod ui;
 mod terminal_view;
 mod window_chrome;
 mod workspace;
 
-use gpui::{App, Bounds, KeyBinding, WindowBounds, WindowDecorations, WindowOptions, point, prelude::*, px, size};
+use gpui::{
+    App, Bounds, KeyBinding, WindowBackgroundAppearance, WindowBounds, WindowDecorations, WindowOptions, point, prelude::*,
+    px, size,
+};
 use workspace::*;
 
 fn main() {
@@ -19,7 +26,14 @@ fn main() {
     // The only synchronous file IO: a small file, read before any window exists.
     let state_path = persist::path();
     let saved = persist::load(&state_path);
-    gpui_platform::application().run(move |cx: &mut App| {
+    let translucent = blur::decide(std::env::var("AGENT_IDE_BLUR").ok().as_deref(), blur::wayland_globals);
+    let t = theme::get();
+    let rgb8 = |c: gpui::Rgba| [(c.r * 255.).round() as u8, (c.g * 255.).round() as u8, (c.b * 255.).round() as u8];
+    session::set_reported_colors(rgb8(t.terminal.fg), rgb8(t.terminal.bg));
+    gpui_platform::application().with_assets(assets::Assets).run(move |cx: &mut App| {
+        if let Err(e) = cx.text_system().add_fonts(assets::fonts()) {
+            eprintln!("agent-ide: bundled fonts failed to load: {e}");
+        }
         let ctx = Some("Workspace");
         cx.bind_keys([
             KeyBinding::new("ctrl-shift-t", NewSession, ctx),
@@ -60,10 +74,15 @@ fn main() {
                 // Server-side where the platform has them (X11, KDE); GNOME Wayland falls back to client-side and
                 // the workspace draws its own title bar (window_chrome.rs).
                 window_decorations: Some(WindowDecorations::Server),
+                window_background: if translucent {
+                    WindowBackgroundAppearance::Blurred
+                } else {
+                    WindowBackgroundAppearance::Opaque
+                },
                 app_id: Some("agent-ide".into()),
                 ..Default::default()
             },
-            |window, cx| cx.new(|cx| Workspace::new(saved.clone(), state_path.clone(), window, cx)),
+            |window, cx| cx.new(|cx| Workspace::new(saved.clone(), state_path.clone(), translucent, window, cx)),
         )
         .expect("open window");
         cx.on_window_closed(|cx, _| cx.quit()).detach();
