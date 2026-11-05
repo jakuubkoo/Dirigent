@@ -66,6 +66,32 @@ struct Tab {
     agent_only: Option<bool>,
     /// Opened as a new session (picker, `+`, CLI): its project is remembered once its repo is resolved.
     remember: bool,
+    /// A linked worktree's main checkout (its sidebar group, its project); also the hint for unspawned tabs.
+    main_root: Option<PathBuf>,
+}
+
+/// Project defaults dialog: start claude, its flags, the setup command for new worktrees, where worktrees go.
+pub(super) struct Defaults {
+    pub root: PathBuf,
+    pub auto: bool,
+    pub flags: LineEdit,
+    pub setup: LineEdit,
+    pub wt_dir: LineEdit,
+    /// 0 the checkbox, 1 flags, 2 setup, 3 worktree dir.
+    pub focus: u8,
+}
+
+/// How `new_session_with` opens a session.
+#[derive(Default)]
+pub(super) struct SessionOpts {
+    pub name: Option<String>,
+    /// None: the project's default.
+    pub claude: Option<bool>,
+    pub prompt: Option<String>,
+    /// Run the project's setup command first (a fresh worktree).
+    pub setup: bool,
+    /// The project whose defaults apply (None: the one containing the directory).
+    pub project: Option<PathBuf>,
 }
 
 /// What covers the terminal area: a diff or a file preview. The active session is hidden meanwhile.
@@ -92,7 +118,12 @@ enum Modal {
     Rename { tab: usize, edit: LineEdit },
     ProjectRename { root: PathBuf, edit: LineEdit },
     /// Per-project defaults: start claude in new sessions, its flags (typed; filtered on save).
-    ProjectDefaults { root: PathBuf, auto: bool, edit: LineEdit },
+    ProjectDefaults(Box<Defaults>),
+    /// New session setup: name, shared directory or a new worktree, claude + first prompt.
+    Setup(Box<setup::Setup>),
+    /// Closing the last session in a linked worktree / Remove… from the list: keep or remove it.
+    CloseWorktree(Box<setup::CloseWt>),
+    Worktrees(Box<setup::WtList>),
     /// "Discard …?" / "Commit … files of this agent?" before a git write; `ok` is the action button's label.
     Confirm {
         title: String,
@@ -730,6 +761,7 @@ impl Workspace {
             notified_seq: 0,
             agent_only: None,
             remember: false,
+            main_root: None,
         });
         self.tabs.len() - 1
     }
@@ -831,7 +863,7 @@ impl Workspace {
                 .background_executor()
                 .spawn(async move {
                     dirs.into_iter()
-                        .map(|(id, d)| (id, d.ancestors().find(|a| a.join(".git").exists()).map(Path::to_path_buf)))
+                        .map(|(id, d)| (id, d.ancestors().find(|a| a.join(".git").exists()).map(|a| main_checkout(a).unwrap_or_else(|| a.to_path_buf()))))
                         .collect()
                 })
                 .await;
@@ -866,6 +898,9 @@ impl Workspace {
     /// A tab's sidebar group: its repo root; outside repos the known project its directory is in, else "Other".
     fn tab_group(&self, i: usize) -> Option<PathBuf> {
         let t = &self.tabs[i];
+        if let Some(main) = &t.main_root {
+            return Some(main.clone()); // worktrees sit in their project's group
+        }
         match &t.repo {
             TabRepo::Repo(root) => Some(root.clone()),
             TabRepo::Unknown | TabRepo::Pending if t.group_hint.is_some() => t.group_hint.clone(),
@@ -876,24 +911,37 @@ impl Workspace {
     /// Opens a session in `dir` (picker, group `+`, Ctrl+Shift+N, `agent-ide <path>`): its project is remembered;
     /// claude starts when asked, else per the project's default, with the project's flags.
     pub(super) fn new_session(&mut self, dir: PathBuf, claude: Option<bool>, window: &mut Window, cx: &mut Context<Self>) -> usize {
-        let project = self.projects.of_dir(&dir).cloned().unwrap_or_default();
+        self.new_session_with(dir, SessionOpts { claude, ..Default::default() }, window, cx)
+    }
+
+    /// `new_session` with the setup dialog's choices: name, first prompt, the project (a worktree lies outside its
+    /// project's directory) and its setup command (fresh worktrees).
+    pub(super) fn new_session_with(&mut self, dir: PathBuf, opts: SessionOpts, window: &mut Window, cx: &mut Context<Self>) -> usize {
+        let project = match &opts.project {
+            Some(root) => self.projects.get(root).cloned(),
+            None => self.projects.of_dir(&dir).cloned(),
+        }
+        .unwrap_or_default();
         self.last_dir = dir.clone();
-        let i = self.add_tab(None, dir, None, Vec::new(), Vec::new());
+        let i = self.add_tab(opts.name.filter(|n| !n.trim().is_empty()), dir, None, Vec::new(), Vec::new());
         self.tabs[i].remember = true;
         self.activate(i, window, cx);
         self.mark_dirty(cx);
-        if claude.unwrap_or(project.auto_claude)
-            && let Some(v) = &self.tabs[i].view
-        {
+        let claude = opts.claude.unwrap_or(project.auto_claude);
+        let setup = project.setup_cmd.as_deref().filter(|_| opts.setup);
+        if let (Some(line), Some(v)) = (crate::projects::start_line(setup, claude, &project.claude_args, opts.prompt.as_deref()), &self.tabs[i].view) {
             // Our shim is first on the session's PATH: claude starts with our hooks. The PTY holds the line until the
             // shell has read its rc files.
-            let line: String = std::iter::once("claude".to_string()).chain(project.claude_args.iter().map(|a| sh_word(a))).collect::<Vec<_>>().join(" ");
             let session = v.read(cx).session.clone();
             session.write(format!("{line}\r").as_bytes());
             // A folder claude hasn't seen asks "Do you trust the files in this folder?" with "No, exit" selected:
             // Down + Enter picks "Yes, I trust this folder". Only for this start, within 30 s; a trusted folder never
             // shows it and the watch expires. (To become a setting: on/off.)
-            session.answer_once(TRUST_PROMPT, vec![b"\x1b[B".to_vec(), b"\r".to_vec()], Duration::from_secs(30));
+            if claude {
+                // Setup may run a while first: a longer watch then.
+                let within = Duration::from_secs(if setup.is_some() { 600 } else { 30 });
+                session.answer_once(TRUST_PROMPT, vec![b"\x1b[B".to_vec(), b"\r".to_vec()], within);
+            }
         }
         i
     }
@@ -926,11 +974,27 @@ impl Workspace {
     }
 
     fn close_active(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.tabs.is_empty() {
+        let Some(t) = self.tabs.get(self.active) else { return };
+        // The last session in a linked worktree: ask whether to keep or remove the worktree.
+        if let (Some(main), TabRepo::Repo(root)) = (t.main_root.clone(), t.repo.clone())
+            && !self.tabs.iter().any(|o| o.id != t.id && o.repo == t.repo)
+        {
+            let branch = self.repos.status(&root).map(|s| s.branch.clone()).filter(|b| !b.starts_with('('));
+            self.ask_close_worktree(root, main, branch, Some(t.id), window, cx);
             return;
         }
+        self.modal = None;
+        self.close_tab(self.active, window, cx);
+    }
+
+    /// Closes tab `idx` now (its shell and whatever runs in it are killed off-thread).
+    pub(super) fn close_tab(&mut self, idx: usize, window: &mut Window, cx: &mut Context<Self>) {
+        if idx >= self.tabs.len() {
+            return;
+        }
+        let was_active = idx == self.active;
         // Dropping the view drops the Session, which kills + reaps the shell on its own thread.
-        let tab = self.tabs.remove(self.active);
+        let tab = self.tabs.remove(idx);
         if let Some(hub) = &self.agents {
             hub.remove_tab(tab.id as u32);
         }
@@ -942,16 +1006,20 @@ impl Workspace {
         self.drop_overlay();
         self.tree_rows = None;
         self.mark_dirty(cx);
-        self.modal = None;
         if self.tabs.is_empty() {
             self.active = 0;
             window.focus(&self.focus, cx);
             self.sync_panel(cx);
             cx.notify();
-        } else {
-            let idx = self.active.min(self.tabs.len() - 1);
+        } else if was_active {
+            let idx = idx.min(self.tabs.len() - 1);
             self.active = usize::MAX; // old one is gone; nothing to hide
             self.activate(idx, window, cx);
+        } else {
+            if idx < self.active {
+                self.active -= 1;
+            }
+            cx.notify();
         }
     }
 
@@ -1012,13 +1080,30 @@ impl Workspace {
         let Some(modal) = self.modal.as_mut() else { return };
         let edit = match modal {
             Modal::Picker(_) => return self.picker_key(ev, window, cx),
-            Modal::ProjectDefaults { auto, .. } if ks.key == "tab" => {
-                *auto = !*auto;
+            Modal::Setup(_) => return self.setup_key(ev, window, cx),
+            Modal::CloseWorktree(_) => return self.close_wt_key(ev, window, cx),
+            Modal::Worktrees(_) => return self.worktrees_key(ev, window, cx),
+            Modal::ProjectDefaults(d) if ks.key == "tab" || (d.focus == 0 && ks.key == "space") => {
+                if ks.key == "tab" {
+                    d.focus = (d.focus + if ks.modifiers.shift { 3 } else { 1 }) % 4;
+                } else {
+                    d.auto = !d.auto;
+                }
                 cx.stop_propagation();
                 cx.notify();
                 return;
             }
-            Modal::Rename { edit, .. } | Modal::ProjectRename { edit, .. } | Modal::ProjectDefaults { edit, .. } => edit,
+            Modal::ProjectDefaults(d) => match d.focus {
+                1 => &mut d.flags,
+                2 => &mut d.setup,
+                3 => &mut d.wt_dir,
+                _ if matches!(ks.key.as_str(), "enter" | "escape") => &mut d.flags,
+                _ => {
+                    cx.stop_propagation();
+                    return;
+                }
+            },
+            Modal::Rename { edit, .. } | Modal::ProjectRename { edit, .. } => edit,
             Modal::Confirm { .. } => {
                 match ks.key.as_str() {
                     "enter" => self.confirm_ok(window, cx),
@@ -1059,13 +1144,19 @@ impl Workspace {
                     }
                     self.close_modal(window, cx);
                 }
-                Some(Modal::ProjectDefaults { root, auto, edit }) => {
-                    if self.projects.get(&root).is_none() {
-                        self.projects.touch(&root, now_secs()); // a group that wasn't remembered yet
+                Some(Modal::ProjectDefaults(d)) => {
+                    if self.projects.get(&d.root).is_none() {
+                        self.projects.touch(&d.root, now_secs()); // a group that wasn't remembered yet
                     }
-                    if let Some(p) = self.projects.get_mut(&root) {
-                        p.auto_claude = auto;
-                        p.claude_args = hook::resume_args(&hook::split_words(&edit.text));
+                    if let Some(p) = self.projects.get_mut(&d.root) {
+                        p.auto_claude = d.auto;
+                        p.claude_args = hook::resume_args(&hook::split_words(&d.flags.text));
+                        p.setup_cmd = Some(d.setup.text.trim().to_string()).filter(|c| !c.is_empty());
+                        let dir = d.wt_dir.text.trim();
+                        p.worktrees_dir = (!dir.is_empty()).then(|| match dir.strip_prefix('~') {
+                            Some(rest) => home().join(rest.trim_start_matches('/')),
+                            None => d.root.join(dir), // absolute stays absolute
+                        });
                         self.mark_dirty(cx);
                     }
                     self.close_modal(window, cx);
@@ -1439,6 +1530,7 @@ impl Workspace {
 
 mod git_write;
 mod projects_ui;
+mod setup;
 mod view;
 
 use projects_ui::Menu;
@@ -1469,9 +1561,14 @@ impl Workspace {
             git::Discovery::NotRepo => TabRepo::NotRepo,
             git::Discovery::GitMissing => TabRepo::GitMissing,
         };
-        if new == t.repo {
+        let main_root = match &found {
+            git::Discovery::Repo(r) => r.main_root().map(Path::to_path_buf),
+            _ => None,
+        };
+        if new == t.repo && main_root == t.main_root {
             return;
         }
+        t.main_root = main_root;
         crate::perf::event_with(|| format!("tab {id} repo → {}", match &new { TabRepo::Repo(r) => r.display().to_string(), _ => "none".into() }));
         self.tracker.set_repo(id as u32, match &new {
             TabRepo::Repo(r) => Some(r.clone()),
@@ -1481,8 +1578,9 @@ impl Workspace {
             self.repos.release(&old);
         }
         if std::mem::take(&mut t.remember) {
-            let root = match &t.repo {
-                TabRepo::Repo(r) => r.clone(),
+            let root = match (&t.main_root, &t.repo) {
+                (Some(main), _) => main.clone(), // a worktree belongs to its main checkout's project
+                (None, TabRepo::Repo(r)) => r.clone(),
                 _ => t.cwd.clone(),
             };
             self.projects.touch(&root, now_secs());
@@ -2184,6 +2282,15 @@ fn group_order(keys: &[Option<PathBuf>]) -> Vec<(Option<PathBuf>, Vec<usize>)> {
     groups
 }
 
+/// `dir/.git` is a file (a linked worktree): its main checkout, from `gitdir: <main>/.git/worktrees/<name>`.
+fn main_checkout(dir: &Path) -> Option<PathBuf> {
+    let text = std::fs::read_to_string(dir.join(".git")).ok()?;
+    let gitdir = PathBuf::from(text.trim().strip_prefix("gitdir:")?.trim());
+    let gitdir = if gitdir.is_absolute() { gitdir } else { dir.join(gitdir) };
+    let common = gitdir.parent()?.parent()?; // <main>/.git
+    (gitdir.parent()?.file_name()? == "worktrees" && common.file_name()? == ".git").then(|| common.parent().map(Path::to_path_buf)).flatten()
+}
+
 /// Pinned projects without tabs become empty groups after the tab groups (before "Other").
 fn with_pinned(mut groups: Vec<(Option<PathBuf>, Vec<usize>)>, pinned: &[PathBuf]) -> Vec<(Option<PathBuf>, Vec<usize>)> {
     let at = groups.iter().position(|(k, _)| k.is_none()).unwrap_or(groups.len());
@@ -2241,7 +2348,7 @@ fn resume_command(t: &Tab) -> Option<String> {
 }
 
 /// Quotes one shell word for typing into zsh/sh.
-fn sh_word(s: &str) -> String {
+pub(crate) fn sh_word(s: &str) -> String {
     if !s.is_empty() && s.chars().all(|c| c.is_ascii_alphanumeric() || "-_./=:,+@%".contains(c)) {
         s.to_string()
     } else {

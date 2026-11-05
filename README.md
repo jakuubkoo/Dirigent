@@ -29,6 +29,14 @@ Ctrl+Shift+T opens the picker: type to fuzzy-search projects, or a path (`/`, `~
 Enter opens a session, Shift+Enter also starts claude. Hover a sidebar group for `+` (new session there),
 `▾` (with or without claude) and `⋯` (pin to sidebar, rename, defaults: start claude automatically and its flags).
 
+### Worktrees
+
+Enter in the picker (or `▾` → New session… on a group) opens a setup dialog: name the session, and optionally give it
+its own git worktree (new branch from a base branch, next to the repo in `<repo>-worktrees/`), start claude with a
+first prompt. Ctrl+Enter in the picker skips the dialog. Closing the last session in a worktree asks whether to keep
+or remove it; removing warns about uncommitted or unpushed work. `⋯` → Worktrees… lists all of the repo's worktrees.
+Per project (`⋯` → Defaults…): a setup command for new worktrees (e.g. `pnpm install`) and where they go.
+
 ## Open from the terminal
 
 ```sh

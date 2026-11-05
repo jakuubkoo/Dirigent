@@ -75,7 +75,7 @@ impl Watcher {
         let received = Arc::new(AtomicU64::new(0));
         let (latest2, refreshes2, tx2, received2) = (latest.clone(), refreshes.clone(), tx.clone(), received.clone());
         std::thread::Builder::new().name("git-watch".into()).spawn(move || {
-            let git_dir = repo.git_dir.clone();
+            let (git_dir, common) = (repo.git_dir.clone(), shared(&repo));
             let handler = move |res: notify::Result<Event>| {
                 let ev = match res {
                     Ok(ev) if !ev.need_rescan() => ev,
@@ -88,7 +88,7 @@ impl Watcher {
                     created: matches!(ev.kind, EventKind::Create(_) | EventKind::Modify(ModifyKind::Name(_))),
                     listing: changes_listing(&ev.kind),
                 };
-                let paths: Vec<_> = ev.paths.into_iter().filter(|p| counts(p, &git_dir)).map(|p| (p, change)).collect();
+                let paths: Vec<_> = ev.paths.into_iter().filter(|p| counts(p, &git_dir, common.as_deref())).map(|p| (p, change)).collect();
                 if !paths.is_empty() {
                     received2.fetch_add(1, Ordering::Relaxed);
                     let _ = tx2.send(Ev::Paths(paths));
@@ -103,6 +103,15 @@ impl Watcher {
             if refs.is_dir() {
                 let _ = w.watch(&refs, RecursiveMode::Recursive);
             }
+            // A linked worktree: branches live in the shared `.git` (a commit made in another checkout moves them).
+            if let Some(common) = shared(&repo) {
+                let _ = w.watch(&common, RecursiveMode::NonRecursive);
+                let refs = common.join("refs/heads");
+                if refs.is_dir() {
+                    let _ = w.watch(&refs, RecursiveMode::Recursive);
+                }
+            }
+            let in_git = |p: &Path| p.starts_with(&repo.git_dir) || shared(&repo).is_some_and(|c| p.starts_with(c));
             let started = Instant::now();
             let n = watch_tree(&mut w, &repo.root, &mut watch_error);
             crate::perf(|| format!("git watch {}: {n} dirs in {:.1} ms", repo.root.display(), ms(started)));
@@ -138,8 +147,8 @@ impl Watcher {
                 }
                 first = false;
                 let paths: HashSet<(PathBuf, Change)> = std::mem::take(&mut pending).into_iter().collect();
-                let git_hit = paths.iter().any(|(p, _)| p.starts_with(&repo.git_dir));
-                let work: Vec<&(PathBuf, Change)> = paths.iter().filter(|(p, _)| !p.starts_with(&repo.git_dir)).collect();
+                let git_hit = paths.iter().any(|(p, _)| in_git(p));
+                let work: Vec<&(PathBuf, Change)> = paths.iter().filter(|(p, _)| !in_git(p)).collect();
                 let dirs: Vec<PathBuf> = work
                     .iter()
                     .filter(|(_, c)| c.listing)
@@ -218,11 +227,20 @@ fn ms(t: Instant) -> f64 {
     t.elapsed().as_secs_f64() * 1e3
 }
 
-/// Inside the git dir only these change what `git status` shows (objects/, logs/, *.lock don't).
-fn counts(path: &Path, git_dir: &Path) -> bool {
-    match path.strip_prefix(git_dir) {
-        Ok(rel) => rel == Path::new("index") || rel == Path::new("HEAD") || rel == Path::new("packed-refs") || rel.starts_with("refs/heads"),
-        Err(_) => true,
+/// A linked worktree's shared git dir (None for a main checkout: its git dir is already watched).
+fn shared(repo: &crate::Repo) -> Option<PathBuf> {
+    (repo.common_dir != repo.git_dir).then(|| repo.common_dir.clone())
+}
+
+/// Inside the git dir only these change what `git status` shows (objects/, logs/, *.lock don't); in a linked
+/// worktree's shared dir only the branches (its own index/HEAD are in `git_dir`, which is inside the shared one).
+fn counts(path: &Path, git_dir: &Path, common: Option<&Path>) -> bool {
+    if let Ok(rel) = path.strip_prefix(git_dir) {
+        return rel == Path::new("index") || rel == Path::new("HEAD") || rel == Path::new("packed-refs") || rel.starts_with("refs/heads");
+    }
+    match common.map(|c| path.strip_prefix(c)) {
+        Some(Ok(rel)) => rel == Path::new("packed-refs") || rel.starts_with("refs/heads"),
+        _ => true,
     }
 }
 

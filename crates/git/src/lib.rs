@@ -23,8 +23,17 @@ const MAX_COUNT_BYTES: u64 = 1 << 20;
 pub struct Repo {
     /// Working tree root (`--show-toplevel`).
     pub root: PathBuf,
-    /// `--absolute-git-dir` (outside `root` for linked worktrees).
+    /// `--absolute-git-dir` (outside `root` for linked worktrees: `<main>/.git/worktrees/<name>`).
     pub git_dir: PathBuf,
+    /// `--git-common-dir` (absolute): the shared `.git` with refs and objects; == `git_dir` except in linked worktrees.
+    pub common_dir: PathBuf,
+}
+
+impl Repo {
+    /// A linked worktree's main checkout (where its shared `.git` lives); None for the main checkout itself.
+    pub fn main_root(&self) -> Option<&Path> {
+        (self.common_dir != self.git_dir && self.common_dir.file_name().is_some_and(|n| n == ".git")).then(|| self.common_dir.parent()).flatten()
+    }
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -71,16 +80,18 @@ fn output(mut c: Command) -> std::io::Result<Vec<u8>> {
 /// Which repo `dir` is in. Blocking (one ~2 ms `git rev-parse`): call off the UI thread.
 pub fn discover(dir: &Path) -> Discovery {
     let mut c = git(dir);
-    c.args(["rev-parse", "--show-toplevel", "--absolute-git-dir"]);
+    c.args(["rev-parse", "--show-toplevel", "--absolute-git-dir", "--path-format=absolute", "--git-common-dir"]);
     match c.output() {
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Discovery::GitMissing,
         Ok(out) if out.status.success() => {
             let text = String::from_utf8_lossy(&out.stdout);
             let mut lines = text.lines();
-            match (lines.next(), lines.next()) {
-                (Some(root), Some(git_dir)) => {
-                    Discovery::Repo(Repo { root: root.into(), git_dir: git_dir.into() })
-                }
+            match (lines.next(), lines.next(), lines.next()) {
+                (Some(root), Some(git_dir), common) => Discovery::Repo(Repo {
+                    root: root.into(),
+                    git_dir: git_dir.into(),
+                    common_dir: common.unwrap_or(git_dir).into(),
+                }),
                 _ => Discovery::NotRepo, // bare repo or inside .git: no working tree
             }
         }

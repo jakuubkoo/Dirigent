@@ -168,7 +168,7 @@ impl Workspace {
             "down" => moved(p, p.sel + 1),
             "pageup" => moved(p, p.sel.saturating_sub(PAGE)),
             "pagedown" => moved(p, p.sel + PAGE),
-            "enter" => return self.picker_open(None, m.shift, window, cx),
+            "enter" => return self.picker_open(None, m.shift, m.control, window, cx),
             "tab" => self.picker_complete(cx),
             "c" if m.control && m.shift => p.claude = !p.claude,
             "v" if m.control => {
@@ -212,7 +212,9 @@ impl Workspace {
 
     /// Enter / a click: a session in the row's project or directory (`ix` None: the selection). With no rows in
     /// path mode the typed path itself, if it is a directory (checked off-thread).
-    pub(super) fn picker_open(&mut self, ix: Option<usize>, shift: bool, window: &mut Window, cx: &mut Context<Self>) {
+    /// Plain Enter / click → the setup dialog; Ctrl → open at once; Shift → at once with claude.
+    pub(super) fn picker_open(&mut self, ix: Option<usize>, shift: bool, direct: bool, window: &mut Window, cx: &mut Context<Self>) {
+        let direct = direct || shift;
         let cwd = self.picker_cwd();
         let Some(Modal::Picker(p)) = &mut self.modal else { return };
         let claude = (p.claude || shift).then_some(true);
@@ -229,7 +231,9 @@ impl Workspace {
                     });
                     let ok = ok.await;
                     let _ = this.update_in(cx, |w, window, cx| {
-                        if ok {
+                        if ok && !direct {
+                            w.open_setup(typed, window, cx);
+                        } else if ok {
                             w.modal = None;
                             w.new_session(typed, claude, window, cx);
                         } else if let Some(Modal::Picker(p)) = &mut w.modal {
@@ -243,6 +247,9 @@ impl Workspace {
             }
             None => return,
         };
+        if !direct {
+            return self.open_setup(dir, window, cx);
+        }
         self.modal = None;
         self.new_session(dir, claude, window, cx);
         cx.notify();
@@ -257,6 +264,8 @@ impl Workspace {
         let Some(menu) = self.menu.take() else { return };
         let root = menu.root;
         match action {
+            "setup" => self.open_setup(root, window, cx),
+            "worktrees" => self.open_worktrees(root, window, cx),
             "new" => {
                 self.new_session(root, Some(false), window, cx);
             }
@@ -283,7 +292,14 @@ impl Workspace {
             "defaults" => {
                 let p = self.projects.get(&root).cloned().unwrap_or_default();
                 let flags = p.claude_args.iter().map(|a| sh_word(a)).collect::<Vec<_>>().join(" ");
-                self.modal = Some(Modal::ProjectDefaults { root, auto: p.auto_claude, edit: LineEdit::new(flags) });
+                self.modal = Some(Modal::ProjectDefaults(Box::new(Defaults {
+                    root,
+                    auto: p.auto_claude,
+                    flags: LineEdit::new(flags),
+                    setup: LineEdit::new(p.setup_cmd.clone().unwrap_or_default()),
+                    wt_dir: LineEdit::new(p.worktrees_dir.as_deref().map(tilde).unwrap_or_default()),
+                    focus: 1,
+                })));
                 window.focus(&self.focus, cx);
             }
             "remove" => {
@@ -308,7 +324,11 @@ impl Workspace {
         let t = theme::get();
         // (action, label, one-line explanation)
         let items: Vec<(&'static str, &'static str, &'static str)> = match menu.kind {
-            MenuKind::New => vec![("new", "New session", ""), ("claude", "New session with claude", "")],
+            MenuKind::New => vec![
+                ("setup", "New session…", "Name it, or give it its own git worktree"),
+                ("new", "New session", ""),
+                ("claude", "New session with claude", ""),
+            ],
             MenuKind::Project => {
                 let pinned = self.projects.get(&menu.root).is_some_and(|p| p.pinned);
                 let mut v = vec![
@@ -318,7 +338,8 @@ impl Workspace {
                         ("pin", "Pin to sidebar", "Keep this group in the sidebar even with no sessions")
                     },
                     ("rename", "Rename…", "The name shown in the sidebar and the picker"),
-                    ("defaults", "Defaults…", "Start claude automatically, default claude flags"),
+                    ("defaults", "Defaults…", "Start claude, its flags, worktree setup command and location"),
+                    ("worktrees", "Worktrees…", "List, open or clean up this repo's git worktrees"),
                 ];
                 if self.projects.get(&menu.root).is_some() {
                     v.push(("remove", "Remove from recent projects", "Forget it in the picker; files and open sessions stay"));
@@ -449,7 +470,7 @@ impl Workspace {
                 div()
                     .text_size(px(text_size::XS))
                     .text_color(t.text.dim)
-                    .child("↑↓ select · Enter open · Shift+Enter with claude · Tab complete · Esc close"),
+                    .child("↑↓ select · Enter set up… · Ctrl+Enter open now · Shift+Enter now with claude · Tab complete · Esc"),
             )
             .into_any_element()
     }
@@ -477,7 +498,7 @@ fn picker_row(p: &Picker, i: usize, now: i64, cx: &mut Context<Workspace>) -> An
                 cx.notify();
             }
         }))
-        .on_click(cx.listener(move |w, ev: &ClickEvent, window, cx| w.picker_open(Some(i), ev.modifiers().shift, window, cx)));
+        .on_click(cx.listener(move |w, ev: &ClickEvent, window, cx| w.picker_open(Some(i), ev.modifiers().shift, ev.modifiers().control, window, cx)));
     match &p.rows[i] {
         PickRow::Project { name, hl, path, branch, last_used, pinned, auto, .. } => {
             // Matched chars bold + accent.

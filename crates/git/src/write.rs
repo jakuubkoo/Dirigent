@@ -6,7 +6,7 @@
 //! HEAD→index (`--cached`) and index→worktree diffs, recomputed when the action runs.
 
 use std::io::Write as _;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
 use crate::{FileChange, Repo};
@@ -403,6 +403,108 @@ fn cut(mut d: String, max: usize) -> (String, bool) {
         d.truncate(end);
     }
     (d, cut)
+}
+
+/// Local branches, most recently committed first, and the current one ("" when detached). For the setup dialog.
+pub fn branches(root: &Path) -> Result<(String, Vec<String>)> {
+    let current = run(root, &["branch", "--show-current"], None).unwrap_or_default().trim().to_string();
+    let list = run(root, &["for-each-ref", "--sort=-committerdate", "--format=%(refname:short)", "refs/heads"], None)?;
+    Ok((current, list.lines().map(str::to_string).collect()))
+}
+
+/// Whether `name` is a valid new branch name (`git check-ref-format --branch`).
+pub fn valid_branch(root: &Path, name: &str) -> bool {
+    !name.is_empty() && !name.starts_with('-') && run(root, &["check-ref-format", "--branch", name], None).is_ok()
+}
+
+/// `git worktree add -b <branch> <path> <base>`: a new branch from `base` checked out in a new directory. On failure
+/// (branch or path exists, bad base) git leaves nothing behind.
+pub fn worktree_add(root: &Path, branch: &str, path: &Path, base: &str) -> Result<()> {
+    let path = path.to_string_lossy();
+    run(root, &["worktree", "add", "-b", branch, &path, base], None).map(drop)
+}
+
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Worktree {
+    pub path: PathBuf,
+    /// Short branch name; None when detached (or bare).
+    pub branch: Option<String>,
+    pub head: String,
+    /// The main checkout (first in the list): never removed from here.
+    pub main: bool,
+    pub locked: bool,
+    /// Its directory is gone: `git worktree prune` drops the entry.
+    pub prunable: bool,
+}
+
+/// Every worktree of the repo (also ones made outside the app), main checkout first.
+pub fn worktree_list(root: &Path) -> Result<Vec<Worktree>> {
+    let out = run(root, &["worktree", "list", "--porcelain"], None)?;
+    Ok(parse_worktrees(&out))
+}
+
+fn parse_worktrees(out: &str) -> Vec<Worktree> {
+    let mut list: Vec<Worktree> = Vec::new();
+    for block in out.split("\n\n").filter(|b| !b.trim().is_empty()) {
+        let mut w = Worktree { main: list.is_empty(), ..Default::default() };
+        for line in block.lines() {
+            let (key, value) = line.split_once(' ').unwrap_or((line, ""));
+            match key {
+                "worktree" => w.path = PathBuf::from(value),
+                "HEAD" => w.head = value.to_string(),
+                "branch" => w.branch = Some(value.strip_prefix("refs/heads/").unwrap_or(value).to_string()),
+                "locked" => w.locked = true,
+                "prunable" => w.prunable = true,
+                _ => {}
+            }
+        }
+        list.push(w);
+    }
+    list
+}
+
+/// What removing a worktree would lose.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct WorktreeState {
+    /// Uncommitted changes (incl. untracked files).
+    pub dirty_files: usize,
+    /// Commits on HEAD that no remote branch and no other local branch has.
+    pub unpushed: usize,
+}
+
+pub fn worktree_state(path: &Path, branch: Option<&str>) -> Result<WorktreeState> {
+    let dirty_files = run(path, &["status", "--porcelain"], None)?.lines().count();
+    // With `--branches` the pattern is the short name (git rev-list docs).
+    let exclude = branch.map(|b| format!("--exclude={b}"));
+    let mut args = vec!["rev-list", "--count", "HEAD", "--not", "--remotes"];
+    if let Some(e) = &exclude {
+        args.push(e);
+    }
+    args.push("--branches");
+    let unpushed = run(path, &args, None)?.trim().parse().unwrap_or(0);
+    Ok(WorktreeState { dirty_files, unpushed })
+}
+
+/// `git worktree remove [--force] <path>`, run from the main checkout. Never deletes files any other way; without
+/// `force` git refuses a worktree with changes.
+pub fn worktree_remove(main_root: &Path, path: &Path, force: bool) -> Result<()> {
+    let path = path.to_string_lossy();
+    let mut args = vec!["worktree", "remove"];
+    if force {
+        args.push("--force");
+    }
+    args.push(&path);
+    run(main_root, &args, None).map(drop)
+}
+
+/// `git branch -d` (refuses unmerged work) or, after an explicit confirm, `-D`.
+pub fn branch_delete(main_root: &Path, branch: &str, force: bool) -> Result<()> {
+    run(main_root, &["branch", if force { "-D" } else { "-d" }, "--", branch], None).map(drop)
+}
+
+/// Drops entries of worktrees whose directory is gone.
+pub fn worktree_prune(main_root: &Path) -> Result<()> {
+    run(main_root, &["worktree", "prune"], None).map(drop)
 }
 
 #[cfg(test)]

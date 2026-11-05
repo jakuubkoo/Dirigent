@@ -28,6 +28,12 @@ pub struct Project {
     /// Flags for that claude (already filtered through `hook::resume_args`).
     #[serde(default)]
     pub claude_args: Vec<String>,
+    /// Where new worktrees go (None: `<repo parent>/<repo>-worktrees`).
+    #[serde(default)]
+    pub worktrees_dir: Option<PathBuf>,
+    /// Run in a new worktree before claude starts (e.g. `pnpm install`).
+    #[serde(default)]
+    pub setup_cmd: Option<String>,
 }
 
 impl Project {
@@ -80,6 +86,57 @@ impl Projects {
         let mut ix: Vec<usize> = (0..self.0.len()).collect();
         ix.sort_by_key(|&i| (!self.0[i].pinned, std::cmp::Reverse(self.0[i].last_used)));
         ix
+    }
+}
+
+/// A branch name from a session name: `Fix login bug!` → `fix-login-bug` (lowercase ASCII words joined by `-`,
+/// `/` kept for `feat/x`, at most 60 chars).
+pub fn slug(name: &str) -> String {
+    let mut out = String::new();
+    for c in name.trim().chars().flat_map(char::to_lowercase) {
+        if c.is_ascii_alphanumeric() || c == '/' || c == '.' || c == '_' {
+            out.push(c);
+        } else if !out.is_empty() && !out.ends_with('-') {
+            out.push('-');
+        }
+    }
+    let mut s: String = out.trim_matches(|c| c == '-' || c == '/' || c == '.').chars().take(60).collect();
+    while s.ends_with(['-', '/', '.']) {
+        s.pop();
+    }
+    s
+}
+
+/// Default directory for a new worktree: `<worktrees_dir or <parent>/<repo>-worktrees>/<branch with / → ->`.
+pub fn worktree_path(repo_root: &Path, worktrees_dir: Option<&Path>, branch: &str) -> PathBuf {
+    let base = worktrees_dir.map(Path::to_path_buf).unwrap_or_else(|| {
+        let name = repo_root.file_name().map_or_else(|| "repo".into(), |n| n.to_string_lossy().into_owned());
+        repo_root.parent().unwrap_or(repo_root).join(format!("{name}-worktrees"))
+    });
+    base.join(branch.replace('/', "-"))
+}
+
+/// A worktree location inside the repo itself would be watched and walked as part of the main checkout.
+pub fn inside_repo(repo_root: &Path, path: &Path) -> bool {
+    path.starts_with(repo_root)
+}
+
+/// What a new session types: `<setup> && claude <flags> [prompt]` (each part optional; None: nothing). Flags and
+/// the prompt are shell-quoted, newlines in the prompt become spaces (Enter would submit early); the setup command is
+/// typed as you wrote it.
+pub fn start_line(setup: Option<&str>, claude: bool, args: &[String], prompt: Option<&str>) -> Option<String> {
+    let claude = claude.then(|| {
+        let mut words = vec!["claude".to_string()];
+        words.extend(args.iter().map(|a| crate::workspace::sh_word(a)));
+        if let Some(p) = prompt.map(|p| p.split_whitespace().collect::<Vec<_>>().join(" ")).filter(|p| !p.is_empty()) {
+            words.push("--".into()); // a prompt starting with `-` is still the prompt
+            words.push(crate::workspace::sh_word(&p));
+        }
+        words.join(" ")
+    });
+    match (setup.map(str::trim).filter(|s| !s.is_empty()), claude) {
+        (Some(s), Some(c)) => Some(format!("{s} && {c}")),
+        (s, c) => s.map(str::to_string).or(c),
     }
 }
 
@@ -233,6 +290,29 @@ mod tests {
         assert_eq!(ps.0.len(), MAX_PROJECTS);
         assert!(ps.get(Path::new("/old-pinned")).is_some(), "pinned stay");
         assert!(ps.get(Path::new("/p1")).is_none(), "the oldest unpinned went");
+    }
+
+    #[test]
+    fn start_lines() {
+        let args = vec!["--model".to_string(), "opus".to_string()];
+        assert_eq!(start_line(None, false, &args, Some("x")), None);
+        assert_eq!(start_line(None, true, &args, None).unwrap(), "claude --model opus");
+        assert_eq!(start_line(Some(" pnpm install "), true, &[], Some("Fix the\n'login' $bug")).unwrap(), "pnpm install && claude -- 'Fix the '\\''login'\\'' $bug'");
+        assert_eq!(start_line(Some("cargo fetch"), false, &[], None).unwrap(), "cargo fetch");
+        assert_eq!(start_line(Some("  "), true, &[], Some("  ")).unwrap(), "claude");
+    }
+
+    #[test]
+    fn slugs_and_worktree_paths() {
+        assert_eq!(slug("Fix login bug!"), "fix-login-bug");
+        assert_eq!(slug("  feat/Login: OAuth 2.0  "), "feat/login-oauth-2.0");
+        assert_eq!(slug("Příliš žluťoučký"), "p-li-lu-ou-k");
+        assert_eq!(slug("---"), "");
+        assert_eq!(slug(&"a".repeat(80)).len(), 60);
+        let root = Path::new("/c/app");
+        assert_eq!(worktree_path(root, None, "feat/x"), Path::new("/c/app-worktrees/feat-x"));
+        assert_eq!(worktree_path(root, Some(Path::new("/w")), "b"), Path::new("/w/b"));
+        assert!(inside_repo(root, Path::new("/c/app/wt/b")) && !inside_repo(root, Path::new("/c/app-worktrees/b")));
     }
 
     #[test]

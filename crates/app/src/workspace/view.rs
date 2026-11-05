@@ -570,7 +570,8 @@ impl Workspace {
                 .flex()
                 .items_center()
                 .gap(px(space::XS))
-                .when(matches!(tab.repo, TabRepo::Repo(_)), |d| d.child(ui::icon(icon::BRANCH, 11., t.text.dim)))
+                // A linked worktree's branch: accent icon (its own checkout; it groups under the main project).
+                .when(matches!(tab.repo, TabRepo::Repo(_)), |d| d.child(ui::icon(icon::BRANCH, 11., if tab.main_root.is_some() { t.accent } else { t.text.dim })))
                 .child(div().min_w_0().truncate().child(label))
                 .children(status.map(|(files, add, del)| {
                     let clamp = |v: u64| v.min(u32::MAX as u64) as u32;
@@ -889,43 +890,55 @@ impl Workspace {
                     )
                     .into_any_element(),
             ),
-            Some(Modal::ProjectDefaults { root, auto, edit }) => {
-                let words = hook::split_words(&edit.text);
+            Some(Modal::ProjectDefaults(d)) => {
+                let words = hook::split_words(&d.flags.text);
                 let kept = hook::resume_args(&words);
                 let dropped = dropped_words(&words, &kept);
-                let auto = *auto;
+                let auto = d.auto;
+                let label = |text: &'static str| div().text_size(px(text_size::SM)).text_color(t.text.muted).child(text);
                 Some(
                     scrim()
                         .child(
                             card()
-                                .child(div().font_weight(FontWeight::SEMIBOLD).child(format!("Defaults for {}", short_path(root))))
+                                .w(px(600.))
+                                .child(div().font_weight(FontWeight::SEMIBOLD).child(format!("Defaults for {}", short_path(&d.root))))
                                 .child(
                                     div()
                                         .id("defaults-auto")
                                         .flex()
                                         .items_center()
                                         .gap(px(space::SM))
+                                        .p(px(2.))
                                         .cursor_pointer()
                                         .text_size(px(text_size::SM))
+                                        .text_color(if d.focus == 0 { t.text.primary } else { t.text.muted })
                                         .child(div().size(px(12.)).rounded(px(3.)).border_1().border_color(if auto { t.accent } else { t.border.strong }).when(auto, |d| d.bg(t.accent)))
-                                        .child("Start claude in new sessions (Tab)")
+                                        .child("Start claude in new sessions")
                                         .on_click(cx.listener(|w, _: &ClickEvent, _, cx| {
-                                            if let Some(Modal::ProjectDefaults { auto, .. }) = &mut w.modal {
-                                                *auto = !*auto;
+                                            if let Some(Modal::ProjectDefaults(d)) = &mut w.modal {
+                                                d.auto = !d.auto;
+                                                d.focus = 0;
                                                 cx.notify();
                                             }
                                         })),
                                 )
-                                .child(div().text_size(px(text_size::SM)).text_color(t.text.muted).child("Claude flags for new sessions here (e.g. --model opus --effort high). Only flags safe to replay are kept; permission bypasses never."))
-                                .child(text_field(edit))
-                                .when(!dropped.is_empty(), |d| {
-                                    d.child(div().text_size(px(text_size::XS)).text_color(t.state.needs_you).child(format!("Will be dropped (not allowed): {}", dropped.join(" "))))
+                                .child(label("Claude flags (e.g. --model opus --effort high). Only flags safe to replay are kept; permission bypasses never."))
+                                .child(setup::text_input(&d.flags, d.focus == 1, "--model opus"))
+                                .when(!dropped.is_empty(), |e| {
+                                    e.child(div().text_size(px(text_size::XS)).text_color(t.state.needs_you).child(format!("Will be dropped (not allowed): {}", dropped.join(" "))))
                                 })
-                                .child(div().text_size(px(text_size::XS)).text_color(t.text.dim).child("Enter to save · Esc to cancel")),
+                                .child(label("Setup command for new worktrees (runs in the session before claude)"))
+                                .child(setup::text_input(&d.setup, d.focus == 2, "e.g. pnpm install"))
+                                .child(label("Where new worktrees go (empty: <repo>-worktrees next to the repo)"))
+                                .child(setup::text_input(&d.wt_dir, d.focus == 3, "~/worktrees/project"))
+                                .child(div().text_size(px(text_size::XS)).text_color(t.text.dim).child("Tab next field · Space toggles · Enter save · Esc cancel")),
                         )
                         .into_any_element(),
                 )
             }
+            Some(Modal::Setup(s)) => Some(scrim().child(self.setup_view(s, cx)).into_any_element()),
+            Some(Modal::CloseWorktree(c)) => Some(scrim().child(self.close_wt_view(c, cx)).into_any_element()),
+            Some(Modal::Worktrees(l)) => Some(scrim().child(self.worktrees_view(l, cx)).into_any_element()),
             _ => None,
         }
     }
