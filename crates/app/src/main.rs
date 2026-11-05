@@ -1,4 +1,6 @@
 mod agent;
+mod file_tree;
+mod files_panel;
 mod git_panel;
 mod line_edit;
 mod perf;
@@ -28,7 +30,8 @@ fn main() {
             KeyBinding::new("ctrl-shift-b", ToggleSidebar, ctx),
             KeyBinding::new("ctrl-shift-j", NextNeedsYou, ctx),
             KeyBinding::new("ctrl-shift-r", ResumeAll, ctx),
-            KeyBinding::new("ctrl-shift-g", ToggleGitPanel, ctx),
+            KeyBinding::new("ctrl-shift-g", ShowChanges, ctx),
+            KeyBinding::new("ctrl-shift-e", ShowFiles, ctx),
             KeyBinding::new("ctrl-1", Activate1, ctx),
             KeyBinding::new("ctrl-2", Activate2, ctx),
             KeyBinding::new("ctrl-3", Activate3, ctx),

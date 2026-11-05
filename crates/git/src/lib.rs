@@ -1,13 +1,16 @@
 //! Read-only git for the app: repo discovery, working-tree status with line counts, one file's diff, and a
 //! watcher that refreshes the status only after real changes. No UI dependencies. Shells out to `git`.
 
+mod fs;
+pub mod text;
 mod watch;
 
 use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
-pub use watch::Watcher;
+pub use fs::{DirWatcher, Entry, Listing, list_dir};
+pub use watch::{Update, Watcher};
 
 /// Files listed per repo; the rest are counted in `Status::more`.
 pub const MAX_FILES: usize = 2000;
@@ -282,8 +285,6 @@ pub struct Diff {
 
 pub const MAX_DIFF_LINES: usize = 100_000;
 const MAX_DIFF_BYTES: usize = 20 << 20;
-/// Longer lines are cut (display only).
-const MAX_LINE_CHARS: usize = 2000;
 
 /// The file's diff against HEAD (staged + unstaged), or against nothing for an untracked file. Blocking:
 /// run off the UI thread. `cancelled` is polled while reading; when it returns true the `git` child is killed and
@@ -354,30 +355,9 @@ fn parse_diff(raw: &[u8]) -> Diff {
                 _ => LineKind::Meta, // "\ No newline at end of file"
             }
         };
-        d.lines.push(Line { kind, text: expand_tabs(line) });
+        d.lines.push(Line { kind, text: text::display_line(line, 1) });
     }
     d
-}
-
-/// Tabs → spaces to the next multiple of 4 (after the +/-/space marker column), cut at `MAX_LINE_CHARS`.
-fn expand_tabs(line: &str) -> String {
-    let mut out = String::with_capacity(line.len());
-    let mut col = 0usize;
-    for ch in line.chars() {
-        if col >= MAX_LINE_CHARS {
-            out.push('…');
-            break;
-        }
-        if ch == '\t' {
-            let width = 4 - (col.saturating_sub(1) % 4);
-            out.extend(std::iter::repeat_n(' ', width));
-            col += width;
-        } else {
-            out.push(ch);
-            col += 1;
-        }
-    }
-    out
 }
 
 #[cfg(test)]
@@ -468,6 +448,6 @@ mod tests {
         assert_eq!(d.lines[9].text, "+    t", "tab after the marker column goes to the next stop");
         assert!(!d.truncated);
         let long = format!("@@ -1 +1 @@\n+{}\n", "y".repeat(5000));
-        assert_eq!(parse_diff(long.as_bytes()).lines[1].text.chars().count(), MAX_LINE_CHARS + 1);
+        assert_eq!(parse_diff(long.as_bytes()).lines[1].text.chars().count(), text::MAX_LINE_CHARS + 1);
     }
 }

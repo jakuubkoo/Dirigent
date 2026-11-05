@@ -43,6 +43,9 @@ pub struct TabState {
     /// Arguments claude was started with there (filtered again when resuming).
     #[serde(default)]
     pub claude_args: Vec<String>,
+    /// Expanded directories of the tab's file tree (absolute paths).
+    #[serde(default)]
+    pub expanded: Vec<PathBuf>,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq)]
@@ -51,16 +54,29 @@ pub struct SidebarState {
     pub open: bool,
 }
 
+/// The right panel. Fields added later default individually, so older files keep their width/open.
 #[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq)]
+#[serde(default)]
 pub struct PanelState {
     pub width: f32,
     pub open: bool,
+    pub tab: PanelTab,
+    /// File tree: show gitignored entries (dimmed) or hide them.
+    pub show_ignored: bool,
 }
 
 impl Default for PanelState {
     fn default() -> Self {
-        Self { width: 340., open: true }
+        Self { width: 340., open: true, tab: PanelTab::Changes, show_ignored: true }
     }
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum PanelTab {
+    #[default]
+    Changes,
+    Files,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq)]
@@ -166,11 +182,12 @@ mod tests {
                 cwd: "/home/x/api".into(),
                 claude_session: Some("00000000-0000-4000-8000-000000000005".into()),
                 claude_args: vec!["--model".into(), "haiku".into()],
+                expanded: vec!["/home/x/api/src".into()],
             }],
             active: 0,
             window: Some(WindowState { mode: WindowMode::Maximized, x: 10., y: 20., w: 1200., h: 750. }),
             last_dir: Some("/home/x".into()),
-            git_panel: PanelState { width: 400., open: false },
+            git_panel: PanelState { width: 400., open: false, tab: PanelTab::Files, show_ignored: false },
             ..State::default()
         }
     }
@@ -188,6 +205,11 @@ mod tests {
         let old = load(&p);
         assert_eq!(old.tabs[0].claude_session, None);
         assert_eq!(old.git_panel, PanelState::default(), "files from before the git panel load with its defaults");
+        assert!(old.tabs[0].expanded.is_empty());
+        // A git panel saved before the file tree existed keeps its width/open.
+        std::fs::write(&p, r#"{"version":1,"tabs":[],"active":0,"sidebar":{"width":200,"open":false},"window":null,
+            "last_dir":null,"git_panel":{"width":280,"open":false}}"#).unwrap();
+        assert_eq!(load(&p).git_panel, PanelState { width: 280., open: false, ..PanelState::default() });
     }
 
     #[test]

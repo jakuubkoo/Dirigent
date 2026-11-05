@@ -2,9 +2,9 @@
 //! the diff view shown over the terminal. Both views are separate entities rendered with `.cached(..)` and only
 //! virtualized lists (`uniform_list`): a 10k-line diff shapes only the rows on screen.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use async_channel::{Receiver, Sender};
 use git::{Diff, FileChange, LineKind, Status};
@@ -24,6 +24,8 @@ pub struct Repos {
     map: HashMap<PathBuf, Entry>,
     /// Pinged (bounded(1), coalescing) after any watcher's refresh.
     ping: Sender<()>,
+    /// Directories whose listing changed (from all repo watchers and the app's `DirWatcher`), for file trees.
+    dirty: Arc<Mutex<HashSet<PathBuf>>>,
 }
 
 struct Entry {
@@ -35,7 +37,7 @@ struct Entry {
 impl Repos {
     pub fn new() -> (Self, Receiver<()>) {
         let (ping, rx) = async_channel::bounded(1);
-        (Self { map: HashMap::new(), ping }, rx)
+        (Self { map: HashMap::new(), ping, dirty: Default::default() }, rx)
     }
 
     pub fn acquire(&mut self, repo: git::Repo) {
@@ -43,10 +45,8 @@ impl Repos {
             e.tabs += 1;
             return;
         }
-        let ping = self.ping.clone();
-        match git::Watcher::start(repo.clone(), move |_| {
-            let _ = ping.try_send(());
-        }) {
+        let report = self.reporter();
+        match git::Watcher::start(repo.clone(), move |u| report(u.dirs)) {
             Ok(watcher) => {
                 self.map.insert(repo.root.clone(), Entry { repo, watcher, tabs: 1 });
             }
@@ -61,6 +61,21 @@ impl Repos {
                 self.map.remove(root);
             }
         }
+    }
+
+    /// A callback that records changed directories and pings the UI (for watcher threads).
+    pub fn reporter(&self) -> impl Fn(Vec<PathBuf>) + Send + 'static {
+        let (ping, dirty) = (self.ping.clone(), self.dirty.clone());
+        move |dirs| {
+            if !dirs.is_empty() {
+                dirty.lock().unwrap().extend(dirs);
+            }
+            let _ = ping.try_send(());
+        }
+    }
+
+    pub fn take_dirty_dirs(&self) -> Vec<PathBuf> {
+        self.dirty.lock().unwrap().drain().collect()
     }
 
     pub fn status(&self, root: &Path) -> Option<Arc<Status>> {
@@ -156,7 +171,7 @@ impl Render for Tip {
     }
 }
 
-fn tip(text: &'static str) -> impl Fn(&mut Window, &mut App) -> AnyView {
+pub fn tip(text: &'static str) -> impl Fn(&mut Window, &mut App) -> AnyView {
     move |_, cx| cx.new(|_| Tip(text.into())).into()
 }
 
@@ -244,7 +259,7 @@ impl GitPanel {
     }
 }
 
-fn kind_color(kind: char) -> u32 {
+pub fn kind_color(kind: char) -> u32 {
     match kind {
         'A' | '?' => colors::DONE,
         'D' => colors::EXITED,
@@ -502,7 +517,7 @@ impl Render for DiffView {
                 move |ev: &KeyDownEvent, window, cx| {
                     let ks = &ev.keystroke;
                     if ks.key == "escape" && !ks.modifiers.modified() {
-                        let _ = ws.update(cx, |w, cx| w.close_diff(window, cx));
+                        let _ = ws.update(cx, |w, cx| w.close_overlay(window, cx));
                         cx.stop_propagation();
                     }
                 }

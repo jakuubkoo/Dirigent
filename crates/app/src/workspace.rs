@@ -1,6 +1,6 @@
 //! Root view: session list, sidebar, the active terminal (cached view), modal, resize policy.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -13,9 +13,11 @@ use gpui::{
 use session::{Session, Size};
 
 use crate::agent::{self, Hub};
+use crate::file_tree::{self, Marks, Row};
+use crate::files_panel::{Content, FileView, FilesPanel, TreeData};
 use crate::git_panel::{self, DiffView, GitPanel, PanelView, Repos, line_counts};
 use crate::line_edit::{Edit, LineEdit};
-use crate::persist::{self, State as Saved, TabState, WindowMode, WindowState};
+use crate::persist::{self, PanelTab, State as Saved, TabState, WindowMode, WindowState};
 use crate::window_chrome::{self, Chrome};
 use crate::terminal_element::{Metrics, palette};
 use crate::terminal_view::{Banner, PADDING, TerminalView};
@@ -23,7 +25,7 @@ use crate::terminal_view::{Banner, PADDING, TerminalView};
 actions!(
     agent_ide,
     [
-        NewSession, CloseSession, NextSession, PrevSession, Rename, ToggleSidebar, NextNeedsYou, ResumeAll, ToggleGitPanel,
+        NewSession, CloseSession, NextSession, PrevSession, Rename, ToggleSidebar, NextNeedsYou, ResumeAll, ShowChanges, ShowFiles,
         Activate1, Activate2, Activate3, Activate4, Activate5, Activate6, Activate7, Activate8, Activate9
     ]
 );
@@ -66,6 +68,15 @@ struct Tab {
     repo_gen: u64,
     /// Claude Code's cwd from its last hook, as last applied (so each change is applied once).
     hook_cwd: Option<PathBuf>,
+    /// File tree: expanded directories (persisted) and the selection.
+    tree: file_tree::TreeState,
+}
+
+/// What covers the terminal area: a diff or a file preview. The active session is hidden meanwhile.
+#[derive(Clone)]
+enum Overlay {
+    Diff(Entity<DiffView>),
+    File(Entity<FileView>),
 }
 
 #[derive(Clone, PartialEq)]
@@ -135,13 +146,27 @@ pub struct Workspace {
     git_panel: Entity<GitPanel>,
     git_open: bool,
     git_width: Pixels,
-    /// Open diff (shown over the terminal); the active session is hidden meanwhile.
-    diff: Option<Entity<DiffView>>,
-    _diff_task: Option<Task<()>>,
-    /// Bumped per diff read: a stale read sees it changed, kills its `git diff` and is dropped.
-    diff_gen: Arc<AtomicU64>,
-    /// The open diff's repo refresh count when it was last read.
-    diff_seen: u64,
+    overlay: Option<Overlay>,
+    _overlay_task: Option<Task<()>>,
+    /// Bumped per overlay read: a stale read sees it changed (a `git diff` is killed) and is dropped.
+    overlay_gen: Arc<AtomicU64>,
+    /// The overlay's repo refresh count when it was last read.
+    overlay_seen: u64,
+    files_panel: Entity<FilesPanel>,
+    panel_tab: PanelTab,
+    show_ignored: bool,
+    /// Directory listings shown by any spawned tab's tree.
+    tree_cache: file_tree::Cache,
+    /// Listing requests in flight: directory → request id (only the newest applies).
+    tree_pending: HashMap<PathBuf, u64>,
+    tree_req: u64,
+    /// The active tab's flattened rows for that root; None = rebuild on the next sync.
+    tree_rows: Option<(PathBuf, Arc<Vec<Row>>)>,
+    /// Status marks for (root, status Arc pointer).
+    tree_marks: Option<((PathBuf, usize), Arc<Marks>)>,
+    /// Watches the shown directories of trees outside any repo (repos use their own watcher).
+    dir_watcher: Option<git::DirWatcher>,
+    dir_watched: HashSet<PathBuf>,
 }
 
 impl Workspace {
@@ -165,6 +190,13 @@ impl Workspace {
             let ws = cx.entity().downgrade();
             cx.new(|_| GitPanel::new(ws))
         };
+        let files_panel = {
+            let ws = cx.entity().downgrade();
+            cx.new(|cx| FilesPanel::new(ws, cx))
+        };
+        let dir_watcher = git::DirWatcher::start(repos.reporter())
+            .map_err(|e| eprintln!("agent-ide: no directory watcher for file trees: {e}"))
+            .ok();
         let mut this = Self {
             tabs: Vec::new(),
             active: 0,
@@ -198,10 +230,20 @@ impl Workspace {
             git_panel,
             git_open: saved.git_panel.open,
             git_width: px(saved.git_panel.width.clamp(git_panel::MIN_WIDTH, 2000.)),
-            diff: None,
-            _diff_task: None,
-            diff_gen: Arc::new(AtomicU64::new(0)),
-            diff_seen: 0,
+            overlay: None,
+            _overlay_task: None,
+            overlay_gen: Arc::new(AtomicU64::new(0)),
+            overlay_seen: 0,
+            files_panel,
+            panel_tab: saved.git_panel.tab,
+            show_ignored: saved.git_panel.show_ignored,
+            tree_cache: Default::default(),
+            tree_pending: HashMap::new(),
+            tree_req: 0,
+            tree_rows: None,
+            tree_marks: None,
+            dir_watcher,
+            dir_watched: HashSet::new(),
         };
         match Hub::start() {
             Ok(hub) => {
@@ -251,7 +293,7 @@ impl Workspace {
             // Perf harness: one (eagerly spawned) session per line, the line typed into it; saved tabs are ignored.
             for line in script.split('\n') {
                 let dir = this.last_dir.clone();
-                let i = this.add_tab(None, dir, None, Vec::new());
+                let i = this.add_tab(None, dir, None, Vec::new(), Vec::new());
                 let view = this.ensure_spawned(i, window, cx);
                 if !line.is_empty() {
                     view.read(cx).session.write(format!("{line}\r").as_bytes());
@@ -260,12 +302,12 @@ impl Workspace {
             this.activate(0, window, cx);
         } else if saved.tabs.is_empty() {
             let dir = this.last_dir.clone();
-            this.add_tab(None, dir, None, Vec::new());
+            this.add_tab(None, dir, None, Vec::new(), Vec::new());
             this.activate(0, window, cx);
         } else {
             // Restore: rows for every tab, a shell only for the active one (the rest spawn on first view).
             for t in saved.tabs {
-                this.add_tab(Some(t.name), t.cwd, t.claude_session, t.claude_args);
+                this.add_tab(Some(t.name), t.cwd, t.claude_session, t.claude_args, t.expanded);
             }
             let active = saved.active.min(this.tabs.len() - 1);
             this.activate(active, window, cx);
@@ -274,7 +316,7 @@ impl Workspace {
 
         if let Ok(path) = std::env::var("AGENT_IDE_PERF_DIFF") {
             // Perf harness: open that file's diff in the active tab's repo, then jump 40 rows every 50 ms
-            // (AGENT_IDE_PERF_DIFF_STEPS times, default 100).
+            // (AGENT_IDE_PERF_STEPS times, default 100).
             cx.spawn_in(window, async move |this, cx| {
                 let bg = cx.background_executor().clone();
                 let timer = |ms| bg.timer(Duration::from_millis(ms));
@@ -293,23 +335,107 @@ impl Workspace {
                 let started = Instant::now();
                 loop {
                     timer(20).await;
-                    let rows = this.update(cx, |w, cx| w.diff.as_ref().map_or(0, |d| d.read(cx).loaded_rows())).unwrap_or(0);
+                    let rows = this
+                        .update(cx, |w, cx| match &w.overlay {
+                            Some(Overlay::Diff(d)) => d.read(cx).loaded_rows(),
+                            _ => 0,
+                        })
+                        .unwrap_or(0);
                     if rows > 0 || started.elapsed() > Duration::from_secs(10) {
                         eprintln!("[perf] diff open → rows ready {:.0} ms ({} rows)", started.elapsed().as_secs_f64() * 1e3, rows);
                         break;
                     }
                 }
                 eprintln!("[perf] diff scroll start");
-                let steps = std::env::var("AGENT_IDE_PERF_DIFF_STEPS").ok().and_then(|n| n.parse().ok()).unwrap_or(100);
+                let steps = std::env::var("AGENT_IDE_PERF_STEPS").ok().and_then(|n| n.parse().ok()).unwrap_or(100);
                 for step in 1..=steps {
                     timer(50).await;
                     let _ = this.update(cx, |w, cx| {
-                        if let Some(d) = &w.diff {
+                        if let Some(Overlay::Diff(d)) = &w.overlay {
                             d.update(cx, |d, cx| d.scroll_to(step * 40, cx));
                         }
                     });
                 }
                 eprintln!("[perf] diff scroll end");
+            })
+            .detach();
+        }
+
+        if let Ok(path) = std::env::var("AGENT_IDE_PERF_OPEN") {
+            // Perf/screenshot harness: open that file's preview once the active tab's repo is resolved.
+            cx.spawn_in(window, async move |this, cx| {
+                for _ in 0..100 {
+                    cx.background_executor().timer(Duration::from_millis(50)).await;
+                    let done = this.update_in(cx, |w, window, cx| {
+                        let ready = w.tabs.get(w.active).and_then(Self::tree_root).is_some();
+                        if ready {
+                            w.open_file(PathBuf::from(&path), false, window, cx);
+                        }
+                        ready
+                    });
+                    if !matches!(done, Ok(false)) {
+                        break;
+                    }
+                }
+                if std::env::var_os("AGENT_IDE_PERF_OPEN_END").is_some() {
+                    for _ in 0..100 {
+                        cx.background_executor().timer(Duration::from_millis(50)).await;
+                        let done = this.update(cx, |w, cx| match &w.overlay {
+                            Some(Overlay::File(f)) => f.update(cx, |f, cx| f.scroll_to_end(cx)),
+                            _ => false,
+                        });
+                        if !matches!(done, Ok(false)) {
+                            break;
+                        }
+                    }
+                }
+                eprintln!("[perf] opened");
+            })
+            .detach();
+        }
+
+        if let Ok(dir) = std::env::var("AGENT_IDE_PERF_TREE") {
+            // Perf harness: show Files, expand that directory (and its parents) in the active tab, then jump 40 rows
+            // every 50 ms (AGENT_IDE_PERF_STEPS times, default 100).
+            let dir = PathBuf::from(dir);
+            cx.spawn_in(window, async move |this, cx| {
+                let bg = cx.background_executor().clone();
+                let timer = |ms| bg.timer(Duration::from_millis(ms));
+                let mut started = None;
+                for _ in 0..200 {
+                    timer(20).await;
+                    let state = this.update_in(cx, |w, window, cx| {
+                        let root = w.tabs.get(w.active).and_then(Self::tree_root)?;
+                        if !w.tree_cache.contains_key(&root) {
+                            return None;
+                        }
+                        if started.is_none() {
+                            w.panel_tab = PanelTab::Files;
+                            w.git_open = true;
+                            let dirs: Vec<PathBuf> =
+                                dir.ancestors().take_while(|a| a.starts_with(&root) && *a != root).map(Path::to_path_buf).collect();
+                            started = Some(Instant::now());
+                            for d in dirs.into_iter().rev() {
+                                w.tree_action(file_tree::Action::Expand(d), window, cx);
+                            }
+                        }
+                        let rows = w.tree_rows.as_ref().map_or(0, |(_, r)| r.len());
+                        w.tree_cache.contains_key(&dir).then_some(rows)
+                    });
+                    if let Ok(Some(rows)) = state
+                        && let Some(t) = started
+                    {
+                        eprintln!("[perf] tree expand → rows ready {:.1} ms ({rows} rows)", t.elapsed().as_secs_f64() * 1e3);
+                        break;
+                    }
+                }
+                let steps = std::env::var("AGENT_IDE_PERF_STEPS").ok().and_then(|n| n.parse().ok()).unwrap_or(100);
+                eprintln!("[perf] tree scroll start");
+                for step in 1..=steps {
+                    timer(50).await;
+                    let _ = this.update(cx, |w, cx| w.files_panel.update(cx, |p, cx| p.scroll_to(step * 40, cx)));
+                }
+                eprintln!("[perf] tree scroll end");
             })
             .detach();
         }
@@ -379,7 +505,14 @@ impl Workspace {
     }
 
     /// Adds a tab row without starting its shell; returns its index.
-    fn add_tab(&mut self, name: Option<String>, cwd: PathBuf, claude_session: Option<String>, claude_args: Vec<String>) -> usize {
+    fn add_tab(
+        &mut self,
+        name: Option<String>,
+        cwd: PathBuf,
+        claude_session: Option<String>,
+        claude_args: Vec<String>,
+        expanded: Vec<PathBuf>,
+    ) -> usize {
         let id = self.next_id;
         self.next_id += 1;
         let dir_missing = !cwd.is_dir();
@@ -395,6 +528,7 @@ impl Workspace {
             repo: TabRepo::Unknown,
             repo_gen: 0,
             hook_cwd: None,
+            tree: file_tree::TreeState { expanded: expanded.into_iter().collect(), selected: None },
         });
         self.tabs.len() - 1
     }
@@ -434,7 +568,8 @@ impl Workspace {
             return;
         }
         crate::perf::switch_started();
-        self.drop_diff();
+        self.drop_overlay();
+        self.tree_rows = None;
         if let Some(old) = self.tabs.get(self.active).and_then(|t| t.view.as_ref()) {
             old.read(cx).session.set_visible(false);
         }
@@ -476,7 +611,8 @@ impl Workspace {
         if let TabRepo::Repo(root) = &tab.repo {
             self.repos.release(root);
         }
-        self.drop_diff();
+        self.drop_overlay();
+        self.tree_rows = None;
         self.mark_dirty(cx);
         self.modal = None;
         if self.tabs.is_empty() {
@@ -560,7 +696,7 @@ impl Workspace {
                     if dir.is_dir() {
                         self.last_dir = dir.clone();
                         self.modal = None;
-                        let i = self.add_tab(None, dir, None, Vec::new());
+                        let i = self.add_tab(None, dir, None, Vec::new(), Vec::new());
                         self.activate(i, window, cx);
                         self.mark_dirty(cx);
                     } else {
@@ -818,13 +954,19 @@ impl Workspace {
                     cwd: t.cwd.clone(),
                     claude_session: t.claude_session.clone(),
                     claude_args: t.claude_args.clone(),
+                    expanded: t.tree.expanded.iter().cloned().collect(),
                 })
                 .collect(),
             active: self.active.min(self.tabs.len().saturating_sub(1)),
             sidebar: persist::SidebarState { width: f32::from(self.sidebar_width), open: self.sidebar_open },
             window: self.window_state,
             last_dir: Some(self.last_dir.clone()),
-            git_panel: persist::PanelState { width: f32::from(self.git_width), open: self.git_open },
+            git_panel: persist::PanelState {
+                width: f32::from(self.git_width),
+                open: self.git_open,
+                tab: self.panel_tab,
+                show_ignored: self.show_ignored,
+            },
             ..Saved::default()
         }
     }
@@ -1003,8 +1145,9 @@ impl Render for Workspace {
         self.schedule_resize(window, cx);
         self.arm_minute_timer(cx);
 
-        let terminal = match (&self.diff, self.tabs.get(self.active)) {
-            (Some(diff), _) => diff.clone().cached(StyleRefinement::default().size_full()).into_any_element(),
+        let terminal = match (&self.overlay, self.tabs.get(self.active)) {
+            (Some(Overlay::Diff(v)), _) => v.clone().cached(StyleRefinement::default().size_full()).into_any_element(),
+            (Some(Overlay::File(v)), _) => v.clone().cached(StyleRefinement::default().size_full()).into_any_element(),
             (None, Some(Tab { view: Some(view), .. })) => {
                 view.clone().cached(StyleRefinement::default().size_full()).into_any_element()
             }
@@ -1064,7 +1207,29 @@ impl Render for Workspace {
                     div()
                         .w(self.git_width)
                         .h_full()
-                        .child(self.git_panel.clone().cached(StyleRefinement::default().size_full())),
+                        .flex()
+                        .flex_col()
+                        .bg(rgb(colors::SIDEBAR))
+                        .child(
+                            div()
+                                .flex()
+                                .flex_none()
+                                .gap_1()
+                                .px_2()
+                                .pt_1()
+                                .border_b_1()
+                                .border_color(rgb(colors::DIVIDER))
+                                .child(self.panel_tab_label(PanelTab::Changes, "Changes", "Ctrl+Shift+G", cx))
+                                .child(self.panel_tab_label(PanelTab::Files, "Files", "Ctrl+Shift+E", cx)),
+                        )
+                        .child(div().flex_1().min_h_0().child(match self.panel_tab {
+                            PanelTab::Changes => {
+                                self.git_panel.clone().cached(StyleRefinement::default().size_full()).into_any_element()
+                            }
+                            PanelTab::Files => {
+                                self.files_panel.clone().cached(StyleRefinement::default().size_full()).into_any_element()
+                            }
+                        })),
                 )
         });
 
@@ -1134,7 +1299,8 @@ impl Render for Workspace {
             .on_action(cx.listener(|w, _: &ToggleSidebar, _, cx| w.toggle_sidebar(cx)))
             .on_action(cx.listener(|w, _: &NextNeedsYou, window, cx| w.next_needs_you(window, cx)))
             .on_action(cx.listener(|w, _: &ResumeAll, window, cx| w.resume_all(window, cx)))
-            .on_action(cx.listener(|w, _: &ToggleGitPanel, _, cx| w.toggle_git_panel(cx)))
+            .on_action(cx.listener(|w, _: &ShowChanges, window, cx| w.show_panel_tab(PanelTab::Changes, window, cx)))
+            .on_action(cx.listener(|w, _: &ShowFiles, window, cx| w.show_panel_tab(PanelTab::Files, window, cx)))
             .on_action(cx.listener(|w, _: &Activate1, window, cx| w.activate(0, window, cx)))
             .on_action(cx.listener(|w, _: &Activate2, window, cx| w.activate(1, window, cx)))
             .on_action(cx.listener(|w, _: &Activate3, window, cx| w.activate(2, window, cx)))
@@ -1253,14 +1419,14 @@ impl Workspace {
             cx.notify();
         }
         self.sync_panel(cx);
-        let diff_root = self.diff.as_ref().map(|d| d.read(cx).root.clone());
-        if let Some(root) = diff_root {
+        if let Some(root) = self.overlay_repo(cx) {
             let n = self.repos.refreshes(&root);
-            if n != self.diff_seen {
-                self.diff_seen = n;
-                self.load_diff(cx);
+            if n != self.overlay_seen {
+                self.overlay_seen = n;
+                self.load_overlay(cx);
             }
         }
+        self.tree_dirs_changed(cx);
     }
 
     /// Pushes the active tab's repo state into the panel (it re-renders only if that differs).
@@ -1274,50 +1440,103 @@ impl Workspace {
                 TabRepo::Repo(root) => PanelView::Repo { root: root.clone(), status: self.repos.status(root) },
             },
         };
-        let selected = self.diff.as_ref().map(|d| d.read(cx).file.path.clone());
+        let selected = match &self.overlay {
+            Some(Overlay::Diff(d)) => Some(d.read(cx).file.path.clone()),
+            _ => None,
+        };
         let narrow = self.git_width < px(git_panel::LEGEND_WIDTH);
         self.git_panel.update(cx, |p, cx| p.set(view, selected, narrow, cx));
+        self.sync_files(false, cx);
+    }
+
+    fn panel_tab_label(&self, tab: PanelTab, label: &'static str, keys: &'static str, cx: &mut Context<Self>) -> impl IntoElement {
+        let active = self.panel_tab == tab;
+        div()
+            .id(label)
+            .px_2()
+            .py_1()
+            .text_xs()
+            .cursor_pointer()
+            .border_b_2()
+            .border_color(if active { rgb(colors::WORKING).into() } else { gpui::transparent_black() })
+            .text_color(if active { palette::FG } else { rgb(colors::DIM) })
+            .hover(|s| s.text_color(palette::FG))
+            .child(label)
+            .tooltip(git_panel::tip(keys))
+            .on_click(cx.listener(move |w, _: &ClickEvent, _, cx| w.set_panel_tab(tab, cx)))
     }
 
     pub fn refresh_repo(&self, root: &Path) {
         self.repos.refresh(root);
     }
 
-    fn toggle_git_panel(&mut self, cx: &mut Context<Self>) {
-        self.git_open = !self.git_open;
-        self.flush_resize = true;
-        self.mark_dirty(cx);
-        cx.notify();
-    }
-
-    /// Clicking a file: opens its diff over the terminal; clicking the open one again closes it.
+    /// Clicking a file in Changes (or "Show diff"): opens its diff over the terminal; the open one again closes it.
     pub fn toggle_diff(&mut self, root: PathBuf, file: git::FileChange, window: &mut Window, cx: &mut Context<Self>) {
-        if let Some(d) = &self.diff {
+        if let Some(Overlay::Diff(d)) = &self.overlay {
             let d = d.read(cx);
             if d.root == root && d.file.path == file.path {
-                self.close_diff(window, cx);
+                self.close_overlay(window, cx);
                 return;
             }
         }
         let ws = cx.entity().downgrade();
         let lh = self.metrics.line_height;
-        let view = cx.new(|cx| DiffView::new(root.clone(), file, lh, ws, cx));
-        if self.diff.is_none()
+        let view = cx.new(|cx| DiffView::new(root, file, lh, ws, cx));
+        self.show_overlay(Overlay::Diff(view), window, cx);
+    }
+
+    /// Opens a file's preview over the terminal; with `toggle`, the open one closes instead.
+    fn open_file(&mut self, path: PathBuf, toggle: bool, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(Overlay::File(f)) = &self.overlay
+            && f.read(cx).path == path
+        {
+            if toggle {
+                self.close_overlay(window, cx);
+            }
+            return;
+        }
+        let tab = self.tabs.get(self.active);
+        let repo = match tab.map(|t| &t.repo) {
+            Some(TabRepo::Repo(root)) if path.starts_with(root) => Some(root.clone()),
+            _ => None,
+        };
+        let base = tab.and_then(Self::tree_root).filter(|r| path.starts_with(r));
+        let ws = cx.entity().downgrade();
+        let m = (self.metrics.line_height, self.metrics.cell_width);
+        let view = cx.new(|cx| FileView::new(path, repo, base, m, ws, cx));
+        self.show_overlay(Overlay::File(view), window, cx);
+    }
+
+    fn show_overlay(&mut self, overlay: Overlay, window: &mut Window, cx: &mut Context<Self>) {
+        if self.overlay.is_none()
             && let Some(term) = self.tabs.get(self.active).and_then(|t| t.view.as_ref())
         {
             term.read(cx).session.set_visible(false); // not on screen: wakes only for the unread flip
         }
-        self.diff = Some(view.clone());
-        self.diff_seen = self.repos.refreshes(&root);
-        self.load_diff(cx);
-        window.focus(&view.focus_handle(cx), cx);
+        self.drop_overlay();
+        let focus = match &overlay {
+            Overlay::Diff(v) => v.focus_handle(cx),
+            Overlay::File(v) => v.focus_handle(cx),
+        };
+        self.overlay = Some(overlay);
+        self.overlay_seen = self.overlay_repo(cx).map_or(0, |r| self.repos.refreshes(&r));
+        self.load_overlay(cx);
+        window.focus(&focus, cx);
         self.sync_panel(cx);
         cx.notify();
     }
 
-    /// Esc in the diff: back to the terminal.
-    pub fn close_diff(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if !self.drop_diff() {
+    /// The repo whose refreshes re-read the open overlay.
+    fn overlay_repo(&self, cx: &gpui::App) -> Option<PathBuf> {
+        match self.overlay.as_ref()? {
+            Overlay::Diff(d) => Some(d.read(cx).root.clone()),
+            Overlay::File(f) => f.read(cx).repo.clone(),
+        }
+    }
+
+    /// Esc in a diff or preview: back to the terminal.
+    pub fn close_overlay(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if !self.drop_overlay() {
             return;
         }
         if let Some(view) = self.tabs.get(self.active).and_then(|t| t.view.clone()) {
@@ -1331,46 +1550,330 @@ impl Workspace {
         cx.notify();
     }
 
-    /// Forgets the diff view and cancels its read; returns whether one was open.
-    fn drop_diff(&mut self) -> bool {
-        self.diff_gen.fetch_add(1, Ordering::Relaxed);
-        self._diff_task = None;
-        self.diff.take().is_some()
+    /// Forgets the overlay and cancels its read; returns whether one was open.
+    fn drop_overlay(&mut self) -> bool {
+        self.overlay_gen.fetch_add(1, Ordering::Relaxed);
+        self._overlay_task = None;
+        self.overlay.take().is_some()
     }
 
-    /// (Re-)reads the open diff off the UI thread, with the file's current status entry.
-    fn load_diff(&mut self, cx: &mut Context<Self>) {
-        let Some(view) = self.diff.clone() else { return };
-        let (root, old) = {
-            let v = view.read(cx);
-            (v.root.clone(), v.file.clone())
-        };
-        let Some(repo) = self.repos.repo(&root).cloned() else { return };
-        let file = self
-            .repos
-            .status(&root)
-            .and_then(|s| s.files.iter().find(|f| f.path == old.path).cloned())
-            .unwrap_or(old);
-        let generation = self.diff_gen.fetch_add(1, Ordering::Relaxed) + 1;
-        let (current, current2) = (self.diff_gen.clone(), self.diff_gen.clone());
-        let read_file = file.clone();
-        self._diff_task = Some(cx.spawn(async move |_, cx| {
-            let started = Instant::now();
-            let lines = cx
-                .background_executor()
-                .spawn(async move {
-                    git::diff(&repo, &read_file, || current.load(Ordering::Relaxed) != generation).map(DiffView::prepare)
-                })
-                .await;
-            if current2.load(Ordering::Relaxed) != generation {
-                return; // a newer read or a close happened meanwhile
+    /// (Re-)reads the open diff or file off the UI thread.
+    fn load_overlay(&mut self, cx: &mut Context<Self>) {
+        let generation = self.overlay_gen.fetch_add(1, Ordering::Relaxed) + 1;
+        let (current, current2) = (self.overlay_gen.clone(), self.overlay_gen.clone());
+        match self.overlay.clone() {
+            None => {}
+            Some(Overlay::Diff(view)) => {
+                let (root, old) = {
+                    let v = view.read(cx);
+                    (v.root.clone(), v.file.clone())
+                };
+                let Some(repo) = self.repos.repo(&root).cloned() else { return };
+                let file = self
+                    .repos
+                    .status(&root)
+                    .and_then(|s| s.files.iter().find(|f| f.path == old.path).cloned())
+                    .unwrap_or(old);
+                let read_file = file.clone();
+                self._overlay_task = Some(cx.spawn(async move |_, cx| {
+                    let started = Instant::now();
+                    let lines = cx
+                        .background_executor()
+                        .spawn(async move {
+                            git::diff(&repo, &read_file, || current.load(Ordering::Relaxed) != generation).map(DiffView::prepare)
+                        })
+                        .await;
+                    if current2.load(Ordering::Relaxed) != generation {
+                        return; // a newer read or a close happened meanwhile
+                    }
+                    crate::perf::event_with(|| {
+                        let n = lines.as_ref().map_or(0, |(l, _)| l.len());
+                        format!("diff read: {n} lines in {:.1} ms", started.elapsed().as_secs_f64() * 1e3)
+                    });
+                    view.update(cx, |v, cx| v.set_lines(lines, file, cx));
+                }));
             }
-            crate::perf::event_with(|| {
-                let n = lines.as_ref().map_or(0, |(l, _)| l.len());
-                format!("diff read: {n} lines in {:.1} ms", started.elapsed().as_secs_f64() * 1e3)
+            Some(Overlay::File(view)) => {
+                let (path, repo) = {
+                    let v = view.read(cx);
+                    (v.path.clone(), v.repo.clone())
+                };
+                let change = repo.as_ref().and_then(|root| {
+                    let rel = path.strip_prefix(root).ok()?.to_str()?.to_string();
+                    self.repos.status(root)?.files.iter().find(|f| f.path == rel).cloned()
+                });
+                self._overlay_task = Some(cx.spawn(async move |_, cx| {
+                    let started = Instant::now();
+                    let content = cx
+                        .background_executor()
+                        .spawn(async move { git::text::read_file(&path).ok().map(Content::prepare) })
+                        .await;
+                    if current2.load(Ordering::Relaxed) != generation {
+                        return;
+                    }
+                    crate::perf::event_with(|| format!("file read in {:.1} ms", started.elapsed().as_secs_f64() * 1e3));
+                    view.update(cx, |v, cx| v.set_content(content, change, cx));
+                }));
+            }
+        }
+    }
+}
+
+/// File tree: listings (shared cache), per-tab expanded state, watching, the Files tab.
+impl Workspace {
+    /// The tree's root for a tab: its repo root, else its cwd (None while the repo is being resolved).
+    fn tree_root(t: &Tab) -> Option<PathBuf> {
+        match &t.repo {
+            TabRepo::Repo(root) => Some(root.clone()),
+            TabRepo::NotRepo | TabRepo::GitMissing => Some(if t.dir_missing { home() } else { t.cwd.clone() }),
+            TabRepo::Unknown | TabRepo::Pending => None,
+        }
+    }
+
+    /// Brings listings and watches in line with what the spawned tabs' trees show: lists missing directories,
+    /// evicts unused ones, and (outside repos) watches exactly the shown directories that aren't ignored.
+    fn sync_tree_wants(&mut self, cx: &mut Context<Self>) {
+        let mut wanted: HashSet<PathBuf> = HashSet::new();
+        let mut watch: HashSet<PathBuf> = HashSet::new();
+        for t in self.tabs.iter().filter(|t| t.view.is_some()) {
+            let Some(root) = Self::tree_root(t) else { continue };
+            let dirs = file_tree::wanted(&root, &t.tree);
+            if !matches!(t.repo, TabRepo::Repo(_)) {
+                watch.extend(dirs.iter().cloned());
+            }
+            wanted.extend(dirs);
+        }
+        let before = self.tree_cache.len();
+        self.tree_cache.retain(|d, _| wanted.contains(d));
+        if self.tree_cache.len() != before {
+            self.tree_rows = None;
+        }
+        self.tree_pending.retain(|d, _| wanted.contains(d));
+        let missing: Vec<PathBuf> =
+            wanted.into_iter().filter(|d| !self.tree_cache.contains_key(d) && !self.tree_pending.contains_key(d)).collect();
+        for d in missing {
+            self.request_listing(d, cx);
+        }
+        if let Some(dw) = &self.dir_watcher {
+            for d in self.dir_watched.difference(&watch) {
+                dw.unwatch(d);
+            }
+            for d in watch.difference(&self.dir_watched) {
+                dw.watch(d);
+            }
+        }
+        self.dir_watched = watch;
+    }
+
+    /// Lists one directory off the UI thread; only the newest request per directory applies.
+    fn request_listing(&mut self, dir: PathBuf, cx: &mut Context<Self>) {
+        self.tree_req += 1;
+        let id = self.tree_req;
+        self.tree_pending.insert(dir.clone(), id);
+        cx.spawn(async move |this, cx| {
+            let started = Instant::now();
+            let d = dir.clone();
+            let result = cx.background_executor().spawn(async move { git::list_dir(&d) }).await;
+            let _ = this.update(cx, |w, cx| {
+                if w.tree_pending.get(&dir) != Some(&id) {
+                    return; // superseded, or no longer shown
+                }
+                w.tree_pending.remove(&dir);
+                match result {
+                    Ok(listing) => {
+                        crate::perf::event_with(|| {
+                            format!("listed {} ({} entries) in {:.1} ms", dir.display(), listing.entries.len(), started.elapsed().as_secs_f64() * 1e3)
+                        });
+                        if w.tree_cache.get(&dir).is_some_and(|l| **l == listing) {
+                            return;
+                        }
+                        w.tree_cache.insert(dir, Arc::new(listing));
+                    }
+                    Err(_) => {
+                        // Gone (deleted, or a saved expanded dir that no longer exists): forget it everywhere.
+                        w.tree_cache.remove(&dir);
+                        let mut forgot = false;
+                        for t in &mut w.tabs {
+                            forgot |= t.tree.expanded.remove(&dir);
+                        }
+                        if forgot {
+                            w.mark_dirty(cx);
+                        }
+                    }
+                }
+                w.tree_rows = None;
+                w.sync_files(false, cx);
             });
-            view.update(cx, |v, cx| v.set_lines(lines, file, cx));
-        }));
+        })
+        .detach();
+    }
+
+    /// Watchers reported changed directories: re-list the ones some tree shows.
+    fn tree_dirs_changed(&mut self, cx: &mut Context<Self>) {
+        for d in self.repos.take_dirty_dirs() {
+            if self.tree_cache.contains_key(&d) {
+                self.request_listing(d, cx);
+            }
+        }
+    }
+
+    /// Pushes the active tab's tree into the Files panel; rows are rebuilt only after something invalidated them.
+    fn sync_files(&mut self, reveal: bool, cx: &mut Context<Self>) {
+        self.sync_tree_wants(cx);
+        let Some(t) = self.tabs.get(self.active) else {
+            self.files_panel.update(cx, |p, cx| p.set(TreeData::default(), false, cx));
+            return;
+        };
+        let root = Self::tree_root(t);
+        let rows = match (&root, &self.tree_rows) {
+            (Some(r), Some((rr, rows))) if rr == r => rows.clone(),
+            (Some(r), _) => {
+                let started = Instant::now();
+                let rows = Arc::new(file_tree::flatten(r, &t.tree, &self.tree_cache, self.show_ignored));
+                crate::perf::event_with(|| format!("tree flatten: {} rows in {:.2} ms", rows.len(), started.elapsed().as_secs_f64() * 1e3));
+                self.tree_rows = Some((r.clone(), rows.clone()));
+                rows
+            }
+            (None, _) => Arc::default(),
+        };
+        let marks = match &t.repo {
+            TabRepo::Repo(r) => match self.repos.status(r) {
+                Some(st) => {
+                    let key = (r.clone(), Arc::as_ptr(&st) as usize);
+                    match &self.tree_marks {
+                        Some((k, m)) if *k == key => m.clone(),
+                        _ => {
+                            let m = Arc::new(file_tree::marks(r, &st));
+                            self.tree_marks = Some((key, m.clone()));
+                            m
+                        }
+                    }
+                }
+                None => Arc::default(),
+            },
+            _ => Arc::default(),
+        };
+        let open = match &self.overlay {
+            Some(Overlay::File(f)) => Some(f.read(cx).path.clone()),
+            _ => None,
+        };
+        let data = TreeData {
+            loading: root.as_ref().is_some_and(|r| !self.tree_cache.contains_key(r)),
+            root,
+            rows,
+            marks,
+            selected: t.tree.selected.clone(),
+            open,
+            show_ignored: self.show_ignored,
+        };
+        self.files_panel.update(cx, |p, cx| p.set(data, reveal, cx));
+    }
+
+    fn change_tree(&mut self, f: impl FnOnce(&mut file_tree::TreeState), cx: &mut Context<Self>) {
+        let Some(t) = self.tabs.get_mut(self.active) else { return };
+        let before = t.tree.expanded.len();
+        f(&mut t.tree);
+        if t.tree.expanded.len() != before {
+            self.tree_rows = None;
+            self.mark_dirty(cx);
+        }
+    }
+
+    /// Keyboard in the Files panel.
+    pub fn tree_key(&mut self, key: file_tree::Key, window: &mut Window, cx: &mut Context<Self>) {
+        let action = {
+            let Some(t) = self.tabs.get(self.active) else { return };
+            let rows = self.tree_rows.as_ref().map(|(_, r)| r.clone()).unwrap_or_default();
+            file_tree::key(&rows, t.tree.selected.as_deref(), key)
+        };
+        self.tree_action(action, window, cx);
+    }
+
+    fn tree_action(&mut self, action: file_tree::Action, window: &mut Window, cx: &mut Context<Self>) {
+        use file_tree::Action;
+        match action {
+            Action::None => return,
+            Action::Select(p) => self.change_tree(|t| t.selected = Some(p), cx),
+            Action::Expand(p) => {
+                self.change_tree(|t| {
+                    t.expanded.insert(p.clone());
+                }, cx);
+                self.request_listing(p, cx); // fresh on every expand (ignored dirs are never watched)
+            }
+            Action::Collapse(p) => self.change_tree(|t| {
+                t.expanded.remove(&p);
+            }, cx),
+            Action::Open(p) => {
+                let focus = self.files_panel.focus_handle(cx);
+                self.open_file(p, false, window, cx);
+                window.focus(&focus, cx); // keep navigating the tree; Esc there goes to the preview's terminal
+            }
+        }
+        self.sync_files(true, cx);
+    }
+
+    /// Mouse in the Files panel: select; a directory toggles, a file opens (the open one closes).
+    pub fn tree_click(&mut self, path: PathBuf, is_dir: bool, window: &mut Window, cx: &mut Context<Self>) {
+        self.change_tree(|t| t.selected = Some(path.clone()), cx);
+        let expanded = self.tabs.get(self.active).is_some_and(|t| t.tree.expanded.contains(&path));
+        match (is_dir, expanded) {
+            (true, true) => self.tree_action(file_tree::Action::Collapse(path), window, cx),
+            (true, false) => self.tree_action(file_tree::Action::Expand(path), window, cx),
+            (false, _) => {
+                self.open_file(path, true, window, cx);
+                self.sync_files(false, cx);
+            }
+        }
+    }
+
+    pub fn toggle_show_ignored(&mut self, cx: &mut Context<Self>) {
+        self.show_ignored = !self.show_ignored;
+        self.tree_rows = None;
+        self.mark_dirty(cx);
+        self.sync_files(false, cx);
+    }
+
+    /// Esc in the tree: back to whatever the main area shows.
+    pub fn focus_main(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let focus = match &self.overlay {
+            Some(Overlay::Diff(v)) => Some(v.focus_handle(cx)),
+            Some(Overlay::File(v)) => Some(v.focus_handle(cx)),
+            None => self.tabs.get(self.active).and_then(|t| t.view.as_ref()).map(|v| v.focus_handle(cx)),
+        };
+        if let Some(f) = focus {
+            window.focus(&f, cx);
+        }
+    }
+
+    /// Ctrl+Shift+G / Ctrl+Shift+E: show that tab (Files also takes focus); again closes the panel.
+    fn show_panel_tab(&mut self, tab: PanelTab, window: &mut Window, cx: &mut Context<Self>) {
+        let files_focused = self.files_panel.focus_handle(cx).is_focused(window);
+        let shown = self.git_open && self.panel_tab == tab;
+        if shown && (tab == PanelTab::Changes || files_focused) {
+            self.git_open = false;
+            self.flush_resize = true;
+            self.focus_main(window, cx);
+        } else {
+            if !self.git_open {
+                self.git_open = true;
+                self.flush_resize = true;
+            }
+            self.panel_tab = tab;
+            if tab == PanelTab::Files {
+                let f = self.files_panel.focus_handle(cx);
+                window.focus(&f, cx);
+            }
+        }
+        self.mark_dirty(cx);
+        cx.notify();
+    }
+
+    fn set_panel_tab(&mut self, tab: PanelTab, cx: &mut Context<Self>) {
+        if self.panel_tab != tab {
+            self.panel_tab = tab;
+            self.mark_dirty(cx);
+            cx.notify();
+        }
     }
 }
 

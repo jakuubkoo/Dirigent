@@ -50,8 +50,8 @@ fn refreshes_only_on_relevant_changes() {
     let Discovery::Repo(r) = git::discover(&d.join("target")) else { panic!("not discovered") };
     assert_eq!(r.root.canonicalize().unwrap(), d.canonicalize().unwrap());
     let (tx, rx) = mpsc::channel();
-    let w = Watcher::start(r, move |changed| {
-        if changed {
+    let w = Watcher::start(r, move |u| {
+        if u.status_changed {
             let _ = tx.send(());
         }
     })
