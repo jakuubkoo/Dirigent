@@ -4,7 +4,7 @@ members = ["crates/session", "crates/app", "crates/hook", "crates/git", "crates/
 
 [workspace.package]
 edition = "2024"
-license = "Apache-2.0"
+license = "MIT"
 
 [workspace.dependencies]
 # gpui has no usable crates.io release (0.2.2 is from 2025-10): pinned Zed git rev. Bump procedure in CLAUDE.md.
