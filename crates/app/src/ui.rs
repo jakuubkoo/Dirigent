@@ -40,6 +40,9 @@ pub mod icon {
     pub const FILE_SHELL: &str = "icons/file-terminal.svg";
     pub const FILE_ARCHIVE: &str = "icons/file-archive.svg";
     pub const TERMINAL: &str = "icons/terminal.svg";
+    /// Changes: a file another session changed too / one attributed from a shell command.
+    pub const SHARED: &str = "icons/users.svg";
+    pub const VIA_COMMAND: &str = "icons/square-terminal.svg";
 }
 
 #[cfg(test)]
@@ -49,6 +52,7 @@ pub const ALL_ICONS: &[&str] = &[
     icon::RESUMABLE, icon::WARNING, icon::BRANCH, icon::REFRESH, icon::RESTART, icon::SHOW, icon::HIDE, icon::FOLDER,
     icon::FOLDER_OPEN, icon::FILE, icon::FILE_CODE, icon::FILE_TEXT, icon::FILE_JSON, icon::FILE_CONFIG,
     icon::FILE_LOCK, icon::FILE_IMAGE, icon::FILE_SHELL, icon::FILE_ARCHIVE, icon::TERMINAL,
+    icon::SHARED, icon::VIA_COMMAND,
 ];
 
 /// An icon at `size` px in `color` (rasterized once per path/size, recolored for free).

@@ -22,6 +22,14 @@ pub enum Kind {
         cwd: Option<String>,
         #[serde(default)]
         message: Option<String>,
+        /// Pre-/PostToolUse: the tool and its call id (pairs a Pre with its Post, also for parallel calls).
+        #[serde(default)]
+        tool: Option<String>,
+        #[serde(default)]
+        tool_use_id: Option<String>,
+        /// PostToolUse of a tool that writes files: the absolute path it touched.
+        #[serde(default)]
+        path: Option<String>,
     },
     /// The arguments `claude` was started with in this tab (sent by the shim before it execs claude).
     Argv { args: Vec<String> },
@@ -35,6 +43,9 @@ pub struct Limit {
     pub resets_at: i64,
 }
 
+/// Tools whose path field is only read: they never mark a file as changed by the agent.
+const READ_ONLY_TOOLS: &[&str] = &["Read", "Glob", "Grep", "LS", "NotebookRead", "WebFetch", "WebSearch", "TodoWrite"];
+
 /// Extracts the few fields the app needs from a hook (`mode == "hook"`) or statusLine (`"status"`) payload.
 pub fn parse(mode: &str, json: &str) -> Option<Kind> {
     let v: Value = serde_json::from_str(json).ok()?;
@@ -47,12 +58,23 @@ pub fn parse(mode: &str, json: &str) -> Option<Kind> {
                 "Notification" => v["message"].as_str().map(notice::message_text),
                 _ => None,
             };
+            let tool = s(&v["tool_name"]).filter(|_| event.ends_with("ToolUse"));
+            let path = tool.as_deref().filter(|t| event == "PostToolUse" && !READ_ONLY_TOOLS.contains(t)).and_then(|_| {
+                let input = &v["tool_input"];
+                let p = ["file_path", "notebook_path", "path"].iter().find_map(|k| input[*k].as_str()).filter(|p| !p.is_empty())?;
+                let p = std::path::Path::new(p);
+                let abs = if p.is_absolute() { p.to_path_buf() } else { std::path::Path::new(v["cwd"].as_str()?).join(p) };
+                abs.to_str().map(str::to_owned)
+            });
             Some(Kind::Hook {
                 event,
                 notification_type: s(&v["notification_type"]),
                 session_id: s(&v["session_id"]),
                 cwd: s(&v["cwd"]),
                 message,
+                tool,
+                tool_use_id: s(&v["tool_use_id"]),
+                path,
             })
         }
         "status" => {
@@ -269,8 +291,47 @@ mod tests {
             session_id: Some("00000000-0000-4000-8000-000000000001".into()),
             cwd: Some("/home/user/project".into()),
             message: Some("Claude needs your permission".into()),
+            tool: None,
+            tool_use_id: None,
+            path: None,
         };
         assert_eq!(parse("hook", &fixture("hook_Notification")), Some(want));
+    }
+
+    /// Captured from claude 2.1.318 in a scratch repo: file tools carry an absolute path, a subagent's edit has
+    /// the parent's session id, Bash's Pre and Post share the call id, Read records nothing.
+    #[test]
+    fn tool_hooks_from_real_claude() {
+        let get = |name: &str| match parse("hook", &fixture(name)) {
+            Some(Kind::Hook { event, session_id, tool, tool_use_id, path, .. }) => (event, session_id, tool, tool_use_id, path),
+            other => panic!("{name}: {other:?}"),
+        };
+        let repo = "/tmp/scratch/capture2/repo";
+        for (name, file) in [
+            ("hook_PostToolUse_Write", "new.txt"),
+            ("hook_PostToolUse_Edit", "a.txt"),
+            ("hook_PostToolUse_NotebookEdit", "nb.ipynb"),
+            ("hook_PostToolUse_Edit_subagent", "a.txt"),
+        ] {
+            let (event, session, _, id, path) = get(name);
+            assert_eq!(event, "PostToolUse");
+            assert_eq!(session.as_deref(), Some("00000000-0000-4000-8000-000000000002"), "{name}: one session, subagents too");
+            assert!(id.is_some());
+            assert_eq!(path, Some(format!("{repo}/{file}")), "{name}");
+        }
+        assert_eq!(get("hook_PostToolUse_Read").4, None, "a read changes nothing");
+        let (pre, post) = (get("hook_PreToolUse_Bash"), get("hook_PostToolUse_Bash"));
+        assert_eq!((pre.2.as_deref(), pre.4.as_deref()), (Some("Bash"), None));
+        assert_eq!(pre.3, post.3, "Pre and Post pair by tool_use_id");
+        assert_eq!(post.4, None, "Bash has no path");
+    }
+
+    #[test]
+    fn relative_paths_join_the_cwd() {
+        let json = r#"{"hook_event_name":"PostToolUse","cwd":"/r","tool_name":"Write","tool_use_id":"t","tool_input":{"file_path":"src/a.rs"}}"#;
+        assert!(matches!(parse("hook", json), Some(Kind::Hook { path: Some(p), .. }) if p == "/r/src/a.rs"));
+        let empty = r#"{"hook_event_name":"PostToolUse","cwd":"/r","tool_name":"Bash","tool_input":{"file_path":""}}"#;
+        assert!(matches!(parse("hook", empty), Some(Kind::Hook { path: None, .. })), "an empty path is no path");
     }
 
     #[test]

@@ -50,12 +50,18 @@ pub struct Update {
     /// Watched directories whose entries changed (created, removed, renamed; ignored entries included), for file
     /// trees. Ignored directories are never watched, so nothing below them shows up here.
     pub dirs: Vec<PathBuf>,
+    /// The status after this batch (also when unchanged); None when `git status` didn't run.
+    pub status: Option<Arc<Status>>,
+    /// How many event batches (see `Watcher::received`) this update accounts for: once an update's `settled`
+    /// reaches a `received` value read earlier, everything that happened before that read is reflected.
+    pub settled: u64,
 }
 
 pub struct Watcher {
     tx: Sender<Ev>,
     latest: Arc<Mutex<Option<Arc<Status>>>>,
     refreshes: Arc<AtomicU64>,
+    received: Arc<AtomicU64>,
 }
 
 impl Watcher {
@@ -66,7 +72,8 @@ impl Watcher {
         let (tx, rx) = mpsc::channel();
         let latest = Arc::new(Mutex::new(None));
         let refreshes = Arc::new(AtomicU64::new(0));
-        let (latest2, refreshes2, tx2) = (latest.clone(), refreshes.clone(), tx.clone());
+        let received = Arc::new(AtomicU64::new(0));
+        let (latest2, refreshes2, tx2, received2) = (latest.clone(), refreshes.clone(), tx.clone(), received.clone());
         std::thread::Builder::new().name("git-watch".into()).spawn(move || {
             let git_dir = repo.git_dir.clone();
             let handler = move |res: notify::Result<Event>| {
@@ -83,6 +90,7 @@ impl Watcher {
                 };
                 let paths: Vec<_> = ev.paths.into_iter().filter(|p| counts(p, &git_dir)).map(|p| (p, change)).collect();
                 if !paths.is_empty() {
+                    received2.fetch_add(1, Ordering::Relaxed);
                     let _ = tx2.send(Ev::Paths(paths));
                 }
             };
@@ -99,12 +107,17 @@ impl Watcher {
             let n = watch_tree(&mut w, &repo.root, &mut watch_error);
             crate::perf(|| format!("git watch {}: {n} dirs in {:.1} ms", repo.root.display(), ms(started)));
 
-            let mut last: Option<Status> = None;
+            let mut last: Option<Arc<Status>> = None;
             let (mut pending, mut force, mut first) = (Vec::new(), true, true);
+            // Event batches taken off the channel (the channel is FIFO, so this trails `received` exactly).
+            let mut consumed = 0u64;
             loop {
                 if !force {
                     match rx.recv() {
-                        Ok(Ev::Paths(p)) => pending.extend(p),
+                        Ok(Ev::Paths(p)) => {
+                            consumed += 1;
+                            pending.extend(p)
+                        }
                         Ok(Ev::Refresh) => force = true,
                         Ok(Ev::Stop) | Err(_) => return,
                     }
@@ -113,7 +126,10 @@ impl Watcher {
                     let burst = Instant::now();
                     while burst.elapsed() < MAX_WAIT {
                         match rx.recv_timeout(QUIET) {
-                            Ok(Ev::Paths(p)) => pending.extend(p),
+                            Ok(Ev::Paths(p)) => {
+                                consumed += 1;
+                                pending.extend(p)
+                            }
                             Ok(Ev::Refresh) => force = true,
                             Ok(Ev::Stop) | Err(RecvTimeoutError::Disconnected) => return,
                             Err(RecvTimeoutError::Timeout) => break,
@@ -144,29 +160,29 @@ impl Watcher {
                 }
                 if !force && !git_hit && relevant.is_empty() {
                     crate::perf(|| format!("git events ignored: {} paths", paths.len()));
-                    if !dirs.is_empty() {
-                        on_update(Update { dirs, ..Update::default() });
-                    }
+                    // Still reported (with the unchanged status): a pending agent command waits for `settled`.
+                    on_update(Update { dirs, status: last.clone(), settled: consumed, ..Update::default() });
                     continue;
                 }
                 force = false;
                 refreshes2.fetch_add(1, Ordering::Relaxed);
                 let started = Instant::now();
                 let Ok(mut st) = status(&repo) else {
-                    on_update(Update { dirs, ..Update::default() });
+                    on_update(Update { dirs, settled: consumed, ..Update::default() });
                     continue;
                 };
                 crate::perf(|| format!("git status {}: {:.1} ms", repo.root.display(), ms(started)));
                 st.watch_error = watch_error.clone();
-                let changed = last.as_ref() != Some(&st);
+                let changed = last.as_deref() != Some(&st);
                 if changed {
-                    *latest2.lock().unwrap() = Some(Arc::new(st.clone()));
+                    let st = Arc::new(st);
+                    *latest2.lock().unwrap() = Some(st.clone());
                     last = Some(st);
                 }
-                on_update(Update { refreshed: true, status_changed: changed, dirs });
+                on_update(Update { refreshed: true, status_changed: changed, dirs, status: last.clone(), settled: consumed });
             }
         })?;
-        Ok(Self { tx, latest, refreshes })
+        Ok(Self { tx, latest, refreshes, received })
     }
 
     /// The last status (None until the first one is ready).
@@ -177,6 +193,12 @@ impl Watcher {
     /// Re-runs `git status` now (manual refresh when the repo can't be fully watched).
     pub fn refresh(&self) {
         let _ = self.tx.send(Ev::Refresh);
+    }
+
+    /// Event batches seen so far (a counter shared with the event handler). Read it, then wait for an update
+    /// whose `settled` is at least that value to be sure every change before the read is in the status.
+    pub fn received(&self) -> Arc<AtomicU64> {
+        self.received.clone()
     }
 
     /// How many times `git status` ran (perf/tests).

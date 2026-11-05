@@ -62,6 +62,9 @@ pub struct TabState {
     /// Expanded directories of the tab's file tree (absolute paths).
     #[serde(default)]
     pub expanded: Vec<PathBuf>,
+    /// Files this tab's agent changed (its Claude session's set).
+    #[serde(default)]
+    pub changes: Option<crate::changes::Saved>,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq)]
@@ -245,6 +248,10 @@ mod tests {
                 claude_session: Some("00000000-0000-4000-8000-000000000005".into()),
                 claude_args: vec!["--model".into(), "haiku".into()],
                 expanded: vec!["/home/x/api/src".into()],
+                changes: Some(crate::changes::Saved {
+                    session: Some("00000000-0000-4000-8000-000000000005".into()),
+                    files: vec![("/home/x/api/src/a.rs".into(), crate::changes::Touch { via_command: true })],
+                }),
             }],
             active: 0,
             window: Some(WindowState { mode: WindowMode::Maximized, x: 10., y: 20., w: 1200., h: 750. }),

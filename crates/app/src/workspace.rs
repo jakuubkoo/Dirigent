@@ -60,6 +60,8 @@ struct Tab {
     group_hint: Option<PathBuf>,
     /// The agent's `notice_seq` last considered for a desktop notification.
     notified_seq: u64,
+    /// Changes panel: This agent (Some(true)) / All; None = the default (This agent when an agent ran).
+    agent_only: Option<bool>,
 }
 
 /// What covers the terminal area: a diff or a file preview. The active session is hidden meanwhile.
@@ -127,6 +129,9 @@ pub struct Workspace {
     /// The window has keyboard focus (desktop notifications skip what you're looking at).
     window_active: bool,
     notifier: Box<dyn notify::Notifier>,
+    /// Files each tab's agent changed (sidebar summary, Changes filter, tree marks).
+    tracker: Arc<crate::changes::Tracker>,
+    _changes_task: Option<Task<()>>,
     notifications: persist::Notifications,
     _click_task: Option<Task<()>>,
     _subscriptions: Vec<gpui::Subscription>,
@@ -190,7 +195,8 @@ impl Workspace {
             .filter(|d| d.is_dir())
             .or_else(|| std::env::current_dir().ok())
             .unwrap_or_else(home);
-        let (repos, repo_pings) = Repos::new();
+        let (tracker, tracker_wake) = crate::changes::Tracker::new();
+        let (repos, repo_pings) = Repos::new(tracker.clone());
         let repos_task = cx.spawn(async move |this, cx| {
             while repo_pings.recv().await.is_ok() {
                 if this.update(cx, |w, cx| w.repos_changed(cx)).is_err() {
@@ -233,6 +239,8 @@ impl Workspace {
             window_visible: true,
             window_active: window.is_window_active(),
             notifier,
+            tracker,
+            _changes_task: None,
             notifications: saved.notifications,
             _click_task: None,
             _subscriptions: Vec::new(),
@@ -272,7 +280,15 @@ impl Workspace {
             spinner_drawn: Default::default(),
             _spin: None,
         };
-        match Hub::start() {
+        this._changes_task = Some(cx.spawn(async move |this, cx| {
+            while tracker_wake.recv().await.is_ok() {
+                crate::perf::event("agent changes");
+                if this.update(cx, |w, cx| w.changes_changed(cx)).is_err() {
+                    return;
+                }
+            }
+        }));
+        match Hub::start(this.tracker.clone()) {
             Ok(hub) => {
                 let rx = hub.changes.clone();
                 this._agent_task = Some(cx.spawn(async move |this, cx| {
@@ -349,7 +365,10 @@ impl Workspace {
         } else {
             // Restore: rows for every tab, a shell only for the active one (the rest spawn on first view).
             for t in saved.tabs {
-                this.add_tab(Some(t.name), t.cwd, t.claude_session, t.claude_args, t.expanded);
+                let i = this.add_tab(Some(t.name), t.cwd, t.claude_session, t.claude_args, t.expanded);
+                if let Some(c) = t.changes {
+                    this.tracker.restore(this.tabs[i].id as u32, c);
+                }
             }
             let active = saved.active.min(this.tabs.len() - 1);
             this.activate(active, window, cx);
@@ -642,6 +661,7 @@ impl Workspace {
             tree: file_tree::TreeState { expanded: expanded.into_iter().collect(), selected: None },
             group_hint: None,
             notified_seq: 0,
+            agent_only: None,
         });
         self.tabs.len() - 1
     }
@@ -798,6 +818,7 @@ impl Workspace {
             hub.remove_tab(tab.id as u32);
         }
         self.notifier.close(tab.id as u32);
+        self.tracker.remove_tab(tab.id as u32);
         if let TabRepo::Repo(root) = &tab.repo {
             self.repos.release(root);
         }
@@ -974,6 +995,15 @@ impl Workspace {
         }
     }
 
+    /// An agent's changed files (or how they look in git) changed: sidebar, panel, tree.
+    fn changes_changed(&mut self, cx: &mut Context<Self>) {
+        if self.tracker.take_sets_dirty() {
+            self.mark_dirty(cx);
+        }
+        self.sync_panel(cx);
+        cx.notify();
+    }
+
     /// A notification was clicked: show its session and bring the window up.
     fn open_from_notification(&mut self, click: notify::Click, window: &mut Window, cx: &mut Context<Self>) {
         crate::perf::event_with(|| format!("notification click: tab {} (token: {})", click.tab, click.token.is_some()));
@@ -1021,6 +1051,7 @@ impl Workspace {
                     claude_session: t.claude_session.clone(),
                     claude_args: t.claude_args.clone(),
                     expanded: t.tree.expanded.iter().cloned().collect(),
+                    changes: self.tracker.saved(t.id as u32),
                 })
                 .collect(),
             active: self.active.min(self.tabs.len().saturating_sub(1)),
@@ -1222,6 +1253,10 @@ impl Workspace {
             return;
         }
         crate::perf::event_with(|| format!("tab {id} repo → {}", match &new { TabRepo::Repo(r) => r.display().to_string(), _ => "none".into() }));
+        self.tracker.set_repo(id as u32, match &new {
+            TabRepo::Repo(r) => Some(r.clone()),
+            _ => None,
+        });
         if let TabRepo::Repo(old) = std::mem::replace(&mut t.repo, new) {
             self.repos.release(&old);
         }
@@ -1286,7 +1321,12 @@ impl Workspace {
                 TabRepo::Unknown | TabRepo::Pending => PanelView::Pending,
                 TabRepo::NotRepo => PanelView::NotRepo,
                 TabRepo::GitMissing => PanelView::GitMissing,
-                TabRepo::Repo(root) => PanelView::Repo { root: root.clone(), status: self.repos.status(root) },
+                TabRepo::Repo(root) => {
+                    let view = self.tracker.view(t.id as u32);
+                    let ran = t.claude_session.is_some() || !view.touched.is_empty();
+                    let agent = ran.then(|| git_panel::AgentFiles { view, only: t.agent_only.unwrap_or(true) });
+                    PanelView::Repo { root: root.clone(), status: self.repos.status(root), agent }
+                }
             },
         };
         let selected = match &self.overlay {
@@ -1296,6 +1336,21 @@ impl Workspace {
         let narrow = self.git_width < px(git_panel::LEGEND_WIDTH);
         self.git_panel.update(cx, |p, cx| p.set(view, selected, narrow, cx));
         self.sync_files(false, cx);
+    }
+
+    /// Changes panel: This agent / All for the active tab.
+    pub fn set_agent_filter(&mut self, only: bool, cx: &mut Context<Self>) {
+        if let Some(t) = self.tabs.get_mut(self.active) {
+            t.agent_only = Some(only);
+            self.sync_panel(cx);
+        }
+    }
+
+    /// Changes panel "Clear": forgets the active tab's agent files (the tracker wakes the UI).
+    pub fn clear_agent_changes(&mut self, _: &mut Context<Self>) {
+        if let Some(t) = self.tabs.get(self.active) {
+            self.tracker.clear(t.id as u32);
+        }
     }
 
     pub fn refresh_repo(&self, root: &Path) {
@@ -1736,6 +1791,7 @@ impl Workspace {
             root,
             rows,
             marks,
+            agent: self.tracker.view(t.id as u32),
             selected: t.tree.selected.clone(),
             open,
             show_ignored: self.show_ignored,

@@ -28,6 +28,8 @@ pub struct TreeData {
     pub root: Option<PathBuf>,
     pub rows: Arc<Vec<Row>>,
     pub marks: Arc<Marks>,
+    /// The active tab's agent: its files get a small mark.
+    pub agent: Arc<crate::changes::View>,
     pub selected: Option<PathBuf>,
     /// The file open in the preview.
     pub open: Option<PathBuf>,
@@ -41,6 +43,7 @@ impl TreeData {
         self.root == o.root
             && Arc::ptr_eq(&self.rows, &o.rows)
             && Arc::ptr_eq(&self.marks, &o.marks)
+            && Arc::ptr_eq(&self.agent, &o.agent)
             && self.selected == o.selected
             && self.open == o.open
             && self.show_ignored == o.show_ignored
@@ -135,6 +138,10 @@ impl FilesPanel {
             .child(div().min_w_0().truncate().text_color(color).child(e.name.clone()))
             .when(e.is_dir && d.marks.dirs.contains(&e.path), |d| {
                 d.child(div().flex_none().size(px(5.)).rounded_full().bg(t.git.modified))
+            })
+            // Touched by this session's agent: a small accent ring (git kinds keep the color).
+            .when(!e.is_dir && d.agent.touched.contains(&e.path), |el| {
+                el.child(div().flex_none().size(px(6.)).rounded_full().border_1().border_color(t.accent))
             })
             .into_any_element()
     }

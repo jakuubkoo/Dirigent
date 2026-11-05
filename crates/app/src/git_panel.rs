@@ -29,6 +29,8 @@ pub struct Repos {
     ping: Sender<()>,
     /// Directories whose listing changed (from all repo watchers and the app's `DirWatcher`), for file trees.
     dirty: Arc<Mutex<HashSet<PathBuf>>>,
+    /// Gets every status (per-agent changed files), on the watcher threads.
+    tracker: Arc<crate::changes::Tracker>,
 }
 
 struct Entry {
@@ -38,9 +40,9 @@ struct Entry {
 }
 
 impl Repos {
-    pub fn new() -> (Self, Receiver<()>) {
+    pub fn new(tracker: Arc<crate::changes::Tracker>) -> (Self, Receiver<()>) {
         let (ping, rx) = async_channel::bounded(1);
-        (Self { map: HashMap::new(), ping, dirty: Default::default() }, rx)
+        (Self { map: HashMap::new(), ping, dirty: Default::default(), tracker }, rx)
     }
 
     pub fn acquire(&mut self, repo: git::Repo) {
@@ -49,8 +51,17 @@ impl Repos {
             return;
         }
         let report = self.reporter();
-        match git::Watcher::start(repo.clone(), move |u| report(u.dirs)) {
+        let (tracker, root) = (self.tracker.clone(), repo.root.clone());
+        let on_update = move |u: git::Update| {
+            tracker.status(&root, u.status, u.settled);
+            // Batches of only ignored paths are reported for the tracker; the UI has nothing to do then.
+            if u.refreshed || !u.dirs.is_empty() {
+                report(u.dirs);
+            }
+        };
+        match git::Watcher::start(repo.clone(), on_update) {
             Ok(watcher) => {
+                self.tracker.add_repo(&repo.root, watcher.received());
                 self.map.insert(repo.root.clone(), Entry { repo, watcher, tabs: 1 });
             }
             Err(e) => eprintln!("agent-ide: can't watch {}: {e}", repo.root.display()),
@@ -62,6 +73,7 @@ impl Repos {
             e.tabs -= 1;
             if e.tabs == 0 {
                 self.map.remove(root);
+                self.tracker.remove_repo(root);
             }
         }
     }
@@ -120,16 +132,29 @@ pub enum PanelView {
     Pending,
     NotRepo,
     GitMissing,
-    Repo { root: PathBuf, status: Option<Arc<Status>> },
+    /// `agent`: the tab's agent ran (its changed files and the This agent / All choice).
+    Repo { root: PathBuf, status: Option<Arc<Status>>, agent: Option<AgentFiles> },
+}
+
+#[derive(Clone)]
+pub struct AgentFiles {
+    pub view: Arc<crate::changes::View>,
+    /// "This agent" selected (else All).
+    pub only: bool,
 }
 
 impl PanelView {
     fn same(&self, other: &Self) -> bool {
         match (self, other) {
-            (Self::Repo { root: a, status: sa }, Self::Repo { root: b, status: sb }) => {
+            (Self::Repo { root: a, status: sa, agent: ga }, Self::Repo { root: b, status: sb, agent: gb }) => {
                 a == b
                     && match (sa, sb) {
                         (Some(x), Some(y)) => Arc::ptr_eq(x, y),
+                        (None, None) => true,
+                        _ => false,
+                    }
+                    && match (ga, gb) {
+                        (Some(x), Some(y)) => Arc::ptr_eq(&x.view, &y.view) && x.only == y.only,
                         (None, None) => true,
                         _ => false,
                     }
@@ -183,7 +208,7 @@ impl GitPanel {
         }
     }
 
-    fn row(&self, ix: usize, root: &Path, st: &Status) -> gpui::AnyElement {
+    fn row(&self, ix: usize, root: &Path, st: &Status, marks: Option<&crate::changes::View>) -> gpui::AnyElement {
         let t = theme::get();
         let Some(f) = st.files.get(ix) else {
             return ui::note(format!("+{} more files not listed", st.more)).h(px(height::LIST_ROW)).into_any_element();
@@ -229,10 +254,64 @@ impl GitPanel {
                 shrink(div().flex_grow(1.).min_w_0().truncate().text_size(px(text_size::XS)).text_color(t.text.dim), 10_000.)
                     .child(dir),
             )
+            .children(marks.and_then(|m| m.files.get(&f.path)).map(|m| {
+                let mark = |id: &'static str, path: &'static str, hint: &'static str| {
+                    div().id((id, ix)).flex_none().child(ui::icon(path, 12., t.text.dim)).tooltip(tip(hint))
+                };
+                div()
+                    .flex_none()
+                    .flex()
+                    .gap(px(space::XS))
+                    .when(m.shared, |d| d.child(mark("mark-shared", icon::SHARED, "Also changed by another session")))
+                    .when(m.via_command, |d| {
+                        d.child(mark("mark-cmd", icon::VIA_COMMAND, "Changed by a shell command (best effort)"))
+                    })
+            }))
             .when(f.staged, |d| d.child(tag("tag-s", "S", t.git.added, "Staged: has changes in the index")))
             .when(f.unstaged, |d| d.child(tag("tag-u", "U", t.git.modified, "Unstaged: has changes not added to the index")))
             .child(div().flex_none().text_size(px(text_size::XS)).child(line_counts(f.lines)))
             .into_any_element()
+    }
+}
+
+impl GitPanel {
+    /// This agent / All, and "Clear" (forget this agent's files), in the header of a tab whose agent ran.
+    fn agent_switch(&self, only: bool) -> impl IntoElement + use<> {
+        let t = theme::get();
+        let (ws, ws2, ws3) = (self.workspace.clone(), self.workspace.clone(), self.workspace.clone());
+        div()
+            .ml_auto()
+            .flex_none()
+            .flex()
+            .items_center()
+            .gap(px(space::XS))
+            .child(
+                segmented()
+                    .child(segment("agent-only", "This agent", only, true).tooltip(tip("Files this session's agent changed")).on_click(
+                        move |_: &ClickEvent, _, cx| {
+                            let _ = ws.update(cx, |w, cx| w.set_agent_filter(true, cx));
+                        },
+                    ))
+                    .child(segment("agent-all", "All", !only, true).tooltip(tip("Every change in the repo")).on_click(
+                        move |_: &ClickEvent, _, cx| {
+                            let _ = ws2.update(cx, |w, cx| w.set_agent_filter(false, cx));
+                        },
+                    )),
+            )
+            .child(
+                div()
+                    .id("agent-clear")
+                    .flex_none()
+                    .p(px(space::XXS))
+                    .rounded(px(radius::SM))
+                    .cursor_pointer()
+                    .hover(|s| s.bg(t.bg.hover))
+                    .child(ui::icon(icon::RESTART, 12., t.text.muted))
+                    .tooltip(tip("Forget this agent's files (no file is touched)"))
+                    .on_click(move |_: &ClickEvent, _, cx| {
+                        let _ = ws3.update(cx, |w, cx| w.clear_agent_changes(cx));
+                    }),
+            )
     }
 }
 
@@ -246,9 +325,17 @@ impl Render for GitPanel {
             PanelView::NotRepo => ui::note("Not a git repository").into_any_element(),
             PanelView::GitMissing => ui::note("git not found on PATH").into_any_element(),
             PanelView::Repo { status: None, .. } => ui::note("Reading status…").into_any_element(),
-            PanelView::Repo { root, status: Some(st) } => {
-                let (n, add, del) = st.totals();
+            PanelView::Repo { root, status: Some(st), agent } => {
                 let (root, st) = (root.clone(), st.clone());
+                // This agent: only its files (indices into the status); All: everything.
+                let only: Option<Arc<Vec<usize>>> = agent.as_ref().filter(|a| a.only).map(|a| {
+                    Arc::new(st.files.iter().enumerate().filter(|(_, f)| a.view.files.contains_key(&f.path)).map(|(i, _)| i).collect())
+                });
+                let (n, add, del) = match (&only, agent) {
+                    (Some(_), Some(a)) => a.view.summary.unwrap_or_default(),
+                    _ => st.totals(),
+                };
+                let marks = agent.as_ref().map(|a| a.view.clone());
                 let clamp = |v: u64| v.min(u32::MAX as u64) as u32;
                 let summary = div()
                     .flex()
@@ -262,7 +349,8 @@ impl Render for GitPanel {
                     .child(div().min_w_0().truncate().text_color(t.text.primary).child(st.branch.clone()))
                     .child(div().flex_none().text_color(t.text.dim).child(format!("{n} file{}", if n == 1 { "" } else { "s" })))
                     .when(n > 0, |d| d.child(line_counts(Some((clamp(add), clamp(del))))))
-                    .when(n > 0 && !self.narrow, |d| d.child(ui::hint("S staged · U unstaged")));
+                    .when(n > 0 && !self.narrow && agent.is_none(), |d| d.child(ui::hint("S staged · U unstaged")))
+                    .children(agent.as_ref().map(|a| self.agent_switch(a.only)));
                 let warning = st.watch_error.clone().map(|e| {
                     let (root, ws) = (root.clone(), self.workspace.clone());
                     div()
@@ -284,15 +372,16 @@ impl Render for GitPanel {
                             let _ = ws.update(cx, |w, _| w.refresh_repo(&root));
                         })
                 });
-                let count = st.files.len() + (st.more > 0) as usize;
-                let list = if st.files.is_empty() {
-                    ui::note("No changes").into_any_element()
+                let count = only.as_ref().map_or(st.files.len() + (st.more > 0) as usize, |o| o.len());
+                let list = if count == 0 {
+                    ui::note(if only.is_some() { "No changes by this agent" } else { "No changes" }).into_any_element()
                 } else {
                     let rows = uniform_list(
                         "git-files",
                         count,
                         cx.processor(move |p, range: std::ops::Range<usize>, _, _| {
-                            range.map(|ix| p.row(ix, &root, &st)).collect::<Vec<_>>()
+                            let file = |ix: usize| only.as_ref().map_or(ix, |o| o[ix]);
+                            range.map(|ix| p.row(file(ix), &root, &st, marks.as_deref())).collect::<Vec<_>>()
                         }),
                     )
                     .track_scroll(&self.scroll)
@@ -965,7 +1054,7 @@ mod tests {
     #[test]
     fn watchers_are_shared_and_dropped_with_the_last_tab() {
         let (a, b) = (repo("a"), repo("b"));
-        let (mut repos, _rx) = Repos::new();
+        let (mut repos, _rx) = Repos::new(crate::changes::Tracker::new().0);
         repos.acquire(a.clone());
         repos.acquire(a.clone()); // second tab in the same repo
         assert_eq!(repos.watched(), vec![(a.root.clone(), 2)]);

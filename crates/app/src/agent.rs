@@ -70,7 +70,7 @@ impl Board {
                 agent.args = Some(args);
                 agent.started = false;
             }
-            Kind::Hook { event, notification_type, session_id, cwd, message } => {
+            Kind::Hook { event, notification_type, session_id, cwd, message, .. } => {
                 agent.last_activity = Some(now_secs());
                 if let Some(cwd) = cwd {
                     agent.cwd = Some(cwd.into());
@@ -186,7 +186,8 @@ pub struct Hub {
 }
 
 impl Hub {
-    pub fn start() -> std::io::Result<Self> {
+    /// `tracker` gets every hook too (per-agent changed files), on the listener thread.
+    pub fn start(tracker: Arc<crate::changes::Tracker>) -> std::io::Result<Self> {
         let dir = runtime_dir();
         if let Some(runtime) = dir.parent() {
             remove_stale_dirs(runtime);
@@ -211,6 +212,7 @@ impl Hub {
             while let Ok(n) = socket.recv(&mut buf) {
                 let Ok(msg) = serde_json::from_slice::<Msg>(&buf[..n]) else { continue };
                 crate::perf::event_with(|| format!("agent msg {msg:?}"));
+                tracker.hook(msg.tab, &msg.kind);
                 if board2.lock().unwrap().apply(msg) && tx.try_send(()).is_err() && tx.is_closed() {
                     return;
                 }
@@ -388,6 +390,9 @@ mod tests {
                 session_id: Some(id.into()),
                 cwd: None,
                 message: None,
+                tool: None,
+                tool_use_id: None,
+                path: None,
             },
         }
     }

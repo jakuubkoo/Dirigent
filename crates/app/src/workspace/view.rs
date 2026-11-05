@@ -482,13 +482,17 @@ impl Workspace {
             agent::State::NoAgent => div().flex_none().size(px(14.)).into_any_element(),
         };
         let ago = agent.last_activity.map(|a| ui::fmt_ago(now - a));
-        let (status, branch) = match &tab.repo {
+        let (repo_totals, branch) = match &tab.repo {
             TabRepo::Repo(root) => {
                 let st = self.repos.status(root);
                 (st.as_ref().map(|s| s.totals()).filter(|t| t.0 > 0), st.map(|s| s.branch.clone()))
             }
             _ => (None, None),
         };
+        // A tab whose agent ran shows that agent's files; the repo's totals only where no agent ran.
+        let changes = self.tracker.view(tab.id as u32);
+        let agent_ran = tab.claude_session.is_some() || !changes.touched.is_empty();
+        let status = if agent_ran { changes.summary.map(|(n, a, d)| (Some(n), a, d)) } else { repo_totals.map(|(_, a, d)| (None, a, d)) };
         let second: gpui::AnyElement = if tab.dir_missing {
             div()
                 .flex()
@@ -506,9 +510,15 @@ impl Workspace {
                 .gap(px(space::XS))
                 .when(matches!(tab.repo, TabRepo::Repo(_)), |d| d.child(ui::icon(icon::BRANCH, 11., t.text.dim)))
                 .child(div().min_w_0().truncate().child(label))
-                .children(status.map(|(_, add, del)| {
+                .children(status.map(|(files, add, del)| {
                     let clamp = |v: u64| v.min(u32::MAX as u64) as u32;
-                    div().ml_auto().flex_none().child(line_counts(Some((clamp(add), clamp(del)))))
+                    div()
+                        .ml_auto()
+                        .flex_none()
+                        .flex()
+                        .gap(px(space::XS))
+                        .children(files.map(|n| div().child(if n == 1 { "1 file".to_string() } else { format!("{n} files") })))
+                        .child(line_counts(Some((clamp(add), clamp(del)))))
                 }))
                 .into_any_element()
         };
