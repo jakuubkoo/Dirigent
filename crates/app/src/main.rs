@@ -28,6 +28,11 @@ use gpui::{
 use workspace::*;
 
 fn main() {
+    if matches!(std::env::args().nth(1).as_deref(), Some("--version" | "-V")) {
+        // `AGENT_IDE_BUILD` ("<hash> <date>") is set by scripts/install.sh.
+        println!("agent-ide {} ({})", env!("CARGO_PKG_VERSION"), option_env!("AGENT_IDE_BUILD").unwrap_or("dev build"));
+        return;
+    }
     if let Some(flag @ ("--install-desktop" | "--uninstall-desktop")) = std::env::args().nth(1).as_deref() {
         if let Err(e) = desktop_entry(flag == "--install-desktop") {
             eprintln!("agent-ide: {e}");
