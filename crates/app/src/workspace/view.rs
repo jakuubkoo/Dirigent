@@ -16,6 +16,7 @@ use crate::ui::{self, icon, line_counts, tip};
 impl Render for Workspace {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         crate::perf::root_render();
+        self.flush_pending_open(window, cx);
         self.spinner_drawn.set(false);
         self.schedule_resize(window, cx);
         self.arm_minute_timer(cx);

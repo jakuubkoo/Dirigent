@@ -282,8 +282,12 @@ impl Hub {
 
 /// This instance's runtime dir (`$XDG_RUNTIME_DIR/agent-ide-<pid>`), removed on quit.
 pub fn runtime_dir() -> PathBuf {
-    let runtime = std::env::var_os("XDG_RUNTIME_DIR").map(PathBuf::from).unwrap_or_else(std::env::temp_dir);
-    runtime.join(format!("agent-ide-{}", std::process::id()))
+    runtime_parent().join(format!("agent-ide-{}", std::process::id()))
+}
+
+/// `$XDG_RUNTIME_DIR` (else the temp dir).
+pub fn runtime_parent() -> PathBuf {
+    std::env::var_os("XDG_RUNTIME_DIR").filter(|d| !d.is_empty()).map(PathBuf::from).unwrap_or_else(std::env::temp_dir)
 }
 
 /// Removes runtime dirs left behind by app instances that are no longer running (crash, kill -9).

@@ -2,6 +2,7 @@ mod agent;
 mod assets;
 mod blur;
 mod changes;
+mod cli;
 mod commit_box;
 mod git_ops;
 mod diff_syntax;
@@ -27,19 +28,67 @@ use gpui::{
 };
 use workspace::*;
 
+use std::io::IsTerminal as _;
+use std::path::PathBuf;
+
 fn main() {
-    if matches!(std::env::args().nth(1).as_deref(), Some("--version" | "-V")) {
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    if matches!(args.first().map(String::as_str), Some("--version" | "-V")) {
         // `AGENT_IDE_BUILD` ("<hash> <date>") is set by scripts/install.sh.
         println!("agent-ide {} ({})", env!("CARGO_PKG_VERSION"), option_env!("AGENT_IDE_BUILD").unwrap_or("dev build"));
         return;
     }
-    if let Some(flag @ ("--install-desktop" | "--uninstall-desktop")) = std::env::args().nth(1).as_deref() {
+    if let Some(flag @ ("--install-desktop" | "--uninstall-desktop")) = args.first().map(String::as_str) {
         if let Err(e) = desktop_entry(flag == "--install-desktop") {
             eprintln!("agent-ide: {e}");
             std::process::exit(1);
         }
         return;
     }
+    let fail = |code, msg: String| -> ! {
+        eprintln!("agent-ide: {msg}");
+        std::process::exit(code)
+    };
+    let cmd = cli::parse(&args).unwrap_or_else(|e| fail(2, format!("{e}\n\n{}", cli::USAGE)));
+    if cmd.help {
+        print!("{}", cli::USAGE);
+        return;
+    }
+    // The caller's activation token is for raising our window, once: our sessions must not inherit it.
+    let token = ["XDG_ACTIVATION_TOKEN", "DESKTOP_STARTUP_ID"].iter().find_map(|k| std::env::var(k).ok().filter(|t| !t.is_empty()));
+    // SAFETY: still single-threaded (nothing spawned yet).
+    unsafe {
+        std::env::remove_var("XDG_ACTIVATION_TOKEN");
+        std::env::remove_var("DESKTOP_STARTUP_ID");
+    }
+    let cwd = std::env::current_dir().unwrap_or_else(|e| fail(1, format!("no current directory: {e}")));
+    let req = cli::request(&cmd, &cwd, token).unwrap_or_else(|e| fail(1, e));
+    let state_path = persist::path();
+    let override_state = std::env::var_os("AGENT_IDE_STATE").map(PathBuf::from);
+    let sock = cli::socket_path(&agent::runtime_parent(), override_state.as_deref());
+    // Already running: hand it the request and leave.
+    let send = |req: &cli::Request| match cli::send(&sock, req) {
+        Ok(cli::Sent::Done) => std::process::exit(0),
+        Ok(cli::Sent::NotRunning) => {}
+        Err(e) => fail(1, e),
+    };
+    send(&req);
+    if std::io::stdin().is_terminal() {
+        // Started from a terminal: the app runs on its own (own process group, output to a log), the shell returns.
+        detach(&state_path);
+    }
+    let listener = match cli::bind(&sock) {
+        Ok(l) => Some(l),
+        Err(e) if e.kind() == std::io::ErrorKind::AddrInUse => {
+            send(&req); // another instance started meanwhile
+            None
+        }
+        Err(e) => {
+            eprintln!("agent-ide: no single-instance socket ({}): {e}", sock.display());
+            None
+        }
+    };
+    let launch = cli::Launch { req, listener, sock };
     perf::process_started();
     // The only synchronous file IO: a small file, read before any window exists.
     let state_path = persist::path();
@@ -103,12 +152,40 @@ fn main() {
                 icon: image::load_from_memory(assets::APP_ICON_PNG).ok().map(|i| std::sync::Arc::new(i.into_rgba8())),
                 ..Default::default()
             },
-            |window, cx| cx.new(|cx| Workspace::new(saved.clone(), state_path.clone(), translucent, window, cx)),
+            |window, cx| cx.new(|cx| Workspace::new(saved.clone(), state_path.clone(), translucent, launch, window, cx)),
         )
         .expect("open window");
         cx.on_window_closed(|cx, _| cx.quit()).detach();
         cx.activate(true);
     });
+}
+
+/// Re-runs this binary detached (own process group: Ctrl+C or closing the terminal don't reach it), stdout/stderr
+/// appended to `agent-ide.log` next to the state file (moved to `.log.old` past 1 MB), then exits.
+fn detach(state_path: &std::path::Path) -> ! {
+    use std::os::unix::process::CommandExt;
+    let dir = state_path.parent().unwrap_or(std::path::Path::new("."));
+    let log = dir.join("agent-ide.log");
+    if std::fs::metadata(&log).is_ok_and(|m| m.len() > 1 << 20) {
+        let _ = std::fs::rename(&log, dir.join("agent-ide.log.old"));
+    }
+    let out = std::fs::create_dir_all(dir).and_then(|_| std::fs::OpenOptions::new().create(true).append(true).open(&log));
+    let started = out.and_then(|out| {
+        std::process::Command::new(std::env::current_exe()?)
+            .args(std::env::args_os().skip(1))
+            .stdin(std::process::Stdio::null())
+            .stdout(out.try_clone()?)
+            .stderr(out)
+            .process_group(0)
+            .spawn()
+    });
+    match started {
+        Ok(_) => std::process::exit(0),
+        Err(e) => {
+            eprintln!("agent-ide: couldn't start in the background: {e}");
+            std::process::exit(1)
+        }
+    }
 }
 
 /// `--install-desktop`: `~/.local/share/applications/agent-ide.desktop` (launching this binary) and the icon, so

@@ -147,6 +147,10 @@ pub struct Workspace {
     commit_boxes: HashMap<PathBuf, Entity<crate::commit_box::CommitBox>>,
     notifications: persist::Notifications,
     _click_task: Option<Task<()>>,
+    /// `agent-ide <path>` requests from other processes.
+    _cli_task: Option<Task<()>>,
+    /// A file `agent-ide <file>` asked for in a new tab: shown once that tab's repo is resolved (tab id, file).
+    pending_open: Option<(usize, PathBuf)>,
     _subscriptions: Vec<gpui::Subscription>,
     state_path: PathBuf,
     _save_task: Option<Task<()>>,
@@ -200,7 +204,14 @@ pub struct Workspace {
 }
 
 impl Workspace {
-    pub fn new(saved: Saved, state_path: PathBuf, translucent: bool, window: &mut Window, cx: &mut Context<Self>) -> Self {
+    pub fn new(
+        saved: Saved,
+        state_path: PathBuf,
+        translucent: bool,
+        launch: crate::cli::Launch,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
         let metrics = Metrics::new(window);
         let last_dir = saved
             .last_dir
@@ -258,6 +269,8 @@ impl Workspace {
             commit_boxes: HashMap::new(),
             notifications: saved.notifications,
             _click_task: None,
+            _cli_task: None,
+            pending_open: None,
             _subscriptions: Vec::new(),
             state_path,
             _save_task: None,
@@ -338,6 +351,23 @@ impl Workspace {
                 }
             }
         }));
+        let crate::cli::Launch { req: launch_req, listener, sock } = launch;
+        if let Some(listener) = listener {
+            let requests = crate::cli::serve(listener);
+            this._cli_task = Some(cx.spawn_in(window, async move |this, cx| {
+                while let Ok(inc) = requests.recv().await {
+                    let req = inc.req.clone();
+                    match this.update_in(cx, |w, window, cx| w.open_request(req, window, cx)) {
+                        Ok(r) => inc.reply(r),
+                        Err(_) => return,
+                    }
+                }
+            }));
+            this._subscriptions.push(cx.on_app_quit(move |_, _| {
+                let _ = std::fs::remove_file(&sock);
+                async {}
+            }));
+        }
         this._subscriptions.push(cx.observe_window_visibility(window, |w, visibility, _, cx| {
             w.window_visible = visibility == gpui::WindowVisibility::Visible;
             if !w.window_visible {
@@ -374,9 +404,13 @@ impl Workspace {
             }
             this.activate(0, window, cx);
         } else if saved.tabs.is_empty() {
-            let dir = this.last_dir.clone();
-            this.add_tab(None, dir, None, Vec::new(), Vec::new());
-            this.activate(0, window, cx);
+            // `agent-ide <dir>` on a fresh start: that session only, not also one in the last directory.
+            if launch_req.dir.is_none() {
+                let dir = this.last_dir.clone();
+                this.add_tab(None, dir, None, Vec::new(), Vec::new());
+                this.activate(0, window, cx);
+            }
+            let _ = this.open_request(launch_req, window, cx);
         } else {
             // Restore: rows for every tab, a shell only for the active one (the rest spawn on first view).
             for t in saved.tabs {
@@ -389,6 +423,7 @@ impl Workspace {
             this.activate(active, window, cx);
             this.check_resumable(cx);
             this.hint_groups(cx);
+            let _ = this.open_request(launch_req, window, cx);
         }
 
         if let Ok(path) = std::env::var("AGENT_IDE_PERF_DIFF") {
@@ -1028,6 +1063,76 @@ impl Workspace {
     }
 
     /// A notification was clicked: show its session and bring the window up.
+    /// `agent-ide [--new] [--claude] [PATH]` (from another process, or the one that started us): focus the session
+    /// in that directory or make one, start claude, show the file, bring the window up.
+    fn open_request(&mut self, req: crate::cli::Request, window: &mut Window, cx: &mut Context<Self>) -> Result<(), String> {
+        crate::perf::event_with(|| format!("cli request: {:?} new={} claude={} open={}", req.dir, req.new, req.claude, req.open.is_some()));
+        if let Some(dir) = req.dir.clone() {
+            if self.modal.is_some() {
+                self.close_modal(window, cx);
+            }
+            let rows: Vec<(&Path, bool)> = {
+                let board = self.agents.as_ref().map(|h| h.board.lock().unwrap());
+                self.tabs
+                    .iter()
+                    .map(|t| {
+                        let agent = board.as_ref().is_some_and(|b| b.get(t.id as u32).state != crate::agent::State::NoAgent);
+                        (t.cwd.as_path(), agent && t.view.is_some())
+                    })
+                    .collect()
+            };
+            let picked = crate::cli::pick(&req, &rows, self.active, &self.visual_order());
+            let i = match picked {
+                Some(i) => {
+                    self.activate(i, window, cx);
+                    i
+                }
+                None => {
+                    if !dir.is_dir() {
+                        return Err(format!("no such directory: {}", dir.display()));
+                    }
+                    self.last_dir = dir.clone();
+                    let i = self.add_tab(None, dir, None, Vec::new(), Vec::new());
+                    self.activate(i, window, cx);
+                    self.mark_dirty(cx);
+                    i
+                }
+            };
+            if req.claude && picked.is_none() {
+                // Our shim is first on the session's PATH: claude starts with our hooks. The PTY holds the line until
+                // the shell has read its rc files.
+                if let Some(v) = &self.tabs[i].view {
+                    v.read(cx).session.write(b"claude\r");
+                }
+            }
+            if let Some(file) = req.open {
+                if matches!(self.tabs[i].repo, TabRepo::Unknown | TabRepo::Pending) {
+                    self.pending_open = Some((self.tabs[i].id, file)); // shown by `render` once resolved
+                } else {
+                    self.open_file(file, false, window, cx);
+                }
+            }
+        }
+        notify::raise(window, req.token.as_deref());
+        cx.notify();
+        Ok(())
+    }
+
+    /// `pending_open`, once its tab's repo is known (called from render; the tab must still be the active one).
+    pub(super) fn flush_pending_open(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some((id, _)) = &self.pending_open else { return };
+        let Some(t) = self.tabs.get(self.active).filter(|t| t.id == *id) else {
+            self.pending_open = None; // closed or switched away meanwhile
+            return;
+        };
+        if matches!(t.repo, TabRepo::Unknown | TabRepo::Pending) {
+            return;
+        }
+        if let Some((_, file)) = self.pending_open.take() {
+            cx.defer_in(window, move |w, window, cx| w.open_file(file, false, window, cx));
+        }
+    }
+
     fn open_from_notification(&mut self, click: notify::Click, window: &mut Window, cx: &mut Context<Self>) {
         crate::perf::event_with(|| format!("notification click: tab {} (token: {})", click.tab, click.token.is_some()));
         if let Some(i) = self.tabs.iter().position(|t| t.id as u32 == click.tab) {

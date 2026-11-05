@@ -22,6 +22,20 @@ It checks the build dependencies first and, if something is missing, prints the 
 
 `agent-ide --version` prints the installed build (git hash and commit date).
 
+## Open from the terminal
+
+```sh
+agent-ide .                 # a session in this directory (focuses an existing one there)
+agent-ide src/main.rs       # a session in its directory, the file in the preview
+agent-ide --new ~/proj      # always a new session
+agent-ide --claude .        # ... and start claude in it
+agent-ide                   # just start or focus the app
+```
+
+One instance: a running app gets the request over a socket in `$XDG_RUNTIME_DIR` and the command returns at
+once; otherwise the app starts in the background (its output goes to `~/.local/state/agent-ide/agent-ide.log`).
+`agent-ide --help` lists the options.
+
 ## Update
 
 ```sh
