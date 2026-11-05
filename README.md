@@ -73,7 +73,7 @@ defaults, worktrees).
 | Keys | Action |
 |---|---|
 | Ctrl+, | Settings |
-| Ctrl+= or Ctrl++ / Ctrl+- / Ctrl+0 | Zoom the terminal in / out / reset (saved as its font size) |
+| Ctrl+= or Ctrl++ / Ctrl+- / Ctrl+0 | Zoom the whole UI in / out / back to 100 % (saved as UI zoom) |
 | Ctrl+Shift+T | New session (project picker) |
 | Ctrl+Shift+N | New session in the current project |
 | Ctrl+Shift+W | Close session |
