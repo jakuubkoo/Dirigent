@@ -1,4 +1,4 @@
-//! App state across restarts: `$XDG_STATE_HOME/agent-ide/state.json` (versioned, atomic writes).
+//! App state across restarts: `$XDG_STATE_HOME/dirigent/state.json` (versioned, atomic writes).
 
 use std::path::{Path, PathBuf};
 
@@ -165,16 +165,45 @@ pub struct WindowState {
     pub h: f32,
 }
 
-/// `AGENT_IDE_STATE` (tests/perf runs), else `$XDG_STATE_HOME/agent-ide/state.json`, else `~/.local/state/…`.
+/// `DIRIGENT_STATE` (tests/perf runs), else `$XDG_STATE_HOME/dirigent/state.json`, else `~/.local/state/…`.
 pub fn path() -> PathBuf {
-    if let Some(p) = std::env::var_os("AGENT_IDE_STATE") {
+    if let Some(p) = std::env::var_os("DIRIGENT_STATE") {
         return p.into();
     }
-    let base = std::env::var_os("XDG_STATE_HOME")
+    state_base().join("dirigent/state.json")
+}
+
+fn state_base() -> PathBuf {
+    std::env::var_os("XDG_STATE_HOME")
         .filter(|p| !p.is_empty())
         .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from(std::env::var_os("HOME").unwrap_or_default()).join(".local/state"));
-    base.join("agent-ide/state.json")
+        .unwrap_or_else(|| PathBuf::from(std::env::var_os("HOME").unwrap_or_default()).join(".local/state"))
+}
+
+/// The app was called agent-ide: its state dir moves to the new name on the first start (not for test runs with
+/// `DIRIGENT_STATE`). Says what it did on stderr.
+pub fn migrate_old_state() {
+    if std::env::var_os("DIRIGENT_STATE").is_some() {
+        return;
+    }
+    let base = state_base();
+    match migrate(&base.join("agent-ide"), &base.join("dirigent")) {
+        Some(Ok(how)) => eprintln!("dirigent: {how} the state from {}", base.join("agent-ide").display()),
+        Some(Err(e)) => eprintln!("dirigent: couldn't take over the old agent-ide state: {e}"),
+        None => {}
+    }
+}
+
+/// Moves `old` to `new` when only `old` exists (None: nothing to do). Across filesystems, where a rename can't work,
+/// only `state.json` is copied and `old` stays.
+pub fn migrate(old: &Path, new: &Path) -> Option<std::io::Result<&'static str>> {
+    if !old.is_dir() || new.exists() {
+        return None;
+    }
+    Some(std::fs::rename(old, new).map(|_| "moved").or_else(|_| {
+        std::fs::create_dir_all(new)?;
+        std::fs::copy(old.join("state.json"), new.join("state.json")).map(|_| "copied")
+    }))
 }
 
 /// Missing file → defaults. Unreadable, corrupted or unknown-version file → moved aside to `<file>.bad-<unix time>`
@@ -200,7 +229,7 @@ fn backup(path: &Path, why: &str) -> State {
     bad.push(format!(".bad-{secs}"));
     let moved = std::fs::rename(path, &bad).is_ok();
     eprintln!(
-        "agent-ide: ignoring state file {} ({why}){}; starting fresh",
+        "dirigent: ignoring state file {} ({why}){}; starting fresh",
         path.display(),
         if moved { format!(", kept as {}", PathBuf::from(&bad).display()) } else { String::new() }
     );
@@ -238,6 +267,23 @@ mod tests {
     use super::*;
 
     #[test]
+    fn old_state_dir_moves_once() {
+        let d = std::env::temp_dir().join(format!("dirigent-migrate-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        let (old, new) = (d.join("agent-ide"), d.join("dirigent"));
+        assert!(migrate(&old, &new).is_none(), "nothing to move");
+        std::fs::create_dir_all(&old).unwrap();
+        std::fs::write(old.join("state.json"), "{}").unwrap();
+        assert_eq!(migrate(&old, &new).unwrap().unwrap(), "moved");
+        assert!(!old.exists() && new.join("state.json").exists());
+        std::fs::create_dir_all(&old).unwrap();
+        std::fs::write(old.join("state.json"), "old").unwrap();
+        assert!(migrate(&old, &new).is_none(), "the new one exists: untouched");
+        assert_eq!(std::fs::read_to_string(new.join("state.json")).unwrap(), "{}");
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
     fn projects_missing_in_old_files_and_round_trip() {
         let old = r#"{"version":1,"tabs":[],"active":0,"sidebar":{"width":220.0,"open":true},"window":null,"last_dir":null}"#;
         let st: State = serde_json::from_str(old).unwrap();
@@ -249,7 +295,7 @@ mod tests {
     }
 
     fn tmp(name: &str) -> PathBuf {
-        let d = std::env::temp_dir().join(format!("agent-ide-persist-{}-{name}", std::process::id()));
+        let d = std::env::temp_dir().join(format!("dirigent-persist-{}-{name}", std::process::id()));
         let _ = std::fs::remove_dir_all(&d);
         std::fs::create_dir_all(&d).unwrap();
         d.join("state.json")

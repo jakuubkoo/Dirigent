@@ -43,8 +43,8 @@ impl Render for Workspace {
         };
 
         let mut title = match self.tabs.get(self.active) {
-            Some(tab) => format!("{} — agent-ide", tab.name),
-            None => "agent-ide".to_string(),
+            Some(tab) => format!("{} — Dirigent", tab.name),
+            None => "Dirigent".to_string(),
         };
         match self.needs_you_count() {
             0 => {}
@@ -288,7 +288,7 @@ impl Workspace {
             .h_full()
             .px(px(space::MD))
             .child(ui::icon(icon::TERMINAL, 15., t.accent))
-            .child(div().flex_1().text_size(px(text_size::SM)).font_weight(FontWeight::MEDIUM).child("agent-ide"))
+            .child(div().flex_1().text_size(px(text_size::SM)).font_weight(FontWeight::MEDIUM).child("Dirigent"))
             .child(
                 icon_button("new", icon::PLUS, false)
                     .tooltip(tip("New session  Ctrl+Shift+T"))

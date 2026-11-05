@@ -1,5 +1,5 @@
 //! Claude Code integration: per-run runtime dir (socket, `claude` shim, zsh wrappers, per-tab settings),
-//! a listener thread receiving `agent-ide-hook` datagrams, and the per-tab agent state they drive.
+//! a listener thread receiving `dirigent-hook` datagrams, and the per-tab agent state they drive.
 
 use std::collections::HashMap;
 use std::os::unix::fs::PermissionsExt;
@@ -200,7 +200,7 @@ impl Hub {
         for (name, body) in ZSH_WRAPPERS {
             std::fs::write(zdotdir.join(name), body)?;
         }
-        let helper = std::env::current_exe()?.with_file_name("agent-ide-hook");
+        let helper = std::env::current_exe()?.with_file_name("dirigent-hook");
 
         let sock = dir.join("sock");
         let socket = UnixDatagram::bind(&sock)?;
@@ -227,11 +227,11 @@ impl Hub {
         std::fs::write(&settings, self.settings_json(tab))?;
         let path = std::env::var("PATH").unwrap_or_default();
         let mut env = vec![
-            ("AGENT_IDE_TAB_ID".into(), tab.to_string()),
-            ("AGENT_IDE_SOCKET".into(), self.sock.display().to_string()),
-            ("AGENT_IDE_SETTINGS".into(), settings.display().to_string()),
-            ("AGENT_IDE_BIN".into(), self.bin.display().to_string()),
-            ("AGENT_IDE_HOOK".into(), self.helper.display().to_string()),
+            ("DIRIGENT_TAB_ID".into(), tab.to_string()),
+            ("DIRIGENT_SOCKET".into(), self.sock.display().to_string()),
+            ("DIRIGENT_SETTINGS".into(), settings.display().to_string()),
+            ("DIRIGENT_BIN".into(), self.bin.display().to_string()),
+            ("DIRIGENT_HOOK".into(), self.helper.display().to_string()),
             ("PATH".into(), format!("{}:{path}", self.bin.display())),
         ];
         // zsh rc files usually prepend ~/.local/bin, which would shadow the shim: wrap them via ZDOTDIR so the shim
@@ -243,9 +243,9 @@ impl Hub {
                 Ok(z) => (z, ""),
                 Err(_) => (std::env::var("HOME").unwrap_or_default(), "1"),
             };
-            env.push(("AGENT_IDE_ZDOTDIR".into(), self.zdotdir.display().to_string()));
-            env.push(("AGENT_IDE_ZDOTDIR_ORIG".into(), orig));
-            env.push(("AGENT_IDE_ZDOTDIR_WAS_UNSET".into(), unset.into()));
+            env.push(("DIRIGENT_ZDOTDIR".into(), self.zdotdir.display().to_string()));
+            env.push(("DIRIGENT_ZDOTDIR_ORIG".into(), orig));
+            env.push(("DIRIGENT_ZDOTDIR_WAS_UNSET".into(), unset.into()));
             env.push(("ZDOTDIR".into(), self.zdotdir.display().to_string()));
         }
         Ok(env)
@@ -280,9 +280,9 @@ impl Hub {
     }
 }
 
-/// This instance's runtime dir (`$XDG_RUNTIME_DIR/agent-ide-<pid>`), removed on quit.
+/// This instance's runtime dir (`$XDG_RUNTIME_DIR/dirigent-<pid>`), removed on quit.
 pub fn runtime_dir() -> PathBuf {
-    runtime_parent().join(format!("agent-ide-{}", std::process::id()))
+    runtime_parent().join(format!("dirigent-{}", std::process::id()))
 }
 
 /// `$XDG_RUNTIME_DIR` (else the temp dir).
@@ -295,7 +295,8 @@ fn remove_stale_dirs(runtime: &Path) {
     let Ok(entries) = std::fs::read_dir(runtime) else { return };
     for e in entries.flatten() {
         let name = e.file_name();
-        let Some(pid) = name.to_str().and_then(|n| n.strip_prefix("agent-ide-")) else { continue };
+        // `agent-ide-` too: dirs left by the app before its rename.
+        let Some(pid) = name.to_str().and_then(|n| n.strip_prefix("dirigent-").or_else(|| n.strip_prefix("agent-ide-"))) else { continue };
         if pid.parse::<u32>().is_ok() && !Path::new("/proc").join(pid).exists() {
             let _ = std::fs::remove_dir_all(e.path());
         }
@@ -313,26 +314,26 @@ fn sh_quote(p: &Path) -> String {
 
 /// `claude` shim: runs the next `claude` on PATH with our settings (hooks + statusLine) layered on top.
 const SHIM: &str = r#"#!/bin/sh
-# agent-ide: run the real claude with agent-ide hooks + statusLine (--settings). Your settings stay untouched.
+# dirigent: run the real claude with dirigent hooks + statusLine (--settings). Your settings stay untouched.
 self_dir=$(dirname "$0")
 IFS=:
 for d in $PATH; do
   [ -z "$d" ] || [ "$d" = "$self_dir" ] && continue
   if [ -x "$d/claude" ] && [ ! -d "$d/claude" ]; then
-    if [ -f "$AGENT_IDE_SETTINGS" ]; then
+    if [ -f "$DIRIGENT_SETTINGS" ]; then
       # Remember the flags for resuming later (fire-and-forget, never reads the terminal).
-      [ -x "$AGENT_IDE_HOOK" ] && "$AGENT_IDE_HOOK" "$AGENT_IDE_SOCKET" "$AGENT_IDE_TAB_ID" argv "$@" </dev/null
-      exec "$d/claude" --settings "$AGENT_IDE_SETTINGS" "$@"
+      [ -x "$DIRIGENT_HOOK" ] && "$DIRIGENT_HOOK" "$DIRIGENT_SOCKET" "$DIRIGENT_TAB_ID" argv "$@" </dev/null
+      exec "$d/claude" --settings "$DIRIGENT_SETTINGS" "$@"
     fi
     exec "$d/claude" "$@"
   fi
 done
-echo "agent-ide: no claude found on PATH" >&2
+echo "dirigent: no claude found on PATH" >&2
 exit 127
 "#;
 
 /// zsh startup wrappers: each sources the user's own file, then (rc/login) puts the shim dir first in `path` and
-/// restores ZDOTDIR, so the user's config and child shells behave exactly as without agent-ide.
+/// restores ZDOTDIR, so the user's config and child shells behave exactly as without dirigent.
 const ZSH_WRAPPERS: [(&str, &str); 4] = [
     (".zshenv", ZSHENV),
     (".zprofile", ZPROFILE),
@@ -340,39 +341,39 @@ const ZSH_WRAPPERS: [(&str, &str); 4] = [
     (".zlogin", ZLOGIN),
 ];
 
-const ZSHENV: &str = r#"# agent-ide wrapper
-ZDOTDIR=$AGENT_IDE_ZDOTDIR_ORIG
+const ZSHENV: &str = r#"# dirigent wrapper
+ZDOTDIR=$DIRIGENT_ZDOTDIR_ORIG
 [[ -f $ZDOTDIR/.zshenv ]] && builtin source $ZDOTDIR/.zshenv
-AGENT_IDE_ZDOTDIR_ORIG=$ZDOTDIR
-ZDOTDIR=$AGENT_IDE_ZDOTDIR
+DIRIGENT_ZDOTDIR_ORIG=$ZDOTDIR
+ZDOTDIR=$DIRIGENT_ZDOTDIR
 "#;
 
-const ZPROFILE: &str = r#"# agent-ide wrapper
-ZDOTDIR=$AGENT_IDE_ZDOTDIR_ORIG
+const ZPROFILE: &str = r#"# dirigent wrapper
+ZDOTDIR=$DIRIGENT_ZDOTDIR_ORIG
 [[ -f $ZDOTDIR/.zprofile ]] && builtin source $ZDOTDIR/.zprofile
-ZDOTDIR=$AGENT_IDE_ZDOTDIR
+ZDOTDIR=$DIRIGENT_ZDOTDIR
 "#;
 
-const ZSHRC: &str = r#"# agent-ide wrapper
-ZDOTDIR=$AGENT_IDE_ZDOTDIR_ORIG
+const ZSHRC: &str = r#"# dirigent wrapper
+ZDOTDIR=$DIRIGENT_ZDOTDIR_ORIG
 [[ -f $ZDOTDIR/.zshrc ]] && builtin source $ZDOTDIR/.zshrc
-path=($AGENT_IDE_BIN ${path:#$AGENT_IDE_BIN})
+path=($DIRIGENT_BIN ${path:#$DIRIGENT_BIN})
 # Report the cwd at every prompt (OSC 7) so the app follows `cd`; `%` is escaped for the file:// URL.
-__agent_ide_osc7() { builtin print -rn -- $'\e]7;file://'"${HOST}${PWD//\%/%25}"$'\e\\' }
+__dirigent_osc7() { builtin print -rn -- $'\e]7;file://'"${HOST}${PWD//\%/%25}"$'\e\\' }
 typeset -ga precmd_functions
-precmd_functions=(${precmd_functions:#__agent_ide_osc7} __agent_ide_osc7)
+precmd_functions=(${precmd_functions:#__dirigent_osc7} __dirigent_osc7)
 if [[ -o login ]]; then
-  ZDOTDIR=$AGENT_IDE_ZDOTDIR
-elif [[ -n $AGENT_IDE_ZDOTDIR_WAS_UNSET && $AGENT_IDE_ZDOTDIR_ORIG == $HOME ]]; then
+  ZDOTDIR=$DIRIGENT_ZDOTDIR
+elif [[ -n $DIRIGENT_ZDOTDIR_WAS_UNSET && $DIRIGENT_ZDOTDIR_ORIG == $HOME ]]; then
   unset ZDOTDIR
 fi
 "#;
 
-const ZLOGIN: &str = r#"# agent-ide wrapper
-ZDOTDIR=$AGENT_IDE_ZDOTDIR_ORIG
+const ZLOGIN: &str = r#"# dirigent wrapper
+ZDOTDIR=$DIRIGENT_ZDOTDIR_ORIG
 [[ -f $ZDOTDIR/.zlogin ]] && builtin source $ZDOTDIR/.zlogin
-path=($AGENT_IDE_BIN ${path:#$AGENT_IDE_BIN})
-if [[ -n $AGENT_IDE_ZDOTDIR_WAS_UNSET && $AGENT_IDE_ZDOTDIR_ORIG == $HOME ]]; then
+path=($DIRIGENT_BIN ${path:#$DIRIGENT_BIN})
+if [[ -n $DIRIGENT_ZDOTDIR_WAS_UNSET && $DIRIGENT_ZDOTDIR_ORIG == $HOME ]]; then
   unset ZDOTDIR
 fi
 "#;
@@ -516,23 +517,23 @@ mod tests {
             sock: "/run/x/sock".into(),
             bin: "/run/x/bin".into(),
             zdotdir: "/run/x/zsh".into(),
-            helper: "/opt/it's/agent-ide-hook".into(),
+            helper: "/opt/it's/dirigent-hook".into(),
         };
         let v: serde_json::Value = serde_json::from_str(&hub.settings_json(4)).unwrap();
-        assert_eq!(v["statusLine"]["command"], r#"'/opt/it'\''s/agent-ide-hook' '/run/x/sock' 4 status"#);
+        assert_eq!(v["statusLine"]["command"], r#"'/opt/it'\''s/dirigent-hook' '/run/x/sock' 4 status"#);
         assert_eq!(v["hooks"]["Stop"][0]["hooks"][0]["async"], true);
         assert_eq!(v["hooks"].as_object().unwrap().len(), 9);
     }
 
     #[test]
     fn shim_runs_real_claude_with_settings_and_skips_itself() {
-        let d = std::env::temp_dir().join(format!("agent-ide-shim-test-{}", std::process::id()));
+        let d = std::env::temp_dir().join(format!("dirigent-shim-test-{}", std::process::id()));
         let (shim_dir, real_dir) = (d.join("shim"), d.join("real"));
         std::fs::create_dir_all(&shim_dir).unwrap();
         std::fs::create_dir_all(&real_dir).unwrap();
         write_exec(&shim_dir.join("claude"), SHIM).unwrap();
         write_exec(&real_dir.join("claude"), "#!/bin/sh\necho real \"$@\"\n").unwrap();
-        // Stand-in for agent-ide-hook: records what the shim reports.
+        // Stand-in for dirigent-hook: records what the shim reports.
         let reported = d.join("argv.txt");
         let fake_hook = d.join("hook.sh");
         write_exec(&fake_hook, &format!("#!/bin/sh\nshift 3; printf '%s|' \"$@\" > {}\n", reported.display())).unwrap();
@@ -543,10 +544,10 @@ mod tests {
                 .arg("--model")
                 .arg("a b")
                 .env("PATH", format!("{}:{}:/usr/bin:/bin", shim_dir.display(), real_dir.display()))
-                .env("AGENT_IDE_SETTINGS", settings)
-                .env("AGENT_IDE_HOOK", &fake_hook)
-                .env("AGENT_IDE_SOCKET", "/nowhere")
-                .env("AGENT_IDE_TAB_ID", "3")
+                .env("DIRIGENT_SETTINGS", settings)
+                .env("DIRIGENT_HOOK", &fake_hook)
+                .env("DIRIGENT_SOCKET", "/nowhere")
+                .env("DIRIGENT_TAB_ID", "3")
                 .output()
                 .unwrap();
             String::from_utf8(out.stdout).unwrap()
@@ -563,7 +564,7 @@ mod tests {
         if !Path::new("/usr/bin/zsh").exists() && !Path::new("/bin/zsh").exists() {
             return;
         }
-        let d = std::env::temp_dir().join(format!("agent-ide-zsh-test-{}", std::process::id()));
+        let d = std::env::temp_dir().join(format!("dirigent-zsh-test-{}", std::process::id()));
         let (wrappers, user) = (d.join("wrap"), d.join("user"));
         std::fs::create_dir_all(&wrappers).unwrap();
         std::fs::create_dir_all(&user).unwrap();
@@ -576,9 +577,9 @@ mod tests {
         cmd.arg("-i");
         for (k, v) in [
             ("ZDOTDIR", wrappers.to_str().unwrap()),
-            ("AGENT_IDE_ZDOTDIR", wrappers.to_str().unwrap()),
-            ("AGENT_IDE_ZDOTDIR_ORIG", user.to_str().unwrap()),
-            ("AGENT_IDE_BIN", "/nonexistent"),
+            ("DIRIGENT_ZDOTDIR", wrappers.to_str().unwrap()),
+            ("DIRIGENT_ZDOTDIR_ORIG", user.to_str().unwrap()),
+            ("DIRIGENT_BIN", "/nonexistent"),
         ] {
             cmd.env(k, v);
         }

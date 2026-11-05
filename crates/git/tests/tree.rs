@@ -8,7 +8,7 @@ use std::time::Duration;
 use git::{DirWatcher, Discovery, Update, Watcher, list_dir};
 
 fn tmp(name: &str) -> PathBuf {
-    let d = std::env::temp_dir().join(format!("agent-ide-tree-{}-{name}", std::process::id()));
+    let d = std::env::temp_dir().join(format!("dirigent-tree-{}-{name}", std::process::id()));
     let _ = std::fs::remove_dir_all(&d);
     std::fs::create_dir_all(&d).unwrap();
     d

@@ -20,7 +20,7 @@ fn sh_git(dir: &Path, args: &[&str]) {
 }
 
 fn repo(name: &str) -> PathBuf {
-    let d = std::env::temp_dir().join(format!("agent-ide-git-watch-{}-{name}", std::process::id()));
+    let d = std::env::temp_dir().join(format!("dirigent-git-watch-{}-{name}", std::process::id()));
     let _ = std::fs::remove_dir_all(&d);
     std::fs::create_dir_all(d.join("target/debug")).unwrap();
     sh_git(&d, &["init", "-q", "-b", "main"]);
@@ -116,7 +116,7 @@ fn diff_of_tracked_and_untracked_files() {
 
 #[test]
 fn unborn_head() {
-    let d = std::env::temp_dir().join(format!("agent-ide-git-watch-{}-unborn", std::process::id()));
+    let d = std::env::temp_dir().join(format!("dirigent-git-watch-{}-unborn", std::process::id()));
     let _ = std::fs::remove_dir_all(&d);
     std::fs::create_dir_all(&d).unwrap();
     sh_git(&d, &["init", "-q", "-b", "main"]);

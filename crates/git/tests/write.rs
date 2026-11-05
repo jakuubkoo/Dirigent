@@ -21,7 +21,7 @@ fn sh(dir: &Path, args: &[&str]) -> String {
 /// A repo with `f.txt` = 1..30 committed; local identity so commits work without the user's config.
 fn repo(name: &str) -> (Repo, PathBuf) {
     // Under target/ (the home filesystem): GNOME's trash refuses system mounts like /tmp.
-    let d = Path::new(env!("CARGO_TARGET_TMPDIR")).join(format!("agent-ide-git-write-{}-{name}", std::process::id()));
+    let d = Path::new(env!("CARGO_TARGET_TMPDIR")).join(format!("dirigent-git-write-{}-{name}", std::process::id()));
     let _ = std::fs::remove_dir_all(&d);
     std::fs::create_dir_all(&d).unwrap();
     sh(&d, &["init", "-q", "-b", "main"]);
@@ -160,7 +160,7 @@ fn failing_pre_commit_hook_shows_its_output() {
 
 #[test]
 fn unborn_head() {
-    let d = std::env::temp_dir().join(format!("agent-ide-git-write-{}-unborn", std::process::id()));
+    let d = std::env::temp_dir().join(format!("dirigent-git-write-{}-unborn", std::process::id()));
     let _ = std::fs::remove_dir_all(&d);
     std::fs::create_dir_all(&d).unwrap();
     sh(&d, &["init", "-q", "-b", "main"]);

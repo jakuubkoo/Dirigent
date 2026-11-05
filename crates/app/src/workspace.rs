@@ -25,7 +25,7 @@ use crate::terminal_element::Metrics;
 use crate::terminal_view::{Banner, PADDING, TerminalView};
 
 actions!(
-    agent_ide,
+    dirigent,
     [
         NewSession, NewInProject, CloseSession, NextSession, PrevSession, Rename, ToggleSidebar, NextNeedsYou, ResumeAll, ShowChanges, ShowFiles, ToggleDiffMode,
         Activate1, Activate2, Activate3, Activate4, Activate5, Activate6, Activate7, Activate8, Activate9
@@ -186,7 +186,7 @@ pub struct Workspace {
     commit_boxes: HashMap<PathBuf, Entity<crate::commit_box::CommitBox>>,
     notifications: persist::Notifications,
     _click_task: Option<Task<()>>,
-    /// `agent-ide <path>` requests from other processes.
+    /// `dirigent <path>` requests from other processes.
     _cli_task: Option<Task<()>>,
     /// Remembered projects (picker, sidebar groups, per-project defaults).
     projects: crate::projects::Projects,
@@ -194,7 +194,7 @@ pub struct Workspace {
     seed_projects: bool,
     /// An open dropdown (sidebar group header).
     menu: Option<Menu>,
-    /// A file `agent-ide <file>` asked for in a new tab: shown once that tab's repo is resolved (tab id, file).
+    /// A file `dirigent <file>` asked for in a new tab: shown once that tab's repo is resolved (tab id, file).
     pending_open: Option<(usize, PathBuf)>,
     _subscriptions: Vec<gpui::Subscription>,
     state_path: PathBuf,
@@ -282,7 +282,7 @@ impl Workspace {
             cx.new(|cx| FilesPanel::new(ws, cx))
         };
         let dir_watcher = git::DirWatcher::start(repos.reporter())
-            .map_err(|e| eprintln!("agent-ide: no directory watcher for file trees: {e}"))
+            .map_err(|e| eprintln!("dirigent: no directory watcher for file trees: {e}"))
             .ok();
         let (notifier, clicks) = notify::start(agent::runtime_dir().join("icon.svg"));
         let mut this = Self {
@@ -382,7 +382,7 @@ impl Workspace {
                 }));
                 this.agents = Some(hub);
             }
-            Err(e) => eprintln!("agent-ide: Claude Code integration disabled: {e}"),
+            Err(e) => eprintln!("dirigent: Claude Code integration disabled: {e}"),
         }
         this._subscriptions.push(cx.observe_window_activation(window, |w, window, _| {
             w.window_active = window.is_window_active();
@@ -434,13 +434,13 @@ impl Workspace {
             // Final save, synchronous: the process is about to exit.
             w._save_task = None;
             if let Err(e) = persist::save(&w.state_path, &w.snapshot()) {
-                eprintln!("agent-ide: saving state failed: {e}");
+                eprintln!("dirigent: saving state failed: {e}");
             }
             async {}
         }));
         this.applied = this.grid_size(window);
 
-        if let Ok(script) = std::env::var("AGENT_IDE_RUN") {
+        if let Ok(script) = std::env::var("DIRIGENT_RUN") {
             // Perf harness: one (eagerly spawned) session per line, the line typed into it; saved tabs are ignored.
             for line in script.split('\n') {
                 let dir = this.last_dir.clone();
@@ -452,7 +452,7 @@ impl Workspace {
             }
             this.activate(0, window, cx);
         } else if saved.tabs.is_empty() {
-            // `agent-ide <dir>` on a fresh start: that session only, not also one in the last directory.
+            // `dirigent <dir>` on a fresh start: that session only, not also one in the last directory.
             if launch_req.dir.is_none() {
                 let dir = this.last_dir.clone();
                 this.add_tab(None, dir, None, Vec::new(), Vec::new());
@@ -474,9 +474,9 @@ impl Workspace {
             let _ = this.open_request(launch_req, window, cx);
         }
 
-        if let Ok(path) = std::env::var("AGENT_IDE_PERF_DIFF") {
+        if let Ok(path) = std::env::var("DIRIGENT_PERF_DIFF") {
             // Perf harness: open that file's diff in the active tab's repo, then jump 40 rows every 50 ms
-            // (AGENT_IDE_PERF_STEPS times, default 100).
+            // (DIRIGENT_PERF_STEPS times, default 100).
             cx.spawn_in(window, async move |this, cx| {
                 let bg = cx.background_executor().clone();
                 let timer = |ms| bg.timer(Duration::from_millis(ms));
@@ -531,7 +531,7 @@ impl Workspace {
                     }
                 }
                 eprintln!("[perf] diff scroll start");
-                let steps = std::env::var("AGENT_IDE_PERF_STEPS").ok().and_then(|n| n.parse().ok()).unwrap_or(100);
+                let steps = std::env::var("DIRIGENT_PERF_STEPS").ok().and_then(|n| n.parse().ok()).unwrap_or(100);
                 for step in 1..=steps {
                     timer(50).await;
                     let _ = this.update(cx, |w, cx| {
@@ -545,7 +545,7 @@ impl Workspace {
             .detach();
         }
 
-        if let Some(ms) = std::env::var("AGENT_IDE_PERF_MODAL").ok().and_then(|v| v.parse().ok()) {
+        if let Some(ms) = std::env::var("DIRIGENT_PERF_MODAL").ok().and_then(|v| v.parse().ok()) {
             // Screenshot harness: open the new-session modal after `ms` milliseconds.
             cx.spawn_in(window, async move |this, cx| {
                 cx.background_executor().timer(Duration::from_millis(ms)).await;
@@ -554,7 +554,7 @@ impl Workspace {
             .detach();
         }
 
-        if let Ok(path) = std::env::var("AGENT_IDE_PERF_OPEN") {
+        if let Ok(path) = std::env::var("DIRIGENT_PERF_OPEN") {
             // Perf/screenshot harness: open that file's preview once the active tab's repo is resolved.
             cx.spawn_in(window, async move |this, cx| {
                 for _ in 0..100 {
@@ -570,7 +570,7 @@ impl Workspace {
                         break;
                     }
                 }
-                if let Some(steps) = std::env::var("AGENT_IDE_PERF_STEPS").ok().and_then(|n| n.parse::<usize>().ok()) {
+                if let Some(steps) = std::env::var("DIRIGENT_PERF_STEPS").ok().and_then(|n| n.parse::<usize>().ok()) {
                     // Scroll harness: wait for the rows and the colors, then jump 40 rows every 50 ms.
                     let started = Instant::now();
                     let (mut rows_at, mut colored_at) = (None, None);
@@ -602,7 +602,7 @@ impl Workspace {
                     }
                     eprintln!("[perf] preview scroll end");
                 }
-                if std::env::var_os("AGENT_IDE_PERF_OPEN_END").is_some() {
+                if std::env::var_os("DIRIGENT_PERF_OPEN_END").is_some() {
                     for _ in 0..100 {
                         cx.background_executor().timer(Duration::from_millis(50)).await;
                         let done = this.update(cx, |w, cx| match &w.overlay {
@@ -619,9 +619,9 @@ impl Workspace {
             .detach();
         }
 
-        if let Ok(dir) = std::env::var("AGENT_IDE_PERF_TREE") {
+        if let Ok(dir) = std::env::var("DIRIGENT_PERF_TREE") {
             // Perf harness: show Files, expand that directory (and its parents) in the active tab, then jump 40 rows
-            // every 50 ms (AGENT_IDE_PERF_STEPS times, default 100).
+            // every 50 ms (DIRIGENT_PERF_STEPS times, default 100).
             let dir = PathBuf::from(dir);
             cx.spawn_in(window, async move |this, cx| {
                 let bg = cx.background_executor().clone();
@@ -654,7 +654,7 @@ impl Workspace {
                         break;
                     }
                 }
-                let steps = std::env::var("AGENT_IDE_PERF_STEPS").ok().and_then(|n| n.parse().ok()).unwrap_or(100);
+                let steps = std::env::var("DIRIGENT_PERF_STEPS").ok().and_then(|n| n.parse().ok()).unwrap_or(100);
                 eprintln!("[perf] tree scroll start");
                 for step in 1..=steps {
                     timer(50).await;
@@ -665,7 +665,7 @@ impl Workspace {
             .detach();
         }
 
-        if let Some(n) = std::env::var("AGENT_IDE_PERF_CYCLE").ok().and_then(|n| n.parse::<usize>().ok()) {
+        if let Some(n) = std::env::var("DIRIGENT_PERF_CYCLE").ok().and_then(|n| n.parse::<usize>().ok()) {
             this._cycle = Some(cx.spawn_in(window, async move |this, cx| {
                 for _ in 0..n {
                     cx.background_executor().timer(Duration::from_millis(300)).await;
@@ -786,7 +786,7 @@ impl Workspace {
     fn new_view(&mut self, id: usize, dir: &Path, _: &mut Window, cx: &mut Context<Self>) -> Entity<TerminalView> {
         let env = match &self.agents {
             Some(hub) => hub.session_env(id as u32).unwrap_or_else(|e| {
-                eprintln!("agent-ide: no Claude Code hooks for session {id}: {e}");
+                eprintln!("dirigent: no Claude Code hooks for session {id}: {e}");
                 Vec::new()
             }),
             None => Vec::new(),
@@ -908,7 +908,7 @@ impl Workspace {
         }
     }
 
-    /// Opens a session in `dir` (picker, group `+`, Ctrl+Shift+N, `agent-ide <path>`): its project is remembered;
+    /// Opens a session in `dir` (picker, group `+`, Ctrl+Shift+N, `dirigent <path>`): its project is remembered;
     /// claude starts when asked, else per the project's default, with the project's flags.
     pub(super) fn new_session(&mut self, dir: PathBuf, claude: Option<bool>, window: &mut Window, cx: &mut Context<Self>) -> usize {
         self.new_session_with(dir, SessionOpts { claude, ..Default::default() }, window, cx)
@@ -1251,7 +1251,7 @@ impl Workspace {
     }
 
     /// A notification was clicked: show its session and bring the window up.
-    /// `agent-ide [--new] [--claude] [PATH]` (from another process, or the one that started us): focus the session
+    /// `dirigent [--new] [--claude] [PATH]` (from another process, or the one that started us): focus the session
     /// in that directory or make one, start claude, show the file, bring the window up.
     fn open_request(&mut self, req: crate::cli::Request, window: &mut Window, cx: &mut Context<Self>) -> Result<(), String> {
         crate::perf::event_with(|| format!("cli request: {:?} new={} claude={} open={}", req.dir, req.new, req.claude, req.open.is_some()));
@@ -1341,7 +1341,7 @@ impl Workspace {
             let result = cx.background_executor().spawn(async move { persist::save(&path, &snapshot) }).await;
             match result {
                 Ok(()) => crate::perf::event("state saved"),
-                Err(e) => eprintln!("agent-ide: saving state failed: {e}"),
+                Err(e) => eprintln!("dirigent: saving state failed: {e}"),
             }
         }));
     }

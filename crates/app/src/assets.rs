@@ -12,8 +12,8 @@ macro_rules! icons {
 }
 
 /// The app icon (original; see assets/icon): notifications, `--install-desktop`.
-pub const APP_ICON_SVG: &[u8] = include_bytes!("../assets/icon/agent-ide.svg");
-pub const APP_ICON_PNG: &[u8] = include_bytes!("../assets/icon/agent-ide-256.png");
+pub const APP_ICON_SVG: &[u8] = include_bytes!("../assets/icon/dirigent.svg");
+pub const APP_ICON_PNG: &[u8] = include_bytes!("../assets/icon/dirigent-256.png");
 
 static ICONS: &[(&str, &[u8])] = icons![
     "chevron-right", "chevron-down", "plus", "x", "minus", "square", "copy", "panel-left-close", "panel-left-open",

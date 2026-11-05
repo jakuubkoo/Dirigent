@@ -1,5 +1,5 @@
-//! `agent-ide-hook <socket> <tab> hook|status`, run by Claude Code for every hook event and statusLine refresh;
-//! `agent-ide-hook <socket> <tab> argv <claude args...>`, run by the `claude` shim right before it execs claude.
+//! `dirigent-hook <socket> <tab> hook|status`, run by Claude Code for every hook event and statusLine refresh;
+//! `dirigent-hook <socket> <tab> argv <claude args...>`, run by the `claude` shim right before it execs claude.
 //!
 //! Fire-and-forget: forwards a small datagram to the app on a non-blocking socket. If the app isn't running the
 //! send fails instantly and is ignored. Always exits 0 so Claude Code is never slowed down or broken.
@@ -11,7 +11,7 @@ use std::process::{Command, Stdio};
 use hook::{Kind, Msg, parse};
 
 /// Set for a user statusLine we run, so a user statusLine that points back at us can't recurse.
-const NESTED: &str = "AGENT_IDE_HOOK_NESTED";
+const NESTED: &str = "DIRIGENT_HOOK_NESTED";
 
 fn main() {
     let args: Vec<String> = std::env::args().collect();

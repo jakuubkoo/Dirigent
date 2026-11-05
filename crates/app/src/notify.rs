@@ -128,7 +128,7 @@ fn run(rx: mpsc::Receiver<Cmd>, icon: String, clicks: async_channel::Sender<Clic
     }
     let conn = match zbus::blocking::Connection::session() {
         Ok(c) => c,
-        Err(e) => return eprintln!("agent-ide: desktop notifications off (no session bus: {e})"),
+        Err(e) => return eprintln!("dirigent: desktop notifications off (no session bus: {e})"),
     };
     let ids = Arc::new(Mutex::new(Ids::default()));
     let (conn2, ids2) = (conn.clone(), ids.clone());
@@ -141,7 +141,7 @@ fn run(rx: mpsc::Receiver<Cmd>, icon: String, clicks: async_channel::Sender<Clic
                     Ok(id) => {
                         ids.lock().unwrap().by_tab.insert(n.tab, id);
                     }
-                    Err(e) => return eprintln!("agent-ide: desktop notifications off ({e})"),
+                    Err(e) => return eprintln!("dirigent: desktop notifications off ({e})"),
                 }
             }
             Cmd::Close(tab) => {
@@ -157,7 +157,7 @@ fn run(rx: mpsc::Receiver<Cmd>, icon: String, clicks: async_channel::Sender<Clic
 fn notify(conn: &zbus::blocking::Connection, icon: &str, replaces: u32, n: &Notice) -> zbus::Result<u32> {
     use zbus::zvariant::Value;
     let mut hints: HashMap<&str, Value> = HashMap::new();
-    hints.insert("desktop-entry", Value::from("agent-ide"));
+    hints.insert("desktop-entry", Value::from("dirigent"));
     hints.insert("urgency", Value::from(if n.urgent { 1u8 } else { 0u8 }));
     if n.sound {
         hints.insert("sound-name", Value::from("message-new-instant"));
@@ -172,7 +172,7 @@ fn notify(conn: &zbus::blocking::Connection, icon: &str, replaces: u32, n: &Noti
         PATH,
         Some(DEST),
         "Notify",
-        &("agent-ide", replaces, icon, n.title.as_str(), body.as_str(), &actions[..], hints, -1i32),
+        &("Dirigent", replaces, icon, n.title.as_str(), body.as_str(), &actions[..], hints, -1i32),
     )?;
     reply.body().deserialize::<u32>()
 }
@@ -218,7 +218,7 @@ fn listen(conn: zbus::blocking::Connection, ids: Arc<Mutex<Ids>>, clicks: async_
 
 /// Brings the window to the front. On Wayland a token from the notification daemon (your click) lets Mutter
 /// raise and focus it; gpui's own `activate_window` asks for a token without an input serial, which Mutter
-/// refuses for an unfocused window ("agent-ide is ready"). gpui has no API for a foreign token, so the token goes
+/// refuses for an unfocused window ("Dirigent is ready"). gpui has no API for a foreign token, so the token goes
 /// out over gpui's own `wl_display`. X11, or no token: `activate_window`.
 pub fn raise(window: &gpui::Window, token: Option<&str>) {
     #[cfg(target_os = "linux")]
@@ -314,7 +314,7 @@ mod tests {
     fn no_daemon_is_silent() {
         // SAFETY of set_var: this test binary doesn't read the variable elsewhere concurrently that matters; the
         // notifier thread reads it once at connect.
-        unsafe { std::env::set_var("DBUS_SESSION_BUS_ADDRESS", "unix:path=/nonexistent/agent-ide-test") };
+        unsafe { std::env::set_var("DBUS_SESSION_BUS_ADDRESS", "unix:path=/nonexistent/dirigent-test") };
         let (n, clicks) = start(PathBuf::from("/nonexistent.svg"));
         let t = std::time::Instant::now();
         for tab in 0..3 {

@@ -1,4 +1,4 @@
-//! Message format between `agent-ide-hook` (run by Claude Code) and the app: one small JSON datagram per call.
+//! Message format between `dirigent-hook` (run by Claude Code) and the app: one small JSON datagram per call.
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;

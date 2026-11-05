@@ -43,10 +43,10 @@ pub enum Discovery {
     GitMissing,
 }
 
-/// `AGENT_IDE_PERF=2`: logs watcher setup, git status timings and ignored event batches.
+/// `DIRIGENT_PERF=2`: logs watcher setup, git status timings and ignored event batches.
 fn perf(what: impl FnOnce() -> String) {
     static VERBOSE: std::sync::LazyLock<bool> =
-        std::sync::LazyLock::new(|| std::env::var("AGENT_IDE_PERF").is_ok_and(|v| v == "2"));
+        std::sync::LazyLock::new(|| std::env::var("DIRIGENT_PERF").is_ok_and(|v| v == "2"));
     if *VERBOSE {
         eprintln!("[perf] {}", what());
     }
@@ -447,7 +447,7 @@ mod tests {
 
     #[test]
     fn untracked_line_counts() {
-        let d = std::env::temp_dir().join(format!("agent-ide-git-count-{}", std::process::id()));
+        let d = std::env::temp_dir().join(format!("dirigent-git-count-{}", std::process::id()));
         std::fs::create_dir_all(&d).unwrap();
         let w = |name: &str, body: &[u8]| {
             std::fs::write(d.join(name), body).unwrap();

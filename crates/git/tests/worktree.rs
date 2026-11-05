@@ -23,7 +23,7 @@ fn sh(dir: &Path, args: &[&str]) -> String {
 
 /// `<tmp>/<name>/main` (a repo on `main` with two commits) and `<tmp>/<name>/wt` for worktrees.
 fn setup(name: &str) -> (PathBuf, PathBuf) {
-    let base = Path::new(env!("CARGO_TARGET_TMPDIR")).join(format!("agent-ide-worktree-{}-{name}", std::process::id()));
+    let base = Path::new(env!("CARGO_TARGET_TMPDIR")).join(format!("dirigent-worktree-{}-{name}", std::process::id()));
     let _ = std::fs::remove_dir_all(&base);
     let main = base.join("main");
     std::fs::create_dir_all(&main).unwrap();

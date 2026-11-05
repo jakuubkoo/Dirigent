@@ -64,7 +64,7 @@ impl Repos {
                 self.tracker.add_repo(&repo.root, watcher.received());
                 self.map.insert(repo.root.clone(), Entry { repo, watcher, tabs: 1 });
             }
-            Err(e) => eprintln!("agent-ide: can't watch {}: {e}", repo.root.display()),
+            Err(e) => eprintln!("dirigent: can't watch {}: {e}", repo.root.display()),
         }
     }
 
@@ -1289,7 +1289,7 @@ mod tests {
     }
 
     fn repo(name: &str) -> git::Repo {
-        let d = std::env::temp_dir().join(format!("agent-ide-repos-{}-{name}", std::process::id()));
+        let d = std::env::temp_dir().join(format!("dirigent-repos-{}-{name}", std::process::id()));
         let _ = std::fs::remove_dir_all(&d);
         std::fs::create_dir_all(&d).unwrap();
         assert!(std::process::Command::new("git").args(["init", "-q"]).current_dir(&d).status().unwrap().success());

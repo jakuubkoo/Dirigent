@@ -1,13 +1,13 @@
-//! `AGENT_IDE_PERF=1`: once per second of activity prints terminal paints, root renders, PTY resizes and the
+//! `DIRIGENT_PERF=1`: once per second of activity prints terminal paints, root renders, PTY resizes and the
 //! average terminal render time; also every session switch's action → first paint latency. No-op when unset.
 
 use std::cell::Cell;
 use std::sync::LazyLock;
 use std::time::Instant;
 
-static ENABLED: LazyLock<bool> = LazyLock::new(|| std::env::var_os("AGENT_IDE_PERF").is_some());
-/// `AGENT_IDE_PERF=2` also logs every single event.
-static VERBOSE: LazyLock<bool> = LazyLock::new(|| std::env::var("AGENT_IDE_PERF").is_ok_and(|v| v == "2"));
+static ENABLED: LazyLock<bool> = LazyLock::new(|| std::env::var_os("DIRIGENT_PERF").is_some());
+/// `DIRIGENT_PERF=2` also logs every single event.
+static VERBOSE: LazyLock<bool> = LazyLock::new(|| std::env::var("DIRIGENT_PERF").is_ok_and(|v| v == "2"));
 static START: LazyLock<Instant> = LazyLock::new(Instant::now);
 
 fn verbose(what: &str) {

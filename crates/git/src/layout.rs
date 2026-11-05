@@ -593,7 +593,7 @@ mod tests {
 
     /// `git diff --no-index` of two texts, parsed like the app does.
     fn raw_diff(name: &str, before: &str, after: &str) -> Diff {
-        let d = std::env::temp_dir().join(format!("agent-ide-layout-{}-{name}", std::process::id()));
+        let d = std::env::temp_dir().join(format!("dirigent-layout-{}-{name}", std::process::id()));
         let _ = std::fs::remove_dir_all(&d);
         std::fs::create_dir_all(&d).unwrap();
         std::fs::write(d.join("a"), before).unwrap();

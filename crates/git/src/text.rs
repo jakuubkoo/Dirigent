@@ -125,7 +125,7 @@ mod tests {
 
     #[test]
     fn preview_caps() {
-        let d = std::env::temp_dir().join(format!("agent-ide-text-{}", std::process::id()));
+        let d = std::env::temp_dir().join(format!("dirigent-text-{}", std::process::id()));
         std::fs::create_dir_all(&d).unwrap();
         let w = |name: &str, body: &[u8]| {
             std::fs::write(d.join(name), body).unwrap();

@@ -581,7 +581,7 @@ mod tests {
     #[test]
     fn real_watcher() {
         use std::process::Command;
-        let d = std::env::temp_dir().join(format!("agent-ide-changes-{}", std::process::id()));
+        let d = std::env::temp_dir().join(format!("dirigent-changes-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&d);
         std::fs::create_dir_all(&d).unwrap();
         let git = |args: &[&str]| {

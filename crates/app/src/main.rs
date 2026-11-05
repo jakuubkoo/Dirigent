@@ -35,21 +35,22 @@ use std::path::PathBuf;
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
     if matches!(args.first().map(String::as_str), Some("--version" | "-V")) {
-        // `AGENT_IDE_BUILD` ("<hash> <date>") is set by scripts/install.sh.
-        println!("agent-ide {} ({})", env!("CARGO_PKG_VERSION"), option_env!("AGENT_IDE_BUILD").unwrap_or("dev build"));
+        // `DIRIGENT_BUILD` ("<hash> <date>") is set by scripts/install.sh.
+        println!("Dirigent {} ({})", env!("CARGO_PKG_VERSION"), option_env!("DIRIGENT_BUILD").unwrap_or("dev build"));
         return;
     }
     if let Some(flag @ ("--install-desktop" | "--uninstall-desktop")) = args.first().map(String::as_str) {
         if let Err(e) = desktop_entry(flag == "--install-desktop") {
-            eprintln!("agent-ide: {e}");
+            eprintln!("dirigent: {e}");
             std::process::exit(1);
         }
         return;
     }
     let fail = |code, msg: String| -> ! {
-        eprintln!("agent-ide: {msg}");
+        eprintln!("dirigent: {msg}");
         std::process::exit(code)
     };
+    persist::migrate_old_state();
     let cmd = cli::parse(&args).unwrap_or_else(|e| fail(2, format!("{e}\n\n{}", cli::USAGE)));
     if cmd.help {
         print!("{}", cli::USAGE);
@@ -65,7 +66,7 @@ fn main() {
     let cwd = std::env::current_dir().unwrap_or_else(|e| fail(1, format!("no current directory: {e}")));
     let req = cli::request(&cmd, &cwd, token).unwrap_or_else(|e| fail(1, e));
     let state_path = persist::path();
-    let override_state = std::env::var_os("AGENT_IDE_STATE").map(PathBuf::from);
+    let override_state = std::env::var_os("DIRIGENT_STATE").map(PathBuf::from);
     let sock = cli::socket_path(&agent::runtime_parent(), override_state.as_deref());
     // Already running: hand it the request and leave.
     let send = |req: &cli::Request| match cli::send(&sock, req) {
@@ -85,7 +86,7 @@ fn main() {
             None
         }
         Err(e) => {
-            eprintln!("agent-ide: no single-instance socket ({}): {e}", sock.display());
+            eprintln!("dirigent: no single-instance socket ({}): {e}", sock.display());
             None
         }
     };
@@ -94,13 +95,13 @@ fn main() {
     // The only synchronous file IO: a small file, read before any window exists.
     let state_path = persist::path();
     let saved = persist::load(&state_path);
-    let translucent = blur::decide(std::env::var("AGENT_IDE_BLUR").ok().as_deref(), blur::wayland_globals);
+    let translucent = blur::decide(std::env::var("DIRIGENT_BLUR").ok().as_deref(), blur::wayland_globals);
     let t = theme::get();
     let rgb8 = |c: gpui::Rgba| [(c.r * 255.).round() as u8, (c.g * 255.).round() as u8, (c.b * 255.).round() as u8];
     session::set_reported_colors(rgb8(t.terminal.fg), rgb8(t.terminal.bg));
     gpui_platform::application().with_assets(assets::Assets).run(move |cx: &mut App| {
         if let Err(e) = cx.text_system().add_fonts(assets::fonts()) {
-            eprintln!("agent-ide: bundled fonts failed to load: {e}");
+            eprintln!("dirigent: bundled fonts failed to load: {e}");
         }
         let ctx = Some("Workspace");
         cx.bind_keys([
@@ -149,8 +150,8 @@ fn main() {
                 } else {
                     WindowBackgroundAppearance::Opaque
                 },
-                app_id: Some("agent-ide".into()),
-                // X11 only; on Wayland the dock takes the icon from agent-ide.desktop (`--install-desktop`).
+                app_id: Some("dirigent".into()),
+                // X11 only; on Wayland the dock takes the icon from dirigent.desktop (`--install-desktop`).
                 icon: image::load_from_memory(assets::APP_ICON_PNG).ok().map(|i| std::sync::Arc::new(i.into_rgba8())),
                 ..Default::default()
             },
@@ -163,13 +164,13 @@ fn main() {
 }
 
 /// Re-runs this binary detached (own process group: Ctrl+C or closing the terminal don't reach it), stdout/stderr
-/// appended to `agent-ide.log` next to the state file (moved to `.log.old` past 1 MB), then exits.
+/// appended to `dirigent.log` next to the state file (moved to `.log.old` past 1 MB), then exits.
 fn detach(state_path: &std::path::Path) -> ! {
     use std::os::unix::process::CommandExt;
     let dir = state_path.parent().unwrap_or(std::path::Path::new("."));
-    let log = dir.join("agent-ide.log");
+    let log = dir.join("dirigent.log");
     if std::fs::metadata(&log).is_ok_and(|m| m.len() > 1 << 20) {
-        let _ = std::fs::rename(&log, dir.join("agent-ide.log.old"));
+        let _ = std::fs::rename(&log, dir.join("dirigent.log.old"));
     }
     let out = std::fs::create_dir_all(dir).and_then(|_| std::fs::OpenOptions::new().create(true).append(true).open(&log));
     let started = out.and_then(|out| {
@@ -184,13 +185,13 @@ fn detach(state_path: &std::path::Path) -> ! {
     match started {
         Ok(_) => std::process::exit(0),
         Err(e) => {
-            eprintln!("agent-ide: couldn't start in the background: {e}");
+            eprintln!("dirigent: couldn't start in the background: {e}");
             std::process::exit(1)
         }
     }
 }
 
-/// `--install-desktop`: `~/.local/share/applications/agent-ide.desktop` (launching this binary) and the icon, so
+/// `--install-desktop`: `~/.local/share/applications/dirigent.desktop` (launching this binary) and the icon, so
 /// GNOME names notifications and shows the dock icon; `--uninstall-desktop` removes both. Nothing else ever writes
 /// to your home directory.
 fn desktop_entry(install: bool) -> std::io::Result<()> {
@@ -199,8 +200,8 @@ fn desktop_entry(install: bool) -> std::io::Result<()> {
         .map(std::path::PathBuf::from)
         .or_else(|| std::env::var_os("HOME").map(|h| std::path::PathBuf::from(h).join(".local/share")))
         .ok_or_else(|| std::io::Error::other("no HOME"))?;
-    let entry = data.join("applications/agent-ide.desktop");
-    let icon = data.join("icons/hicolor/scalable/apps/agent-ide.svg");
+    let entry = data.join("applications/dirigent.desktop");
+    let icon = data.join("icons/hicolor/scalable/apps/dirigent.svg");
     if !install {
         for p in [&entry, &icon] {
             match std::fs::remove_file(p) {
@@ -213,8 +214,8 @@ fn desktop_entry(install: bool) -> std::io::Result<()> {
     }
     let exe = std::env::current_exe()?;
     let body = format!(
-        "[Desktop Entry]\nType=Application\nName=agent-ide\nComment=Many Claude Code sessions in one window\n\
-         Exec=\"{}\"\nIcon=agent-ide\nTerminal=false\nCategories=Development;\nStartupWMClass=agent-ide\n",
+        "[Desktop Entry]\nType=Application\nName=Dirigent\nComment=Many Claude Code sessions in one window\n\
+         Exec=\"{}\"\nIcon=dirigent\nTerminal=false\nCategories=Development;\nStartupWMClass=dirigent\n",
         exe.display()
     );
     for (path, bytes) in [(&entry, body.as_bytes()), (&icon, assets::APP_ICON_SVG)] {

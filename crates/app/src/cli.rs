@@ -1,5 +1,5 @@
-//! `agent-ide [--new] [--claude] [PATH]`: argument parsing, path resolution and the single-instance socket. A
-//! running app listens on `$XDG_RUNTIME_DIR/agent-ide.sock`; a new process sends it one JSON line (the request) and
+//! `dirigent [--new] [--claude] [PATH]`: argument parsing, path resolution and the single-instance socket. A
+//! running app listens on `$XDG_RUNTIME_DIR/dirigent.sock`; a new process sends it one JSON line (the request) and
 //! exits on the `ok` reply. No socket or a stale one (crashed instance) → the new process becomes the app. No gpui.
 
 use std::io::{BufRead, BufReader, ErrorKind, Read, Write};
@@ -10,14 +10,14 @@ use std::time::Duration;
 use serde::{Deserialize, Serialize};
 
 pub const USAGE: &str = "\
-Usage: agent-ide [--new] [--claude] [PATH]
+Usage: dirigent [--new] [--claude] [PATH]
 
 Opens a session in PATH (a directory, or a file's directory with the file shown in the preview) in the running
-agent-ide, or starts it. Without PATH it just starts or focuses the app.
+dirigent, or starts it. Without PATH it just starts or focuses the app.
 
 Options:
   --new             a new session even if one is already in that directory
-  --claude          start claude in the session (with agent-ide's hooks)
+  --claude          start claude in the session (with dirigent's hooks)
   -V, --version     print the version
   -h, --help        print this help
   --install-desktop / --uninstall-desktop
@@ -107,16 +107,16 @@ fn normalize(p: &Path) -> PathBuf {
     out
 }
 
-/// The socket: one per state file, so test runs (`AGENT_IDE_STATE`) never reach your real app.
+/// The socket: one per state file, so test runs (`DIRIGENT_STATE`) never reach your real app.
 pub fn socket_path(runtime: &Path, state_override: Option<&Path>) -> PathBuf {
     match state_override {
-        None => runtime.join("agent-ide.sock"),
+        None => runtime.join("dirigent.sock"),
         Some(state) => {
             // FNV-1a: stable across Rust versions (an old running app and a new client agree).
             let h = state.as_os_str().as_encoded_bytes().iter().fold(0xcbf29ce484222325u64, |h, &b| {
                 (h ^ b as u64).wrapping_mul(0x100000001b3)
             });
-            runtime.join(format!("agent-ide.{h:016x}.sock"))
+            runtime.join(format!("dirigent.{h:016x}.sock"))
         }
     }
 }
@@ -140,7 +140,7 @@ pub fn send(sock: &Path, req: &Request) -> Result<Sent, String> {
         Err(e) if e.kind() == ErrorKind::ConnectionRefused => {
             // Left by an instance that crashed (or was killed): nobody accepts on it.
             std::fs::remove_file(sock).map_err(|e| format!("can't remove stale socket {}: {e}", sock.display()))?;
-            eprintln!("agent-ide: removed a stale socket from a crashed instance ({})", sock.display());
+            eprintln!("dirigent: removed a stale socket from a crashed instance ({})", sock.display());
             return Ok(Sent::NotRunning);
         }
         Err(e) => return Err(format!("{}: {e}", sock.display())),
@@ -148,18 +148,18 @@ pub fn send(sock: &Path, req: &Request) -> Result<Sent, String> {
     let mut line = serde_json::to_string(req).map_err(|e| e.to_string())?;
     line.push('\n');
     s.set_read_timeout(Some(REPLY_TIMEOUT)).map_err(|e| e.to_string())?;
-    s.write_all(line.as_bytes()).map_err(|e| format!("sending to the running agent-ide: {e}"))?;
+    s.write_all(line.as_bytes()).map_err(|e| format!("sending to the running dirigent: {e}"))?;
     let mut reply = String::new();
     match BufReader::new(s).read_line(&mut reply) {
         Ok(_) => {}
         Err(e) if matches!(e.kind(), ErrorKind::WouldBlock | ErrorKind::TimedOut) => {
-            return Err("the running agent-ide didn't answer within 5 s".into());
+            return Err("the running dirigent didn't answer within 5 s".into());
         }
         Err(e) => return Err(format!("reading the reply: {e}")),
     }
     match reply.trim_end() {
         "ok" => Ok(Sent::Done),
-        r => Err(r.strip_prefix("error: ").unwrap_or(if r.is_empty() { "the running agent-ide closed the connection" } else { r }).to_string()),
+        r => Err(r.strip_prefix("error: ").unwrap_or(if r.is_empty() { "the running dirigent closed the connection" } else { r }).to_string()),
     }
 }
 
@@ -203,7 +203,7 @@ pub fn serve(listener: UnixListener) -> async_channel::Receiver<Incoming> {
         }
     });
     if let Err(e) = spawned {
-        eprintln!("agent-ide: no cli listener: {e}");
+        eprintln!("dirigent: no cli listener: {e}");
     }
     rx
 }
@@ -295,7 +295,7 @@ mod tests {
     #[test]
     fn test_runs_get_their_own_socket() {
         let rt = Path::new("/run/user/1000");
-        assert_eq!(socket_path(rt, None), rt.join("agent-ide.sock"));
+        assert_eq!(socket_path(rt, None), rt.join("dirigent.sock"));
         let a = socket_path(rt, Some(Path::new("/tmp/a/state.json")));
         assert_ne!(a, socket_path(rt, None));
         assert_ne!(a, socket_path(rt, Some(Path::new("/tmp/b/state.json"))));

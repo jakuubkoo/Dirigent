@@ -5,7 +5,7 @@ edition.workspace = true
 license.workspace = true
 
 [[bin]]
-name = "agent-ide-hook"
+name = "dirigent-hook"
 path = "src/main.rs"
 
 [dependencies]

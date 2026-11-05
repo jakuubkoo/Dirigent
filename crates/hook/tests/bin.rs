@@ -11,7 +11,7 @@ fn fixture(name: &str) -> String {
 }
 
 fn tmpdir(name: &str) -> PathBuf {
-    let d = std::env::temp_dir().join(format!("agent-ide-hook-test-{}-{name}", std::process::id()));
+    let d = std::env::temp_dir().join(format!("dirigent-hook-test-{}-{name}", std::process::id()));
     let _ = std::fs::remove_dir_all(&d);
     std::fs::create_dir_all(&d).unwrap();
     d
@@ -19,7 +19,7 @@ fn tmpdir(name: &str) -> PathBuf {
 
 fn run(socket: &Path, mode: &str, stdin: &str, home: &Path) -> (Output, Duration) {
     let started = Instant::now();
-    let mut child = Command::new(env!("CARGO_BIN_EXE_agent-ide-hook"))
+    let mut child = Command::new(env!("CARGO_BIN_EXE_dirigent-hook"))
         .args([socket.to_str().unwrap(), "7", mode])
         .env("HOME", home)
         .stdin(Stdio::piped())
@@ -84,7 +84,7 @@ fn argv_mode_never_reads_stdin() {
     let app = UnixDatagram::bind(&sock_path).unwrap();
     app.set_read_timeout(Some(Duration::from_secs(2))).unwrap();
     // stdin stays open and empty (like the user's terminal): reading it would hang forever.
-    let mut child = Command::new(env!("CARGO_BIN_EXE_agent-ide-hook"))
+    let mut child = Command::new(env!("CARGO_BIN_EXE_dirigent-hook"))
         .args([sock_path.to_str().unwrap(), "7", "argv", "--model", "haiku", "fix it"])
         .stdin(Stdio::piped())
         .spawn()

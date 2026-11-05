@@ -9,11 +9,11 @@ use git::layout::{Layout, StructSide};
 use syntax::structural::{self, Fail};
 use syntax::{Highlighted, Lang, Plain};
 
-/// `AGENT_IDE_SYNTAX=off`: no syntax highlighting and no structural diff (escape hatch, and the plain baseline for
+/// `DIRIGENT_SYNTAX=off`: no syntax highlighting and no structural diff (escape hatch, and the plain baseline for
 /// perf runs).
 pub fn syntax_off() -> bool {
     static OFF: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *OFF.get_or_init(|| std::env::var("AGENT_IDE_SYNTAX").is_ok_and(|v| v == "off"))
+    *OFF.get_or_init(|| std::env::var("DIRIGENT_SYNTAX").is_ok_and(|v| v == "off"))
 }
 
 /// Both versions of the diffed file and their highlights (trees included), kept for the structural pass.
@@ -106,7 +106,7 @@ mod tests {
     #[test]
     fn diff_colors_come_from_head_and_worktree() {
         use std::process::Command;
-        let d = std::env::temp_dir().join(format!("agent-ide-color-diff-{}", std::process::id()));
+        let d = std::env::temp_dir().join(format!("dirigent-color-diff-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&d);
         std::fs::create_dir_all(&d).unwrap();
         let git = |args: &[&str]| {
@@ -153,7 +153,7 @@ mod tests {
 
     /// The structural layout of `git diff --no-index` between two Rust texts.
     fn structural_of(name: &str, old: &str, new: &str) -> Layout {
-        let d = std::env::temp_dir().join(format!("agent-ide-structural-{}-{name}", std::process::id()));
+        let d = std::env::temp_dir().join(format!("dirigent-structural-{}-{name}", std::process::id()));
         std::fs::create_dir_all(&d).unwrap();
         std::fs::write(d.join("a"), old).unwrap();
         std::fs::write(d.join("b"), new).unwrap();
@@ -202,7 +202,7 @@ mod tests {
             if l.lines[a as usize].kind == LineKind::Del && l.lines[b as usize].kind == LineKind::Add)));
     }
 
-    // ---- Fixture set: real commits, structural vs word (`cargo test --release -p agent-ide diff_fixtures --
+    // ---- Fixture set: real commits, structural vs word (`cargo test --release -p dirigent diff_fixtures --
     // --ignored --nocapture`). Zed (GPL) commits are only referenced: their blobs are read from a local clone at
     // run time (`ZED_GIT_DIR`, default the cargo git checkout's database) and nothing of them is stored here.
 
@@ -438,7 +438,7 @@ mod tests {
         println!("\nexpectation met: word {ok_w}/{n}, structural {ok_s}/{n}", n = FIXTURES.len());
     }
 
-    /// Timing (release): `STRUCT_BENCH=<file> cargo test --release -p agent-ide struct_bench -- --ignored
+    /// Timing (release): `STRUCT_BENCH=<file> cargo test --release -p dirigent struct_bench -- --ignored
     /// --nocapture`. Renames `self.` → `this.` on 1 / 50 / 500 evenly spaced lines and times the passes.
     #[test]
     #[ignore]
@@ -456,7 +456,7 @@ mod tests {
                 .enumerate()
                 .map(|(i, l)| if pick.contains(&i) { l.replacen("self.", "this.", 1) } else { l.to_string() })
                 .collect();
-            let d = std::env::temp_dir().join(format!("agent-ide-struct-bench-{}", std::process::id()));
+            let d = std::env::temp_dir().join(format!("dirigent-struct-bench-{}", std::process::id()));
             std::fs::create_dir_all(&d).unwrap();
             std::fs::write(d.join("a"), &old).unwrap();
             std::fs::write(d.join("b"), &new).unwrap();

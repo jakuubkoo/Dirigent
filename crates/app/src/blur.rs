@@ -5,7 +5,7 @@
 
 const BLUR_GLOBALS: [&str; 2] = ["ext_background_effect_manager_v1", "org_kde_kwin_blur_manager"];
 
-/// `AGENT_IDE_BLUR=force|off` overrides; otherwise blur iff one of the protocols is advertised.
+/// `DIRIGENT_BLUR=force|off` overrides; otherwise blur iff one of the protocols is advertised.
 pub fn decide(env: Option<&str>, globals: impl FnOnce() -> Vec<String>) -> bool {
     match env {
         Some("force") => true,
