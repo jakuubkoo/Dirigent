@@ -44,7 +44,9 @@ impl Render for Workspace {
                 .into_any_element(),
         };
 
+        // Settings belongs to no session: the title says so instead of the active one.
         let mut title = match self.tabs.get(self.active) {
+            _ if self.settings_open() => "Settings — Dirigent".to_string(),
             Some(tab) => format!("{} — Dirigent", tab.name),
             None => "Dirigent".to_string(),
         };
@@ -188,7 +190,8 @@ impl Render for Workspace {
                             .min_w_0()
                             .h_full()
                             .bg(t.bg.base)
-                            .child(self.session_header())
+                            // Diff and preview belong to the session; Settings fills the main area from the top.
+                            .when(!self.settings_open(), |d| d.child(self.session_header()))
                             .child(div().flex_1().min_h_0().overflow_hidden().child(main)),
                     )
                     .children(right),
@@ -344,7 +347,10 @@ impl Workspace {
                 )
                 .into_any_element()
         };
-        let name = self.tabs.get(self.active).map(|t| t.name.clone()).unwrap_or_default();
+        let name = match self.tabs.get(self.active) {
+            _ if self.settings_open() => "Settings".to_string(),
+            tab => tab.map(|t| t.name.clone()).unwrap_or_default(),
+        };
         div()
             .id("title-bar")
             .flex()
@@ -502,7 +508,8 @@ impl Workspace {
         let tab = &self.tabs[i];
         let session = tab.view.as_ref().map(|v| v.read(cx).session.clone());
         let (unread, exited) = session.as_ref().map_or((false, false), |s| (s.is_unread(), s.is_exited()));
-        let active = i == self.active;
+        // While Settings is open no session is shown, so none is marked active; a click closes Settings.
+        let active = i == self.active && !self.settings_open();
         let agent = if exited { agent::Agent::default() } else { self.agent(i) };
         let needs_you = agent.state == agent::State::NeedsYou;
         if let Some(Modal::Rename { tab: r, edit }) = &self.modal
