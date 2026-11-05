@@ -2,11 +2,11 @@
 //! close-a-worktree dialog (keep / remove, with what would be lost) and the project's Worktrees list. Every git call
 //! runs off the UI thread (`git::write`); the dialogs only show its results.
 
-use gpui::{AnyElement, ClickEvent, FontWeight, SharedString, div, px};
+use gpui::{AnyElement, ClickEvent, FontWeight, SharedString, div};
 
 use super::*;
 use crate::projects;
-use crate::theme::{self, MONO_FONT, radius, space, text_size};
+use crate::theme::{z, self, MONO_FONT, radius, space, text_size};
 use crate::ui::{self, icon};
 use git::write::{Worktree, WorktreeState};
 
@@ -468,16 +468,16 @@ impl Workspace {
 
     pub(super) fn setup_view(&self, s: &Setup, cx: &mut Context<Self>) -> AnyElement {
         let t = theme::get();
-        let label = |text: &'static str| div().flex_none().w(px(96.)).pt(px(space::SM)).text_size(px(text_size::SM)).text_color(t.text.muted).child(text);
+        let label = |text: &'static str| div().flex_none().w(z(96.)).pt(z(space::SM)).text_size(z(text_size::SM)).text_color(t.text.muted).child(text);
         let err_for = |f: Field| s.error.as_ref().filter(|(ef, _)| *ef == Some(f)).map(|(_, m)| m.clone());
         let row = |f: Field, name: &'static str, control: AnyElement| {
             div()
                 .id(SharedString::from(format!("setup-{f:?}")))
                 .flex()
-                .gap(px(space::MD))
+                .gap(z(space::MD))
                 .child(label(name))
-                .child(div().flex_1().min_w_0().flex().flex_col().gap(px(space::XS)).child(control).children(err_for(f).map(|e| {
-                    div().text_size(px(text_size::XS)).text_color(t.state.error).child(e)
+                .child(div().flex_1().min_w_0().flex().flex_col().gap(z(space::XS)).child(control).children(err_for(f).map(|e| {
+                    div().text_size(z(text_size::XS)).text_color(t.state.error).child(e)
                 })))
                 .on_click(cx.listener(move |w, _: &ClickEvent, _, cx| {
                     if let Some(Modal::Setup(s)) = &mut w.modal {
@@ -492,10 +492,10 @@ impl Workspace {
         let pill = |id: &'static str, text: &'static str, on: bool, enabled: bool| {
             div()
                 .id(id)
-                .px(px(space::MD))
-                .py(px(space::XS))
-                .rounded(px(radius::MD))
-                .text_size(px(text_size::SM))
+                .px(z(space::MD))
+                .py(z(space::XS))
+                .rounded(z(radius::MD))
+                .text_size(z(text_size::SM))
                 .when(on, |d| d.bg(t.accent).text_color(t.text.on_accent))
                 .when(!on, |d| d.border_1().border_color(t.border.strong).text_color(if enabled { t.text.primary } else { t.text.faint }))
                 .when(enabled, |d| d.cursor_pointer())
@@ -504,9 +504,9 @@ impl Workspace {
         let mode = div()
             .flex()
             .items_center()
-            .gap(px(space::SM))
-            .p(px(2.))
-            .rounded(px(radius::MD))
+            .gap(z(space::SM))
+            .p(z(2.))
+            .rounded(z(radius::MD))
             .when(s.focus == Field::Mode, |d| d.border_1().border_color(t.accent))
             .child(pill("mode-shared", "Shared directory", !s.worktree, true).on_click(cx.listener(|w, _: &ClickEvent, _, cx| {
                 if let Some(Modal::Setup(s)) = &mut w.modal {
@@ -524,7 +524,7 @@ impl Workspace {
                     cx.notify();
                 }
             })))
-            .child(div().text_size(px(text_size::XS)).text_color(t.text.dim).child(match &s.branches {
+            .child(div().text_size(z(text_size::XS)).text_color(t.text.dim).child(match &s.branches {
                 None => "checking git…",
                 Some(_) if !is_repo => "not a git repo: shared only",
                 Some(_) if s.worktree => "own branch and directory",
@@ -535,19 +535,19 @@ impl Workspace {
             rows.push(row(Field::Branch, "Branch", text_input(&s.branch, s.focus == Field::Branch, "new branch name")).into_any_element());
             let bases = s.bases();
             let current = s.branches.as_ref().map(|(c, _)| c.clone()).unwrap_or_default();
-            let list = div().flex().flex_col().max_h(px(150.)).overflow_hidden().children(bases.iter().take(6).enumerate().map(|(i, b)| {
+            let list = div().flex().flex_col().max_h(z(150.)).overflow_hidden().children(bases.iter().take(6).enumerate().map(|(i, b)| {
                 let sel = i == s.base_sel;
                 div()
                     .id(("base", i))
                     .flex()
                     .items_center()
-                    .gap(px(space::SM))
-                    .px(px(space::SM))
-                    .py(px(2.))
-                    .rounded(px(radius::SM))
+                    .gap(z(space::SM))
+                    .px(z(space::SM))
+                    .py(z(2.))
+                    .rounded(z(radius::SM))
                     .cursor_pointer()
                     .font_family(MONO_FONT)
-                    .text_size(px(text_size::XS))
+                    .text_size(z(text_size::XS))
                     .when(sel, |d| d.bg(t.bg.selected_focus))
                     .hover(|d| d.bg(t.bg.hover))
                     .child(ui::icon(icon::BRANCH, 11., t.text.dim))
@@ -561,26 +561,26 @@ impl Workspace {
                         }
                     }))
             }));
-            let base = div().flex().flex_col().gap(px(space::XS)).child(text_input(&s.base, s.focus == Field::Base, "filter branches")).child(list);
+            let base = div().flex().flex_col().gap(z(space::XS)).child(text_input(&s.base, s.focus == Field::Base, "filter branches")).child(list);
             rows.push(row(Field::Base, "Base", base.into_any_element()).into_any_element());
             let loc = s.location_path();
             let inside = projects::inside_repo(&s.project, &loc);
-            let location = div().flex().flex_col().gap(px(space::XS)).child(text_input(&s.location, s.focus == Field::Location, "directory")).when(inside, |d| {
-                d.child(div().text_size(px(text_size::XS)).text_color(t.state.needs_you).child("Inside the repo: the main checkout will watch and list it too. A sibling directory is better."))
+            let location = div().flex().flex_col().gap(z(space::XS)).child(text_input(&s.location, s.focus == Field::Location, "directory")).when(inside, |d| {
+                d.child(div().text_size(z(text_size::XS)).text_color(t.state.needs_you).child("Inside the repo: the main checkout will watch and list it too. A sibling directory is better."))
             });
             rows.push(row(Field::Location, "Location", location.into_any_element()).into_any_element());
         }
         let check = div()
             .flex()
             .items_center()
-            .gap(px(space::SM))
-            .p(px(2.))
-            .text_size(px(text_size::SM))
+            .gap(z(space::SM))
+            .p(z(2.))
+            .text_size(z(text_size::SM))
             // No ring like the inputs: keyboard focus only brightens the label.
             .text_color(if s.focus == Field::Claude { t.text.primary } else { t.text.muted })
-            .child(div().size(px(12.)).rounded(px(3.)).border_1().border_color(if s.claude { t.accent } else { t.border.strong }).when(s.claude, |d| d.bg(t.accent)))
+            .child(div().size(z(12.)).rounded(z(3.)).border_1().border_color(if s.claude { t.accent } else { t.border.strong }).when(s.claude, |d| d.bg(t.accent)))
             .child("Start claude")
-            .child(div().text_size(px(text_size::XS)).text_color(t.text.dim).child(if s.worktree { "after the project's setup command, if any" } else { "" }));
+            .child(div().text_size(z(text_size::XS)).text_color(t.text.dim).child(if s.worktree { "after the project's setup command, if any" } else { "" }));
         rows.push(
             row(Field::Claude, "Claude", check.into_any_element())
                 .on_click(cx.listener(|w, _: &ClickEvent, _, cx| {
@@ -597,12 +597,12 @@ impl Workspace {
         }
         let general = s.error.as_ref().filter(|(f, _)| f.is_none()).map(|(_, m)| m.clone());
         div()
-            .w(px(640.))
-            .p(px(space::XL))
+            .w(z(640.))
+            .p(z(space::XL))
             .flex()
             .flex_col()
-            .gap(px(space::MD))
-            .rounded(px(radius::LG))
+            .gap(z(space::MD))
+            .rounded(z(radius::LG))
             .bg(t.bg.elevated)
             .border_1()
             .border_color(t.border.strong)
@@ -610,14 +610,14 @@ impl Workspace {
                 div()
                     .flex()
                     .items_center()
-                    .gap(px(space::SM))
+                    .gap(z(space::SM))
                     .child(ui::icon(icon::PLUS, 15., t.accent))
                     .child(div().font_weight(FontWeight::SEMIBOLD).child("New session"))
-                    .child(div().min_w_0().truncate().text_size(px(text_size::SM)).text_color(t.text.dim).child(tilde(&s.project))),
+                    .child(div().min_w_0().truncate().text_size(z(text_size::SM)).text_color(t.text.dim).child(tilde(&s.project))),
             )
             .children(rows)
-            .children(general.map(|e| div().text_size(px(text_size::SM)).text_color(t.state.error).child(e)))
-            .child(div().text_size(px(text_size::XS)).text_color(t.text.dim).child(if s.busy {
+            .children(general.map(|e| div().text_size(z(text_size::SM)).text_color(t.state.error).child(e)))
+            .child(div().text_size(z(text_size::XS)).text_color(t.text.dim).child(if s.busy {
                 "Creating worktree…"
             } else {
                 "Tab / ↑↓ next field · Space toggles · Enter create · Esc cancel"
@@ -632,10 +632,10 @@ impl Workspace {
                 .id(id)
                 .flex()
                 .items_center()
-                .gap(px(space::SM))
+                .gap(z(space::SM))
                 .cursor_pointer()
-                .text_size(px(text_size::SM))
-                .child(div().flex_none().size(px(12.)).rounded(px(3.)).border_1().border_color(if on { t.accent } else { t.border.strong }).when(on, |d| d.bg(t.accent)))
+                .text_size(z(text_size::SM))
+                .child(div().flex_none().size(z(12.)).rounded(z(3.)).border_1().border_color(if on { t.accent } else { t.border.strong }).when(on, |d| d.bg(t.accent)))
                 .child(text)
         };
         let state_line = match &c.state {
@@ -654,10 +654,10 @@ impl Workspace {
         let button = |id: &'static str, label: &'static str, kind: u8, enabled: bool| {
             div()
                 .id(id)
-                .px(px(space::MD))
-                .py(px(space::XS))
-                .rounded(px(radius::MD))
-                .text_size(px(text_size::SM))
+                .px(z(space::MD))
+                .py(z(space::XS))
+                .rounded(z(radius::MD))
+                .text_size(z(text_size::SM))
                 .when(kind == 0, |d| d.border_1().border_color(t.border.strong).text_color(t.text.primary))
                 .when(kind == 1, |d| d.bg(t.accent).text_color(t.text.on_accent))
                 .when(kind == 2 && enabled, |d| d.bg(t.state.error).text_color(t.text.on_accent))
@@ -667,12 +667,12 @@ impl Workspace {
                 .child(label)
         };
         div()
-            .w(px(560.))
-            .p(px(space::XL))
+            .w(z(560.))
+            .p(z(space::XL))
             .flex()
             .flex_col()
-            .gap(px(space::MD))
-            .rounded(px(radius::LG))
+            .gap(z(space::MD))
+            .rounded(z(radius::LG))
             .bg(t.bg.elevated)
             .border_1()
             .border_color(t.border.strong)
@@ -680,12 +680,12 @@ impl Workspace {
                 div()
                     .flex()
                     .items_center()
-                    .gap(px(space::SM))
+                    .gap(z(space::SM))
                     .child(ui::icon(icon::BRANCH, 15., t.accent))
                     .child(div().font_weight(FontWeight::SEMIBOLD).child(if c.tab.is_some() { "Close the last session in this worktree" } else { "Remove worktree" })),
             )
-            .child(div().font_family(MONO_FONT).text_size(px(text_size::SM)).text_color(t.text.muted).child(format!("{}{}", tilde(&c.path), c.branch.as_ref().map(|b| format!("  ({b})")).unwrap_or_default())))
-            .child(div().text_size(px(text_size::SM)).text_color(if c.at_risk() { t.state.needs_you } else { t.text.muted }).child(state_line))
+            .child(div().font_family(MONO_FONT).text_size(z(text_size::SM)).text_color(t.text.muted).child(format!("{}{}", tilde(&c.path), c.branch.as_ref().map(|b| format!("  ({b})")).unwrap_or_default())))
+            .child(div().text_size(z(text_size::SM)).text_color(if c.at_risk() { t.state.needs_you } else { t.text.muted }).child(state_line))
             .when(c.at_risk(), |d| {
                 d.child(checkbox("wt-understand", c.understand, "I understand: remove it anyway (git worktree remove --force)".into()).on_click(cx.listener(|w, _: &ClickEvent, _, cx| {
                     if let Some(Modal::CloseWorktree(c)) = &mut w.modal {
@@ -702,43 +702,43 @@ impl Workspace {
                     }
                 }))
             }))
-            .children(c.error.clone().map(|e| div().text_size(px(text_size::SM)).text_color(t.state.error).child(e)))
+            .children(c.error.clone().map(|e| div().text_size(z(text_size::SM)).text_color(t.state.error).child(e)))
             .child(
                 div()
                     .flex()
                     .justify_end()
-                    .gap(px(space::SM))
+                    .gap(z(space::SM))
                     .child(button("wt-cancel", "Cancel", 0, !c.busy).on_click(cx.listener(|w, _: &ClickEvent, window, cx| w.close_modal(window, cx))))
                     .when(c.tab.is_some(), |d| {
                         d.child(button("wt-keep", "Keep worktree", 1, !c.busy).on_click(cx.listener(|w, _: &ClickEvent, window, cx| w.close_wt_keep(window, cx))))
                     })
                     .child(button("wt-remove", if c.busy { "Removing…" } else { "Remove worktree" }, 2, can_remove).on_click(cx.listener(|w, _: &ClickEvent, window, cx| w.close_wt_remove(window, cx)))),
             )
-            .child(div().text_size(px(text_size::XS)).text_color(t.text.dim).child(if c.tab.is_some() { "Enter keep · Delete remove · Esc cancel (the session stays)" } else { "Delete remove · Esc cancel" }))
+            .child(div().text_size(z(text_size::XS)).text_color(t.text.dim).child(if c.tab.is_some() { "Enter keep · Delete remove · Esc cancel (the session stays)" } else { "Delete remove · Esc cancel" }))
             .into_any_element()
     }
 
     pub(super) fn worktrees_view(&self, l: &WtList, cx: &mut Context<Self>) -> AnyElement {
         let t = theme::get();
         let rows: Vec<AnyElement> = match &l.list {
-            None => vec![div().text_size(px(text_size::SM)).text_color(t.text.dim).child("Listing…").into_any_element()],
-            Some(Err(e)) => vec![div().text_size(px(text_size::SM)).text_color(t.state.error).child(e.clone()).into_any_element()],
+            None => vec![div().text_size(z(text_size::SM)).text_color(t.text.dim).child("Listing…").into_any_element()],
+            Some(Err(e)) => vec![div().text_size(z(text_size::SM)).text_color(t.state.error).child(e.clone()).into_any_element()],
             Some(Ok(list)) => list
                 .iter()
                 .enumerate()
                 .map(|(i, w)| {
                     let sessions = self.tabs.iter().filter(|t| t.repo == TabRepo::Repo(w.path.clone())).count();
                     let small = |id: &'static str, label: &'static str| {
-                        div().id((id, i)).px(px(space::SM)).py(px(2.)).rounded(px(radius::SM)).border_1().border_color(t.border.strong).cursor_pointer().hover(|s| s.bg(t.bg.hover)).text_size(px(text_size::XS)).child(label)
+                        div().id((id, i)).px(z(space::SM)).py(z(2.)).rounded(z(radius::SM)).border_1().border_color(t.border.strong).cursor_pointer().hover(|s| s.bg(t.bg.hover)).text_size(z(text_size::XS)).child(label)
                     };
                     div()
                         .id(("wt", i))
                         .flex()
                         .items_center()
-                        .gap(px(space::MD))
-                        .px(px(space::MD))
-                        .py(px(space::SM))
-                        .rounded(px(radius::MD))
+                        .gap(z(space::MD))
+                        .px(z(space::MD))
+                        .py(z(space::SM))
+                        .rounded(z(radius::MD))
                         .when(i == l.sel, |d| d.bg(t.bg.selected_focus))
                         .child(ui::icon(icon::BRANCH, 13., if w.main { t.accent } else { t.text.dim }))
                         .child(
@@ -747,13 +747,13 @@ impl Workspace {
                                 .min_w_0()
                                 .flex()
                                 .flex_col()
-                                .child(div().truncate().text_size(px(text_size::SM)).child(w.branch.clone().unwrap_or_else(|| format!("detached {}", w.head.get(..7).unwrap_or(&w.head)))))
-                                .child(div().truncate().font_family(MONO_FONT).text_size(px(text_size::XS)).text_color(t.text.dim).child(tilde(&w.path))),
+                                .child(div().truncate().text_size(z(text_size::SM)).child(w.branch.clone().unwrap_or_else(|| format!("detached {}", w.head.get(..7).unwrap_or(&w.head)))))
+                                .child(div().truncate().font_family(MONO_FONT).text_size(z(text_size::XS)).text_color(t.text.dim).child(tilde(&w.path))),
                         )
-                        .when(w.main, |d| d.child(div().text_size(px(text_size::XS)).text_color(t.text.dim).child("main checkout")))
-                        .when(w.prunable, |d| d.child(div().text_size(px(text_size::XS)).text_color(t.state.needs_you).child("directory gone")))
-                        .when(w.locked, |d| d.child(div().text_size(px(text_size::XS)).text_color(t.text.dim).child("locked")))
-                        .when(sessions > 0, |d| d.child(div().text_size(px(text_size::XS)).text_color(t.text.muted).child(format!("{sessions} open"))))
+                        .when(w.main, |d| d.child(div().text_size(z(text_size::XS)).text_color(t.text.dim).child("main checkout")))
+                        .when(w.prunable, |d| d.child(div().text_size(z(text_size::XS)).text_color(t.state.needs_you).child("directory gone")))
+                        .when(w.locked, |d| d.child(div().text_size(z(text_size::XS)).text_color(t.text.dim).child("locked")))
+                        .when(sessions > 0, |d| d.child(div().text_size(z(text_size::XS)).text_color(t.text.muted).child(format!("{sessions} open"))))
                         .when(!w.prunable, |d| d.child(small("wt-open", "Open").on_click(cx.listener(move |w, _: &ClickEvent, window, cx| w.worktree_open(i, window, cx)))))
                         .when(!w.main && !w.prunable && sessions == 0, |d| {
                             d.child(small("wt-rm", "Remove…").on_click(cx.listener(move |w, _: &ClickEvent, window, cx| w.worktree_remove_ask(i, window, cx))))
@@ -770,13 +770,13 @@ impl Workspace {
         };
         let prunable = l.list.as_ref().and_then(|r| r.as_ref().ok()).map_or(0, |v| v.iter().filter(|w| w.prunable).count());
         div()
-            .w(px(680.))
-            .max_h(px(560.))
-            .p(px(space::XL))
+            .w(z(680.))
+            .max_h(z(560.))
+            .p(z(space::XL))
             .flex()
             .flex_col()
-            .gap(px(space::MD))
-            .rounded(px(radius::LG))
+            .gap(z(space::MD))
+            .rounded(z(radius::LG))
             .bg(t.bg.elevated)
             .border_1()
             .border_color(t.border.strong)
@@ -784,24 +784,24 @@ impl Workspace {
                 div()
                     .flex()
                     .items_center()
-                    .gap(px(space::SM))
+                    .gap(z(space::SM))
                     .child(ui::icon(icon::BRANCH, 15., t.accent))
                     .child(div().font_weight(FontWeight::SEMIBOLD).child("Worktrees"))
-                    .child(div().min_w_0().truncate().text_size(px(text_size::SM)).text_color(t.text.dim).child(tilde(&l.main))),
+                    .child(div().min_w_0().truncate().text_size(z(text_size::SM)).text_color(t.text.dim).child(tilde(&l.main))),
             )
-            .child(div().id("wt-list").flex().flex_col().gap(px(2.)).overflow_y_scroll().children(rows))
+            .child(div().id("wt-list").flex().flex_col().gap(z(2.)).overflow_y_scroll().children(rows))
             .when(prunable > 0, |d| {
                 d.child(
                     div()
                         .id("wt-prune")
                         .cursor_pointer()
-                        .text_size(px(text_size::SM))
+                        .text_size(z(text_size::SM))
                         .text_color(t.accent)
                         .child(if l.busy { "Pruning…".to_string() } else { format!("Prune {prunable} stale entr{} (directory already gone)", if prunable == 1 { "y" } else { "ies" }) })
                         .on_click(cx.listener(|w, _: &ClickEvent, _, cx| w.worktrees_prune(cx))),
                 )
             })
-            .child(div().text_size(px(text_size::XS)).text_color(t.text.dim).child("↑↓ select · Enter open a session · Delete remove… · Esc close"))
+            .child(div().text_size(z(text_size::XS)).text_color(t.text.dim).child("↑↓ select · Enter open a session · Delete remove… · Esc close"))
             .into_any_element()
     }
 }

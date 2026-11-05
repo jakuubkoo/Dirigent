@@ -71,6 +71,8 @@ pub struct Settings {
     /// Answer claude's "trust this folder?" dialog with Yes in sessions we start claude in.
     pub trust_auto_accept: bool,
     pub plus_opens: PlusOpens,
+    /// The whole UI in percent (Ctrl+= / Ctrl+- / Ctrl+0); multiplies every size, the terminal font included.
+    pub ui_zoom: u32,
     pub font_size: f32,
     pub scrollback: usize,
     pub notifications: Notifications,
@@ -81,12 +83,32 @@ pub struct Settings {
 
 pub const FONT_SIZE: (f32, f32) = (8., 32.);
 pub const SCROLLBACK: (usize, usize) = (0, 100_000);
+pub const UI_ZOOM: (u32, u32) = (50, 200);
+/// Ctrl+= / Ctrl+- step, percent.
+pub const ZOOM_STEP: u32 = 10;
+
+impl Settings {
+    /// Ctrl+= (Some(1)), Ctrl+- (Some(-1)), Ctrl+0 (None): the next UI zoom.
+    pub fn zoom_step(self, dir: Option<i32>) -> u32 {
+        match dir {
+            None => Settings::default().ui_zoom,
+            Some(d) => {
+                // Snap to the step grid first (a hand-typed 115 goes to 120 / 110).
+                let cur = self.ui_zoom as i32;
+                let st = ZOOM_STEP as i32;
+                let snapped = if d > 0 { (cur / st + 1) * st } else { (cur + st - 1) / st * st - st };
+                (snapped.max(0) as u32).clamp(UI_ZOOM.0, UI_ZOOM.1)
+            }
+        }
+    }
+}
 
 impl Default for Settings {
     fn default() -> Self {
         Self {
             trust_auto_accept: true,
             plus_opens: PlusOpens::Project,
+            ui_zoom: 100,
             font_size: crate::theme::TERMINAL_FONT_SIZE,
             scrollback: 10_000,
             notifications: Notifications::default(),
@@ -99,7 +121,7 @@ impl Default for Settings {
 
 /// Every key: (section, key). Anything else in the file gets an "unknown" note.
 const KEYS: &[(&str, &[&str])] = &[
-    ("general", &["trust_auto_accept", "plus_opens"]),
+    ("general", &["trust_auto_accept", "plus_opens", "ui_zoom"]),
     ("terminal", &["font_size", "scrollback"]),
     ("notifications", &["needs_you", "done", "sound"]),
     ("diff", &["mode", "split_style", "engine"]),
@@ -111,7 +133,7 @@ impl Settings {
     pub fn to_json(self) -> String {
         let all = |s: Settings| {
             json!({
-                "general": { "trust_auto_accept": s.trust_auto_accept, "plus_opens": s.plus_opens },
+                "general": { "trust_auto_accept": s.trust_auto_accept, "plus_opens": s.plus_opens, "ui_zoom": s.ui_zoom },
                 "terminal": { "font_size": s.font_size, "scrollback": s.scrollback },
                 "notifications": {
                     "needs_you": s.notifications.needs_you,
@@ -164,6 +186,9 @@ pub fn parse(text: &str, fallback: &Settings) -> Parsed {
     let s = Settings {
         trust_auto_accept: g.get("general", "trust_auto_accept", d.trust_auto_accept, "true or false", |_| true),
         plus_opens: g.get("general", "plus_opens", d.plus_opens, "\"project\", \"shell\" or \"claude\"", |_| true),
+        ui_zoom: g.get("general", "ui_zoom", d.ui_zoom, "a whole number 50–200 (percent)", |n: &u32| {
+            (UI_ZOOM.0..=UI_ZOOM.1).contains(n)
+        }),
         font_size: g.get("terminal", "font_size", d.font_size, "a number 8–32", |n: &f32| {
             (FONT_SIZE.0..=FONT_SIZE.1).contains(n)
         }),
@@ -352,6 +377,7 @@ mod tests {
         let s = Settings {
             trust_auto_accept: false,
             plus_opens: PlusOpens::Claude,
+            ui_zoom: 130,
             font_size: 15.,
             scrollback: 500,
             notifications: Notifications { needs_you: false, done: true, sound: true },
@@ -368,6 +394,20 @@ mod tests {
         // A reset (back to the default) drops the key, so a later default change applies again.
         let back = Settings { scrollback: d_scroll(), ..Settings::default() }.to_json();
         assert_eq!(back, "{}\n");
+    }
+
+    #[test]
+    fn zoom_steps_snap_and_clamp() {
+        let at = |z| Settings { ui_zoom: z, ..Settings::default() };
+        assert_eq!(at(100).zoom_step(Some(1)), 110);
+        assert_eq!(at(100).zoom_step(Some(-1)), 90);
+        assert_eq!(at(115).zoom_step(Some(1)), 120);
+        assert_eq!(at(115).zoom_step(Some(-1)), 110);
+        assert_eq!(at(200).zoom_step(Some(1)), 200);
+        assert_eq!(at(50).zoom_step(Some(-1)), 50);
+        assert_eq!(at(170).zoom_step(None), 100);
+        assert_eq!(parse(r#"{"general":{"ui_zoom":300}}"#, &at(100)).settings.ui_zoom, 100, "out of range: default");
+        assert_eq!(parse(r#"{"general":{"ui_zoom":150}}"#, &at(100)).settings.ui_zoom, 150);
     }
 
     fn d_scroll() -> usize {

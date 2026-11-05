@@ -30,12 +30,12 @@ shortcuts![
     ("ctrl-shift-e", ShowFiles, "Show Files"),
     ("ctrl-shift-d", ToggleDiffMode, "Unified / split diff"),
     ("ctrl-,", OpenSettings, "Settings"),
-    // Zoom = the terminal font size setting. Bindings are matched before any view's key handler, so the terminal
-    // (and claude in it) never sees these keys.
-    ("ctrl-=", ZoomIn, "Zoom in (terminal font size)"),
-    ("ctrl-+", ZoomIn, "Zoom in"),
-    ("ctrl--", ZoomOut, "Zoom out"),
-    ("ctrl-0", ZoomReset, "Reset zoom"),
+    // UI zoom (the whole window, terminal font included). Bindings are matched before any view's key handler, so
+    // the terminal (and claude in it) never sees these keys.
+    ("ctrl-=", ZoomIn, "Zoom in (whole UI)"),
+    ("ctrl-+", ZoomIn, "Zoom in (whole UI)"),
+    ("ctrl--", ZoomOut, "Zoom out (whole UI)"),
+    ("ctrl-0", ZoomReset, "Reset zoom to 100 %"),
     ("ctrl-1", Activate1, ""),
     ("ctrl-2", Activate2, ""),
     ("ctrl-3", Activate3, ""),

@@ -27,8 +27,7 @@ mod window_chrome;
 mod workspace;
 
 use gpui::{
-    App, Bounds, WindowBackgroundAppearance, WindowBounds, WindowDecorations, WindowOptions, point, prelude::*,
-    px, size,
+    App, Bounds, WindowBackgroundAppearance, WindowBounds, WindowDecorations, WindowOptions, point, prelude::*, px, size,
 };
 use workspace::*;
 
@@ -113,14 +112,14 @@ fn main() {
         // Wayland doesn't let clients place windows: only size + maximized/fullscreen take effect there.
         let window_bounds = match saved.window {
             Some(w) => {
-                let b = Bounds { origin: point(px(w.x), px(w.y)), size: size(px(w.w.max(400.)), px(w.h.max(300.))) };
+                let b = Bounds { origin: point(px(w.x), px(w.y)), size: size(px(w.w.max(400.)), px(w.h.max(300.))) }; // unscaled: the compositor's window size
                 match w.mode {
                     persist::WindowMode::Windowed => WindowBounds::Windowed(b),
                     persist::WindowMode::Maximized => WindowBounds::Maximized(b),
                     persist::WindowMode::Fullscreen => WindowBounds::Fullscreen(b),
                 }
             }
-            None => WindowBounds::Windowed(Bounds::centered(None, size(px(1200.), px(750.)), cx)),
+            None => WindowBounds::Windowed(Bounds::centered(None, size(px(1200.), px(750.)), cx)), // unscaled: window size
         };
         cx.open_window(
             WindowOptions {

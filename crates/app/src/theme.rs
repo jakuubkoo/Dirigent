@@ -1,7 +1,9 @@
 //! Design tokens. Every color, radius, font and fixed size in the UI comes from here; nothing else in `src/` may
 //! contain a color literal (a test checks). A light theme later is just another `Theme` static.
 
-use gpui::Rgba;
+use std::sync::atomic::{AtomicU32, Ordering};
+
+use gpui::{Pixels, Rgba, px};
 
 /// `0xRRGGBB`.
 pub const fn hex(v: u32) -> Rgba {
@@ -255,6 +257,23 @@ pub fn git_kind(kind: char) -> Rgba {
     }
 }
 
+/// The UI zoom (Settings → General, Ctrl+= / Ctrl+- / Ctrl+0) as f32 bits; set only by `Workspace::apply_settings`.
+static ZOOM: AtomicU32 = AtomicU32::new(1.0f32.to_bits());
+
+pub fn zoom() -> f32 {
+    f32::from_bits(ZOOM.load(Ordering::Relaxed))
+}
+
+pub fn set_zoom(factor: f32) {
+    ZOOM.store(factor.to_bits(), Ordering::Relaxed);
+}
+
+/// Every UI size goes through here: `v` px at 100 %, scaled by the UI zoom. A raw `px(..)` outside this file
+/// fails `no_unscaled_sizes_outside_theme` unless its line says `// unscaled: <why>`.
+pub fn z(v: f32) -> Pixels {
+    px(v * zoom())
+}
+
 pub const UI_FONT: &str = "Inter";
 pub const MONO_FONT: &str = "JetBrains Mono";
 pub const TERMINAL_FONT_SIZE: f32 = 13.5;
@@ -337,5 +356,44 @@ mod tests {
             }
         }
         assert!(offenders.is_empty(), "color literals outside theme.rs:\n{}", offenders.join("\n"));
+    }
+
+    /// Sizes scale with the UI zoom: a `px(..)` call (not the `.px(..)` padding method) outside this file must go
+    /// through `z(..)` or say why it is exempt (`// unscaled: …`, e.g. math on values that are already scaled).
+    #[test]
+    fn no_unscaled_sizes_outside_theme() {
+        fn files(dir: &std::path::Path, out: &mut Vec<std::path::PathBuf>) {
+            for e in std::fs::read_dir(dir).unwrap().flatten() {
+                let p = e.path();
+                if p.is_dir() {
+                    files(&p, out);
+                } else if p.extension().is_some_and(|x| x == "rs") && p.file_name().unwrap() != "theme.rs" {
+                    out.push(p);
+                }
+            }
+        }
+        let mut paths = Vec::new();
+        files(&std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src"), &mut paths);
+        let mut offenders = Vec::new();
+        for path in paths {
+            for (i, line) in std::fs::read_to_string(&path).unwrap().lines().enumerate() {
+                let code = line.split("//").next().unwrap_or("");
+                let raw = code.match_indices("px(").any(|(p, _)| {
+                    !code[..p].chars().next_back().is_some_and(|c| c.is_alphanumeric() || c == '_' || c == '.')
+                });
+                if raw && !line.contains("// unscaled") {
+                    offenders.push(format!("{}:{}: {}", path.display(), i + 1, line.trim()));
+                }
+            }
+        }
+        assert!(offenders.is_empty(), "unscaled px(..) outside theme.rs (use theme::z):\n{}", offenders.join("\n"));
+    }
+
+    #[test]
+    fn z_scales_with_the_zoom() {
+        assert_eq!(z(10.), px(10.));
+        set_zoom(1.5);
+        assert_eq!(z(10.), px(15.));
+        set_zoom(1.);
     }
 }

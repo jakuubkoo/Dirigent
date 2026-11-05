@@ -1,5 +1,6 @@
 //! Root view: session list, sidebar, the active terminal (cached view), modal, resize policy.
 
+use crate::theme::z;
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -7,8 +8,8 @@ use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
 use gpui::{
-    Context, Entity, EntityId, FocusHandle, Focusable, KeyDownEvent, Pixels, Render, Task, Window, actions, div,
-    prelude::*, px,
+    Context, Entity, EntityId, FocusHandle, Focusable, KeyDownEvent, Render, Task, Window, actions, div,
+    prelude::*,
 };
 use session::{Session, Size};
 
@@ -157,7 +158,8 @@ pub struct Workspace {
     next_id: usize,
     metrics: Metrics,
     focus: FocusHandle,
-    sidebar_width: Pixels,
+    /// Width at 100 % zoom (drawn ×zoom, so the sidebar scales with everything else).
+    sidebar_width: f32,
     sidebar_open: bool,
     dragging: bool,
     flush_resize: bool,
@@ -198,8 +200,10 @@ pub struct Workspace {
     _settings_save: Option<Task<()>>,
     _settings_watch: Option<::notify::RecommendedWatcher>,
     _settings_task: Option<Task<()>>,
-    /// The font size changed: metrics are rebuilt at the next render (needs the window).
+    /// The font size or UI zoom changed: metrics are rebuilt at the next render (needs the window).
     metrics_stale: bool,
+    /// The UI zoom just changed: the status bar shows it until this timer ends.
+    pub(crate) zoom_flash: Option<Task<()>>,
     _click_task: Option<Task<()>>,
     /// `dirigent <path>` requests from other processes.
     _cli_task: Option<Task<()>>,
@@ -222,7 +226,8 @@ pub struct Workspace {
     repos_seen: HashMap<PathBuf, usize>,
     git_panel: Entity<GitPanel>,
     git_open: bool,
-    git_width: Pixels,
+    /// Width at 100 % zoom, like `sidebar_width`.
+    git_width: f32,
     overlay: Option<Overlay>,
     _overlay_task: Option<Task<()>>,
     /// Bumped per overlay read: a stale read sees it changed (a `git diff` is killed) and is dropped.
@@ -269,6 +274,8 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
+        crate::theme::set_zoom(loaded.parsed.settings.ui_zoom as f32 / 100.);
+        window.set_rem_size(gpui::px(16. * crate::theme::zoom())); // unscaled: this is the scaling
         let metrics = Metrics::new(window, loaded.parsed.settings.font_size);
         let last_dir = saved
             .last_dir
@@ -302,7 +309,7 @@ impl Workspace {
             active: 0,
             next_id: 1,
             focus: cx.focus_handle(),
-            sidebar_width: px(saved.sidebar.width.clamp(MIN_SIDEBAR, 2000.)),
+            sidebar_width: saved.sidebar.width.clamp(MIN_SIDEBAR, 2000.),
             sidebar_open: saved.sidebar.open,
             dragging: false,
             flush_resize: false,
@@ -334,6 +341,7 @@ impl Workspace {
             _settings_watch: None,
             _settings_task: None,
             metrics_stale: false,
+            zoom_flash: None,
             _click_task: None,
             _cli_task: None,
             projects: crate::projects::Projects(saved.projects.clone().unwrap_or_default()),
@@ -351,7 +359,7 @@ impl Workspace {
             repos_seen: HashMap::new(),
             git_panel,
             git_open: saved.git_panel.open,
-            git_width: px(saved.git_panel.width.clamp(git_panel::MIN_WIDTH, 2000.)),
+            git_width: saved.git_panel.width.clamp(git_panel::MIN_WIDTH, 2000.),
             overlay: None,
             _overlay_task: None,
             overlay_gen: Arc::new(AtomicU64::new(0)),
@@ -716,14 +724,14 @@ impl Workspace {
     /// Terminal grid size for the current window and sidebar width.
     fn grid_size(&self, window: &Window) -> Size {
         let vp = window.viewport_size();
-        let side = if self.sidebar_open { self.sidebar_width + px(DIVIDER) } else { px(COLLAPSED) };
-        let right = if self.git_open { self.git_width + px(DIVIDER) } else { px(0.) };
+        let side = if self.sidebar_open { z(self.sidebar_width + DIVIDER) } else { z(COLLAPSED) };
+        let right = if self.git_open { z(self.git_width + DIVIDER) } else { z(0.) };
         let m = &self.metrics;
         let chrome = Chrome::of(window);
-        let w = vp.width - side - right - px(PADDING) - chrome.horizontal();
+        let w = vp.width - side - right - z(PADDING) - chrome.horizontal();
         // Slim session header above the terminal and the status bar below everything.
-        let bars = px(crate::theme::height::HEADER + crate::theme::height::STATUS_BAR);
-        let h = vp.height - px(PADDING) - chrome.vertical() - bars;
+        let bars = z(crate::theme::height::HEADER + crate::theme::height::STATUS_BAR);
+        let h = vp.height - z(PADDING) - chrome.vertical() - bars;
         Size {
             cols: (w / m.cell_width).floor().max(2.) as u16,
             rows: (h / m.line_height).floor().max(1.) as u16,
@@ -1393,12 +1401,12 @@ impl Workspace {
                 })
                 .collect(),
             active: self.active.min(self.tabs.len().saturating_sub(1)),
-            sidebar: persist::SidebarState { width: f32::from(self.sidebar_width), open: self.sidebar_open },
+            sidebar: persist::SidebarState { width: self.sidebar_width, open: self.sidebar_open },
             window: self.window_state,
             last_dir: Some(self.last_dir.clone()),
             collapsed_groups: self.collapsed.iter().cloned().collect(),
             git_panel: persist::PanelState {
-                width: f32::from(self.git_width),
+                width: self.git_width,
                 open: self.git_open,
                 tab: self.panel_tab,
                 show_ignored: self.show_ignored,
@@ -1699,7 +1707,7 @@ impl Workspace {
             Some(Overlay::Diff(d)) => Some(d.read(cx).file.path.clone()),
             _ => None,
         };
-        let narrow = self.git_width < px(git_panel::LEGEND_WIDTH);
+        let narrow = self.git_width < git_panel::LEGEND_WIDTH;
         self.git_panel.update(cx, |p, cx| p.set(view, selected, narrow, cx));
         self.sync_files(false, cx);
     }
@@ -1779,8 +1787,19 @@ impl Workspace {
     /// Makes `new` the live settings, touching only what changed.
     fn apply_settings(&mut self, new: Settings, cx: &mut Context<Self>) {
         let old = std::mem::replace(&mut self.settings, new);
-        if old.font_size != new.font_size {
+        if old.font_size != new.font_size || old.ui_zoom != new.ui_zoom {
             self.metrics_stale = true; // rebuilt in render (needs the window)
+        }
+        if old.ui_zoom != new.ui_zoom {
+            crate::theme::set_zoom(new.ui_zoom as f32 / 100.);
+            // Shown in the status bar for a moment; a new step replaces the timer.
+            self.zoom_flash = Some(cx.spawn(async move |this, cx| {
+                cx.background_executor().timer(Duration::from_millis(1500)).await;
+                let _ = this.update(cx, |w, cx| {
+                    w.zoom_flash = None;
+                    cx.notify();
+                });
+            }));
         }
         if old.scrollback != new.scrollback {
             for view in self.tabs.iter().filter_map(|t| t.view.as_ref()) {
@@ -1886,12 +1905,10 @@ impl Workspace {
     }
 
     /// Ctrl+= / Ctrl++ / Ctrl+- (1 px steps, 8–32) and Ctrl+0 (default): the terminal font size setting.
-    pub(crate) fn zoom(&mut self, step: Option<f32>, cx: &mut Context<Self>) {
-        let (min, max) = settings::FONT_SIZE;
-        self.change_settings(
-            |s| s.font_size = step.map_or(Settings::default().font_size, |d| (s.font_size + d).clamp(min, max)),
-            cx,
-        );
+    /// Ctrl+= / Ctrl++ (Some(1)), Ctrl+- (Some(-1)), Ctrl+0 (None): the UI zoom, 10 % steps, 50–200 %.
+    pub(crate) fn zoom(&mut self, dir: Option<i32>, cx: &mut Context<Self>) {
+        crate::perf::event_with(|| format!("zoom {dir:?}"));
+        self.change_settings(|s| s.ui_zoom = s.zoom_step(dir), cx);
     }
 
     pub(crate) fn settings_open(&self) -> bool {
@@ -1913,6 +1930,11 @@ impl Workspace {
         if !std::mem::take(&mut self.metrics_stale) {
             return;
         }
+        // The PTYs follow in this same frame (`schedule_resize` runs right after): one layout and one resize per step,
+        // not a second one when the debounce ends.
+        self.flush_resize = true;
+        // gpui's own rem-based helpers (`.px_2()` …) follow the zoom too.
+        window.set_rem_size(gpui::px(16. * crate::theme::zoom())); // unscaled: this is the scaling
         self.metrics = Metrics::new(window, self.settings.font_size);
         let m = self.metrics.clone();
         for view in self.tabs.iter().filter_map(|t| t.view.clone()) {
@@ -1922,7 +1944,14 @@ impl Workspace {
         match &self.overlay {
             Some(Overlay::Diff(v)) => v.update(cx, |v, cx| v.set_metrics(&m, cx)),
             Some(Overlay::File(v)) => v.update(cx, |v, cx| v.set_metrics(&m, cx)),
-            _ => {}
+            Some(Overlay::Settings(v)) => v.update(cx, |_, cx| cx.notify()),
+            None => {}
+        }
+        // Cached views replay their last frame until notified: every one of them lays out again, once.
+        self.git_panel.update(cx, |_, cx| cx.notify());
+        self.files_panel.update(cx, |_, cx| cx.notify());
+        for b in self.commit_boxes.values() {
+            b.update(cx, |_, cx| cx.notify());
         }
     }
 

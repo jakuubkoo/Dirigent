@@ -3,11 +3,11 @@
 use gpui::{
     prelude::FluentBuilder as _,
     AnyElement, AnyView, App, AppContext, Context, Div, IntoElement, ParentElement, Render, Rgba, SharedString, Styled, Svg, Window,
-    div, px, svg,
+    div, svg,
 };
 
 use crate::line_edit::LineEdit;
-use crate::theme::{self, radius, space, text_size};
+use crate::theme::{z, self, radius, space, text_size};
 
 pub mod icon {
     pub const CHEVRON_RIGHT: &str = "icons/chevron-right.svg";
@@ -65,7 +65,7 @@ pub const ALL_ICONS: &[&str] = &[
 
 /// An icon at `size` px in `color` (rasterized once per path/size, recolored for free).
 pub fn icon(path: &'static str, size: f32, color: Rgba) -> Svg {
-    svg().path(path).flex_none().size(px(size)).text_color(color)
+    svg().path(path).flex_none().size(z(size)).text_color(color)
 }
 
 /// A generic icon for a file name.
@@ -96,11 +96,11 @@ impl Render for Tip {
         div()
             .px_2()
             .py_1()
-            .rounded(px(radius::LG))
+            .rounded(z(radius::LG))
             .bg(t.bg.elevated)
             .border_1()
             .border_color(t.border.strong)
-            .text_size(px(text_size::XS))
+            .text_size(z(text_size::XS))
             .text_color(t.text.primary)
             .child(self.0.clone())
     }
@@ -109,19 +109,19 @@ impl Render for Tip {
 /// A one-line text input (caret only when focused, placeholder when empty).
 pub fn text_input(edit: &LineEdit, focused: bool, placeholder: &'static str) -> AnyElement {
     let t = theme::get();
-    let caret = || div().flex_none().w(px(1.5)).h(px(15.)).bg(t.accent);
+    let caret = || div().flex_none().w(z(1.5)).h(z(15.)).bg(t.accent);
     div()
         .flex()
         .items_center()
         .min_w_0()
         .overflow_hidden()
-        .px(px(space::MD))
-        .py(px(space::XS + 2.))
-        .rounded(px(radius::MD))
+        .px(z(space::MD))
+        .py(z(space::XS + 2.))
+        .rounded(z(radius::MD))
         .bg(t.bg.input)
         .border_1()
         .border_color(if focused { t.accent } else { t.border.subtle })
-        .text_size(px(text_size::SM))
+        .text_size(z(text_size::SM))
         .when(edit.text.is_empty(), |d| d.when(focused, |d| d.child(caret())).child(div().text_color(t.text.faint).child(placeholder)))
         .when(!edit.text.is_empty(), |d| {
             d.child(div().flex_none().whitespace_nowrap().child(edit.before_cursor().to_string()))
@@ -136,8 +136,8 @@ pub fn check_box(on: bool) -> Div {
     let t = theme::get();
     div()
         .flex_none()
-        .size(px(12.))
-        .rounded(px(3.))
+        .size(z(12.))
+        .rounded(z(3.))
         .border_1()
         .border_color(if on { t.accent } else { t.border.strong })
         .when(on, |d| d.bg(t.accent))
@@ -163,8 +163,8 @@ pub fn meter(pct: f32, width: f32) -> impl IntoElement {
     let color = if pct >= 90. { m.crit } else if pct >= 70. { m.warn } else { m.ok };
     div()
         .flex_none()
-        .w(px(width))
-        .h(px(4.))
+        .w(z(width))
+        .h(z(4.))
         .rounded_full()
         .bg(m.track)
         .child(div().h_full().rounded_full().bg(color).w(gpui::relative(pct.clamp(0., 100.) / 100.)))
@@ -192,13 +192,13 @@ pub fn overlay_header() -> Div {
         .flex()
         .flex_none()
         .items_center()
-        .gap(px(crate::theme::space::MD))
-        .h(px(crate::theme::height::HEADER))
-        .px(px(crate::theme::space::LG))
+        .gap(z(crate::theme::space::MD))
+        .h(z(crate::theme::height::HEADER))
+        .px(z(crate::theme::space::LG))
         .bg(t.bg.elevated)
         .border_b_1()
         .border_color(t.border.subtle)
-        .text_size(px(text_size::SM))
+        .text_size(z(text_size::SM))
 }
 
 /// A small label chip ("staged", "untracked").
@@ -206,25 +206,25 @@ pub fn pill(text: &'static str) -> Div {
     let t = theme::get();
     div()
         .flex_none()
-        .px(px(6.))
-        .rounded(px(radius::SM))
+        .px(z(6.))
+        .rounded(z(radius::SM))
         .bg(t.bg.selected)
-        .text_size(px(text_size::XS))
+        .text_size(z(text_size::XS))
         .text_color(t.text.muted)
         .child(text)
 }
 
 /// "Esc to close" and similar right-aligned hints.
 pub fn hint(text: &'static str) -> Div {
-    div().ml_auto().flex_none().text_size(px(text_size::XS)).text_color(theme::get().text.dim).child(text)
+    div().ml_auto().flex_none().text_size(z(text_size::XS)).text_color(theme::get().text.dim).child(text)
 }
 
 /// A dimmed one-line note in an empty list or panel.
 pub fn note(text: impl Into<SharedString>) -> Div {
     div()
-        .px(px(crate::theme::space::LG))
-        .py(px(crate::theme::space::MD))
-        .text_size(px(text_size::SM))
+        .px(z(crate::theme::space::LG))
+        .py(z(crate::theme::space::MD))
+        .text_size(z(text_size::SM))
         .text_color(theme::get().text.dim)
         .child(text.into())
 }

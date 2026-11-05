@@ -3,12 +3,12 @@
 
 use gpui::{
     AnyElement, ClickEvent, FontWeight, HighlightStyle, MouseMoveEvent, Pixels, Point, SharedString, StyledText,
-    UniformListScrollHandle, anchored, deferred, div, px, uniform_list,
+    UniformListScrollHandle, anchored, deferred, div, uniform_list,
 };
 
 use super::*;
 use crate::projects;
-use crate::theme::{self, MONO_FONT, radius, space, text_size};
+use crate::theme::{z, self, MONO_FONT, radius, space, text_size};
 use crate::ui::{self, icon};
 
 pub(super) struct Picker {
@@ -353,24 +353,24 @@ impl Workspace {
         };
         let card = div()
             .occlude()
-            .min_w(px(200.))
-            .py(px(space::XS))
-            .rounded(px(radius::MD))
+            .min_w(z(200.))
+            .py(z(space::XS))
+            .rounded(z(radius::MD))
             .bg(t.bg.elevated)
             .border_1()
             .border_color(t.border.strong)
-            .text_size(px(text_size::SM))
-            .max_w(px(340.))
+            .text_size(z(text_size::SM))
+            .max_w(z(340.))
             .children(items.into_iter().map(|(action, label, hint)| {
                 div()
                     .id(action)
-                    .px(px(space::MD))
-                    .py(px(space::XS))
+                    .px(z(space::MD))
+                    .py(z(space::XS))
                     .cursor_pointer()
                     .text_color(if action == "remove" { t.state.error } else { t.text.primary })
                     .hover(|s| s.bg(t.bg.hover))
                     .child(label)
-                    .when(!hint.is_empty(), |d| d.child(div().text_size(px(text_size::XS)).text_color(t.text.dim).child(hint)))
+                    .when(!hint.is_empty(), |d| d.child(div().text_size(z(text_size::XS)).text_color(t.text.dim).child(hint)))
                     .on_click(cx.listener(move |w, _: &ClickEvent, window, cx| w.menu_action(action, window, cx)))
             }));
         Some(
@@ -390,18 +390,18 @@ impl Workspace {
     /// The picker card: search row, project/directory list, hints.
     pub(super) fn picker_view(&self, p: &Picker, window: &Window, cx: &mut Context<Self>) -> AnyElement {
         let t = theme::get();
-        let h = (window.viewport_size().height - px(160.)).min(px(560.)).max(px(240.));
+        let h = (window.viewport_size().height - z(160.)).min(z(560.)).max(z(240.));
         let path_mode = projects::is_path_query(&p.edit.text);
         let toggle = div()
             .id("picker-claude")
             .flex_none()
             .flex()
             .items_center()
-            .gap(px(space::XS))
+            .gap(z(space::XS))
             .cursor_pointer()
-            .text_size(px(text_size::XS))
+            .text_size(z(text_size::XS))
             .text_color(if p.claude { t.text.primary } else { t.text.muted })
-            .child(div().size(px(11.)).rounded(px(3.)).border_1().border_color(if p.claude { t.accent } else { t.border.strong }).when(p.claude, |d| d.bg(t.accent)))
+            .child(div().size(z(11.)).rounded(z(3.)).border_1().border_color(if p.claude { t.accent } else { t.border.strong }).when(p.claude, |d| d.bg(t.accent)))
             .child("Start claude")
             .tooltip(ui::tip("Start claude in the new session (Ctrl+Shift+C; Shift+Enter for once)"))
             .on_click(cx.listener(|w, _: &ClickEvent, _, cx| {
@@ -413,14 +413,14 @@ impl Workspace {
         let search = div()
             .flex()
             .items_center()
-            .gap(px(space::SM))
-            .px(px(space::MD))
-            .py(px(space::SM))
-            .rounded(px(radius::MD))
+            .gap(z(space::SM))
+            .px(z(space::MD))
+            .py(z(space::SM))
+            .rounded(z(radius::MD))
             .bg(t.bg.input)
             .border_1()
             .border_color(t.accent)
-            .text_size(px(text_size::MD))
+            .text_size(z(text_size::MD))
             .child(ui::icon(if path_mode { icon::FOLDER } else { icon::PLUS }, 14., t.text.dim))
             .child(
                 div()
@@ -428,9 +428,9 @@ impl Workspace {
                     .min_w_0()
                     .flex()
                     .items_center()
-                    .when(p.edit.text.is_empty(), |d| d.child(div().w(px(1.5)).h(px(16.)).bg(t.accent)).child(div().text_color(t.text.faint).child("Search projects, or type a path (/ ~ .)")))
+                    .when(p.edit.text.is_empty(), |d| d.child(div().w(z(1.5)).h(z(16.)).bg(t.accent)).child(div().text_color(t.text.faint).child("Search projects, or type a path (/ ~ .)")))
                     .when(!p.edit.text.is_empty(), |d| {
-                        d.child(p.edit.before_cursor().to_string()).child(div().w(px(1.5)).h(px(16.)).bg(t.accent)).child(p.edit.after_cursor().to_string())
+                        d.child(p.edit.before_cursor().to_string()).child(div().w(z(1.5)).h(z(16.)).bg(t.accent)).child(p.edit.after_cursor().to_string())
                     }),
             )
             .child(toggle);
@@ -446,7 +446,7 @@ impl Workspace {
         .track_scroll(&p.scroll)
         .flex_1();
         let empty = if n == 0 {
-            Some(div().p(px(space::LG)).text_size(px(text_size::SM)).text_color(t.text.dim).child(if path_mode {
+            Some(div().p(z(space::LG)).text_size(z(text_size::SM)).text_color(t.text.dim).child(if path_mode {
                 if p.edit.text.ends_with('/') { "No subdirectories. Enter opens this directory." } else { "No match. Enter opens the typed path if it is a directory." }
             } else if self.projects.0.is_empty() {
                 "No projects yet: type a path (/ ~ .) to open one."
@@ -457,22 +457,22 @@ impl Workspace {
             None
         };
         div()
-            .w(px(720.))
+            .w(z(720.))
             .h(h)
-            .p(px(space::LG))
+            .p(z(space::LG))
             .flex()
             .flex_col()
-            .gap(px(space::MD))
-            .rounded(px(radius::LG))
+            .gap(z(space::MD))
+            .rounded(z(radius::LG))
             .bg(t.bg.elevated)
             .border_1()
             .border_color(t.border.strong)
             .child(search)
             .child(div().flex_1().min_h_0().flex().flex_col().child(list).children(empty))
-            .children(p.error.clone().map(|e| div().text_size(px(text_size::SM)).text_color(t.state.error).child(e)))
+            .children(p.error.clone().map(|e| div().text_size(z(text_size::SM)).text_color(t.state.error).child(e)))
             .child(
                 div()
-                    .text_size(px(text_size::XS))
+                    .text_size(z(text_size::XS))
                     .text_color(t.text.dim)
                     .child("↑↓ select · Enter set up… · Ctrl+Enter open now · Shift+Enter now with claude · Tab complete · Esc"),
             )
@@ -488,10 +488,10 @@ fn picker_row(p: &Picker, i: usize, now: i64, cx: &mut Context<Workspace>) -> An
         .w_full()
         .flex()
         .items_center()
-        .gap(px(space::MD))
-        .h(px(40.))
-        .px(px(space::MD))
-        .rounded(px(radius::MD))
+        .gap(z(space::MD))
+        .h(z(40.))
+        .px(z(space::MD))
+        .rounded(z(radius::MD))
         .cursor_pointer()
         .when(selected, |d| d.bg(t.bg.selected_focus))
         .on_mouse_move(cx.listener(move |w, _: &MouseMoveEvent, _, cx| {
@@ -518,29 +518,29 @@ fn picker_row(p: &Picker, i: usize, now: i64, cx: &mut Context<Workspace>) -> An
                         .min_w_0()
                         .flex()
                         .flex_col()
-                        .child(div().truncate().text_size(px(text_size::MD)).text_color(t.text.primary).child(StyledText::new(SharedString::from(name.clone())).with_highlights(hl)))
-                        .child(div().truncate().text_size(px(text_size::XS)).text_color(t.text.dim).child(path.clone())),
+                        .child(div().truncate().text_size(z(text_size::MD)).text_color(t.text.primary).child(StyledText::new(SharedString::from(name.clone())).with_highlights(hl)))
+                        .child(div().truncate().text_size(z(text_size::XS)).text_color(t.text.dim).child(path.clone())),
                 )
                 .when(*auto, |d| d.child(div().flex_none().child(ui::icon(icon::GENERATE, 12., t.text.dim))))
                 .children(branch.clone().map(|b| {
                     div()
                         .flex_none()
-                        .max_w(px(180.))
+                        .max_w(z(180.))
                         .flex()
                         .items_center()
-                        .gap(px(space::XS))
-                        .text_size(px(text_size::XS))
+                        .gap(z(space::XS))
+                        .text_size(z(text_size::XS))
                         .text_color(t.text.muted)
                         .child(ui::icon(icon::BRANCH, 11., t.text.dim))
                         .child(div().truncate().font_family(MONO_FONT).child(b))
                 }))
-                .child(div().flex_none().w(px(36.)).text_size(px(text_size::XS)).text_color(t.text.dim).child(if *last_used > 0 { ui::fmt_ago(now - last_used) } else { String::new() }))
+                .child(div().flex_none().w(z(36.)).text_size(z(text_size::XS)).text_color(t.text.dim).child(if *last_used > 0 { ui::fmt_ago(now - last_used) } else { String::new() }))
                 .into_any_element()
         }
         PickRow::Dir { label, path } => row
             .child(ui::icon(icon::FOLDER, 14., t.text.dim))
-            .child(div().flex_1().min_w_0().truncate().text_size(px(text_size::MD)).text_color(t.text.primary).child(format!("{label}/")))
-            .child(div().flex_none().max_w(px(300.)).truncate().text_size(px(text_size::XS)).text_color(t.text.dim).child(tilde(path)))
+            .child(div().flex_1().min_w_0().truncate().text_size(z(text_size::MD)).text_color(t.text.primary).child(format!("{label}/")))
+            .child(div().flex_none().max_w(z(300.)).truncate().text_size(z(text_size::XS)).text_color(t.text.dim).child(tilde(path)))
             .into_any_element(),
     }
 }

@@ -9,14 +9,14 @@ use std::path::PathBuf;
 
 use gpui::{
     ClickEvent, Context, FocusHandle, Focusable, FontWeight, KeyDownEvent, MouseButton, Render, WeakEntity,
-    Window, div, prelude::*, px,
+    Window, div, prelude::*,
 };
 
 use crate::git_panel::{segment, segmented};
 use crate::line_edit::{Edit, LineEdit};
 use crate::projects::{Project, Typed};
-use crate::settings::{DiffEngine, DiffMode, FONT_SIZE, PlusOpens, SCROLLBACK, Settings, SplitStyle};
-use crate::theme::{self, height, radius, space, text_size};
+use crate::settings::{DiffEngine, DiffMode, FONT_SIZE, PlusOpens, SCROLLBACK, Settings, SplitStyle, UI_ZOOM};
+use crate::theme::{z, self, height, radius, space, text_size};
 use crate::ui::{self, icon, tip};
 use crate::workspace::{Workspace, sh_word, tilde};
 
@@ -42,6 +42,7 @@ const CATS: [(Cat, &str); 6] = [
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum Key {
     Trust,
+    Zoom,
     Plus,
     FontSize,
     Scrollback,
@@ -74,8 +75,10 @@ const ITEMS: &[Item] = &[
     Item { key: Key::Plus, cat: Cat::General, label: "Plain + opens",
         desc: "What a click on a sidebar group's + starts (Shift+click: the other claude choice). Project = its own default.",
         ctl: Ctl::Choice(&["Project default", "Shell", "Claude"]) },
+    Item { key: Key::Zoom, cat: Cat::General, label: "UI zoom (%)",
+        desc: "Scales the whole window, terminal font included (50–200). Ctrl+= / Ctrl+- step by 10, Ctrl+0 resets.", ctl: Ctl::Number },
     Item { key: Key::FontSize, cat: Cat::Terminal, label: "Font size",
-        desc: "Terminal text in px (8–32); diffs and previews use one less.", ctl: Ctl::Number },
+        desc: "Terminal text in px at 100 % zoom (8–32); diffs and previews use one less.", ctl: Ctl::Number },
     Item { key: Key::Scrollback, cat: Cat::Terminal, label: "Scrollback lines",
         desc: "History kept per session (0–100000). Lowering it drops the oldest lines right away.", ctl: Ctl::Number },
     Item { key: Key::NeedsYou, cat: Cat::Notifications, label: "A session needs you",
@@ -104,6 +107,7 @@ fn get(s: &Settings, k: Key) -> Val {
     match k {
         Key::Trust => Val::Bool(s.trust_auto_accept),
         Key::Plus => Val::Choice(match s.plus_opens { PlusOpens::Project => 0, PlusOpens::Shell => 1, PlusOpens::Claude => 2 }),
+        Key::Zoom => Val::Num(s.ui_zoom as f64),
         Key::FontSize => Val::Num(s.font_size as f64),
         Key::Scrollback => Val::Num(s.scrollback as f64),
         Key::NeedsYou => Val::Bool(n.needs_you),
@@ -119,6 +123,7 @@ fn set(s: &mut Settings, k: Key, v: Val) {
     match (k, v) {
         (Key::Trust, Val::Bool(b)) => s.trust_auto_accept = b,
         (Key::Plus, Val::Choice(i)) => s.plus_opens = [PlusOpens::Project, PlusOpens::Shell, PlusOpens::Claude][i.min(2)],
+        (Key::Zoom, Val::Num(n)) => s.ui_zoom = n as u32,
         (Key::FontSize, Val::Num(n)) => s.font_size = n as f32,
         (Key::Scrollback, Val::Num(n)) => s.scrollback = n as usize,
         (Key::NeedsYou, Val::Bool(b)) => s.notifications.needs_you = b,
@@ -146,6 +151,8 @@ fn parse_num(k: Key, text: &str) -> Result<f64, String> {
     match k {
         Key::FontSize => t.parse::<f32>().ok().filter(|n| (FONT_SIZE.0..=FONT_SIZE.1).contains(n)).map(|n| n as f64)
             .ok_or_else(|| format!("Needs a number from {} to {}", FONT_SIZE.0, FONT_SIZE.1)),
+        Key::Zoom => t.trim_end_matches('%').trim().parse::<u32>().ok().filter(|n| (UI_ZOOM.0..=UI_ZOOM.1).contains(n)).map(|n| n as f64)
+            .ok_or_else(|| format!("Needs a whole number from {} to {}", UI_ZOOM.0, UI_ZOOM.1)),
         _ => t.parse::<usize>().ok().filter(|n| (SCROLLBACK.0..=SCROLLBACK.1).contains(n)).map(|n| n as f64)
             .ok_or_else(|| format!("Needs a whole number from {} to {}", SCROLLBACK.0, SCROLLBACK.1)),
     }
@@ -293,7 +300,7 @@ impl SettingsView {
     fn focus_field(&mut self, f: Field, s: &Settings, projects: &[Project]) -> Option<Apply> {
         let apply = self.commit(s, projects);
         self.edit = match &f {
-            Field::Item(k @ (Key::FontSize | Key::Scrollback)) => {
+            Field::Item(k @ (Key::Zoom | Key::FontSize | Key::Scrollback)) => {
                 let item = ITEMS.iter().find(|i| i.key == *k)?;
                 Some(LineEdit::new(show(item, get(s, *k))))
             }
@@ -443,11 +450,11 @@ impl Render for SettingsView {
         let shown = self.shown(&projects);
 
         let header = ui::overlay_header()
-            .gap(px(space::SM))
-            .px(px(space::LG))
+            .gap(z(space::SM))
+            .px(z(space::LG))
             .child(ui::icon(icon::SETTINGS, 13., t.text.muted))
-            .child(div().text_size(px(text_size::SM)).font_weight(FontWeight::MEDIUM).child("Settings"))
-            .child(div().min_w_0().truncate().text_size(px(text_size::XS)).text_color(t.text.dim).child(tilde(&file)))
+            .child(div().text_size(z(text_size::SM)).font_weight(FontWeight::MEDIUM).child("Settings"))
+            .child(div().min_w_0().truncate().text_size(z(text_size::XS)).text_color(t.text.dim).child(tilde(&file)))
             .child(div().flex_1())
             .child(ui::hint("Esc to close"));
 
@@ -457,30 +464,30 @@ impl Render for SettingsView {
                 .id("settings-search")
                 .flex()
                 .items_center()
-                .gap(px(space::SM))
-                .px(px(space::LG))
-                .py(px(space::MD))
+                .gap(z(space::SM))
+                .px(z(space::LG))
+                .py(z(space::MD))
                 .border_b_1()
                 .border_color(t.border.subtle)
                 .child(ui::icon(icon::SEARCH, 13., t.text.dim))
-                .child(div().flex_1().max_w(px(480.)).child(ui::text_input(&self.search, self.field == Field::Search, "Search settings")))
+                .child(div().flex_1().max_w(z(480.)).child(ui::text_input(&self.search, self.field == Field::Search, "Search settings")))
                 .on_click(move |_: &ClickEvent, window, cx| act(&view, &ws, window, cx, |v, s, p, _| v.focus_field(Field::Search, s, p)))
         };
 
-        let nav = div().flex_none().w(px(180.)).py(px(space::MD)).border_r_1().border_color(t.border.subtle).children(CATS.iter().map(|&(c, name)| {
+        let nav = div().flex_none().w(z(180.)).py(z(space::MD)).border_r_1().border_color(t.border.subtle).children(CATS.iter().map(|&(c, name)| {
             let selected = if q.is_empty() { c == self.cat } else { shown.first() == Some(&c) };
             let dim = !q.is_empty() && !shown.contains(&c);
             let (view, ws) = (view.clone(), ws.clone());
             div()
                 .id(name)
-                .mx(px(space::SM))
-                .px(px(space::MD))
-                .h(px(height::LIST_ROW + 4.))
+                .mx(z(space::SM))
+                .px(z(space::MD))
+                .h(z(height::LIST_ROW + 4.))
                 .flex()
                 .items_center()
-                .rounded(px(radius::MD))
+                .rounded(z(radius::MD))
                 .cursor_pointer()
-                .text_size(px(text_size::SM))
+                .text_size(z(text_size::SM))
                 .text_color(if dim { t.text.faint } else if selected { t.text.primary } else { t.text.muted })
                 .when(selected, |d| d.bg(t.bg.selected))
                 .when(!selected, |d| d.hover(|s| s.bg(t.bg.hover)))
@@ -498,16 +505,16 @@ impl Render for SettingsView {
         if !notes.is_empty() {
             rows.push(
                 div()
-                    .mb(px(space::LG))
-                    .p(px(space::MD))
+                    .mb(z(space::LG))
+                    .p(z(space::MD))
                     .flex()
-                    .gap(px(space::SM))
-                    .rounded(px(radius::MD))
+                    .gap(z(space::SM))
+                    .rounded(z(radius::MD))
                     .border_1()
                     .border_color(t.state.needs_you)
-                    .text_size(px(text_size::SM))
+                    .text_size(z(text_size::SM))
                     .child(ui::icon(icon::WARNING, 13., t.state.needs_you))
-                    .child(div().flex().flex_col().gap(px(space::XXS)).children(notes.iter().map(|n| div().child(n.clone()))))
+                    .child(div().flex().flex_col().gap(z(space::XXS)).children(notes.iter().map(|n| div().child(n.clone()))))
                     .into_any_element(),
             );
         }
@@ -516,7 +523,7 @@ impl Render for SettingsView {
         }
         for &c in &shown {
             let name = CATS.iter().find(|(x, _)| *x == c).map_or("", |(_, n)| *n);
-            rows.push(div().pt(px(space::MD)).pb(px(space::XS)).font_weight(FontWeight::SEMIBOLD).child(name).into_any_element());
+            rows.push(div().pt(z(space::MD)).pb(z(space::XS)).font_weight(FontWeight::SEMIBOLD).child(name).into_any_element());
             match c {
                 Cat::Projects => {
                     let list = self.projects_of(&projects, &q);
@@ -528,19 +535,19 @@ impl Render for SettingsView {
                     }
                 }
                 Cat::Keyboard => {
-                    rows.push(div().pb(px(space::SM)).text_size(px(text_size::XS)).text_color(t.text.dim).child("Read-only for now: rebinding comes later.").into_any_element());
+                    rows.push(div().pb(z(space::SM)).text_size(z(text_size::XS)).text_color(t.text.dim).child("Read-only for now: rebinding comes later.").into_any_element());
                     for (k, l) in Self::keys_of(&q) {
                         rows.push(
                             div()
                                 .flex()
                                 .items_center()
-                                .gap(px(space::LG))
-                                .py(px(space::XS + 1.))
+                                .gap(z(space::LG))
+                                .py(z(space::XS + 1.))
                                 .border_b_1()
                                 .border_color(t.border.subtle)
-                                .text_size(px(text_size::SM))
+                                .text_size(z(text_size::SM))
                                 .child(div().flex_1().text_color(t.text.muted).child(l))
-                                .child(div().flex_none().px(px(space::SM)).rounded(px(radius::SM)).bg(t.bg.elevated).text_size(px(text_size::XS)).child(k))
+                                .child(div().flex_none().px(z(space::SM)).rounded(z(radius::SM)).bg(t.bg.elevated).text_size(z(text_size::XS)).child(k))
                                 .into_any_element(),
                         );
                     }
@@ -585,8 +592,8 @@ impl Render for SettingsView {
                     .flex_1()
                     .min_h_0()
                     .child(nav)
-                    .child(div().id("settings-rows").flex_1().min_w_0().overflow_y_scroll().px(px(space::XL)).py(px(space::MD)).child(
-                        div().max_w(px(820.)).flex().flex_col().children(rows),
+                    .child(div().id("settings-rows").flex_1().min_w_0().overflow_y_scroll().px(z(space::XL)).py(z(space::MD)).child(
+                        div().max_w(z(820.)).flex().flex_col().children(rows),
                     )),
             )
             .into_any_element()
@@ -600,11 +607,11 @@ impl SettingsView {
         div()
             .id(id)
             .flex_none()
-            .size(px(24.))
+            .size(z(24.))
             .flex()
             .items_center()
             .justify_center()
-            .rounded(px(radius::MD))
+            .rounded(z(radius::MD))
             .child(ui::icon(icon::RESTART, 13., if enabled { t.text.muted } else { t.text.faint }))
             .when(enabled, |d| d.cursor_pointer().hover(|s| s.bg(t.bg.hover)).tooltip(tip("Reset to default")))
             .when(!enabled, |d| d.cursor_not_allowed())
@@ -617,11 +624,11 @@ impl SettingsView {
             .min_w_0()
             .flex()
             .flex_col()
-            .gap(px(space::XXS))
-            .child(div().text_size(px(text_size::SM)).text_color(if focused { t.accent } else { t.text.primary }).font_weight(FontWeight::MEDIUM).child(label))
-            .child(div().text_size(px(text_size::XS)).text_color(t.text.dim).child(desc.to_string()))
-            .child(div().text_size(px(text_size::XS)).text_color(t.text.faint).child(default))
-            .children(error.map(|e| div().text_size(px(text_size::XS)).text_color(t.state.error).child(e.clone())))
+            .gap(z(space::XXS))
+            .child(div().text_size(z(text_size::SM)).text_color(if focused { t.accent } else { t.text.primary }).font_weight(FontWeight::MEDIUM).child(label))
+            .child(div().text_size(z(text_size::XS)).text_color(t.text.dim).child(desc.to_string()))
+            .child(div().text_size(z(text_size::XS)).text_color(t.text.faint).child(default))
+            .children(error.map(|e| div().text_size(z(text_size::XS)).text_color(t.state.error).child(e.clone())))
     }
 
     fn item_row(&self, item: &'static Item, s: &Settings, view: &WeakEntity<SettingsView>, ws: &WeakEntity<Workspace>) -> gpui::AnyElement {
@@ -639,8 +646,8 @@ impl SettingsView {
                 let (view, ws) = (view.clone(), ws.clone());
                 div()
                     .id(item.label)
-                    .p(px(space::XS))
-                    .rounded(px(radius::SM))
+                    .p(z(space::XS))
+                    .rounded(z(radius::SM))
                     .cursor_pointer()
                     .when(focused, |d| d.border_1().border_color(t.accent))
                     .child(ui::check_box(on))
@@ -675,7 +682,7 @@ impl SettingsView {
                 };
                 div()
                     .id(item.label)
-                    .w(px(110.))
+                    .w(z(110.))
                     .cursor_text()
                     .child(shown)
                     .on_click(focus_click(view.clone(), ws.clone(), field.clone()))
@@ -686,8 +693,8 @@ impl SettingsView {
         div()
             .flex()
             .items_center()
-            .gap(px(space::LG))
-            .py(px(space::MD))
+            .gap(z(space::LG))
+            .py(z(space::MD))
             .border_b_1()
             .border_color(t.border.subtle)
             .child(Self::row_text(item.label.into(), item.desc, format!("Default: {}", show(item, def)), error, focused))
@@ -724,7 +731,7 @@ impl SettingsView {
                 .on_click(move |_: &ClickEvent, window, cx| act(&view, &ws, window, cx, |v, s, p, _| v.focus_field(f.clone(), s, p)))
                 .into_any_element()
         };
-        let label = |text: &'static str| div().text_size(px(text_size::XS)).text_color(t.text.muted).child(text);
+        let label = |text: &'static str| div().text_size(z(text_size::XS)).text_color(t.text.muted).child(text);
         // Live like the defaults dialog: what the allowlist would drop from the flags being typed.
         let typed_flags = match (&self.edit, focused(1)) {
             (Some(e), true) => e.text.clone(),
@@ -740,22 +747,22 @@ impl SettingsView {
         let (view_a, ws_a, root_a, d_a) = (view.clone(), ws.clone(), root.clone(), d.clone());
         let (view_r, ws_r, root_r) = (view.clone(), ws.clone(), root.clone());
         div()
-            .my(px(space::SM))
-            .p(px(space::LG))
+            .my(z(space::SM))
+            .p(z(space::LG))
             .flex()
             .flex_col()
-            .gap(px(space::SM))
-            .rounded(px(radius::LG))
+            .gap(z(space::SM))
+            .rounded(z(radius::LG))
             .border_1()
             .border_color(t.border.subtle)
             .child(
                 div()
                     .flex()
                     .items_center()
-                    .gap(px(space::SM))
+                    .gap(z(space::SM))
                     .when(p.pinned, |d| d.child(ui::icon(icon::PIN, 11., t.text.dim)))
-                    .child(div().text_size(px(text_size::SM)).font_weight(FontWeight::MEDIUM).child(p.display()))
-                    .child(div().flex_1().min_w_0().truncate().text_size(px(text_size::XS)).text_color(t.text.dim).child(tilde(&p.root)))
+                    .child(div().text_size(z(text_size::SM)).font_weight(FontWeight::MEDIUM).child(p.display()))
+                    .child(div().flex_1().min_w_0().truncate().text_size(z(text_size::XS)).text_color(t.text.dim).child(tilde(&p.root)))
                     .child(Self::reset(id("reset"), !is_default).on_click(move |_: &ClickEvent, window, cx| {
                         if !is_default {
                             let root = root_r.clone();
@@ -766,17 +773,17 @@ impl SettingsView {
                         }
                     })),
             )
-            .child(div().text_size(px(text_size::XS)).text_color(t.text.faint).child("Default: shell, no flags, no setup command, worktrees in <repo>-worktrees"))
+            .child(div().text_size(z(text_size::XS)).text_color(t.text.faint).child("Default: shell, no flags, no setup command, worktrees in <repo>-worktrees"))
             .child(
                 div()
                     .id(id("auto"))
                     .flex()
                     .items_center()
-                    .gap(px(space::SM))
+                    .gap(z(space::SM))
                     .cursor_pointer()
-                    .text_size(px(text_size::SM))
+                    .text_size(z(text_size::SM))
                     .text_color(if focused(0) { t.text.primary } else { t.text.muted })
-                    .child(div().p(px(2.)).rounded(px(radius::SM)).when(focused(0), |d| d.border_1().border_color(t.accent)).child(ui::check_box(auto)))
+                    .child(div().p(z(2.)).rounded(z(radius::SM)).when(focused(0), |d| d.border_1().border_color(t.accent)).child(ui::check_box(auto)))
                     .child("Start claude in new sessions")
                     .on_click(move |_: &ClickEvent, window, cx| {
                         let (root, d) = (root_a.clone(), d_a.clone());
@@ -789,7 +796,7 @@ impl SettingsView {
             .child(label("Claude flags (only flags safe to replay are kept; permission bypasses never)"))
             .child(input(1, &d.flags, "--model opus"))
             .when(!dropped.is_empty(), |e| {
-                e.child(div().text_size(px(text_size::XS)).text_color(t.state.needs_you).child(format!(
+                e.child(div().text_size(z(text_size::XS)).text_color(t.state.needs_you).child(format!(
                     "Will be dropped (not allowed): {}",
                     dropped.iter().map(|s| s.as_str()).collect::<Vec<_>>().join(" ")
                 )))
@@ -815,7 +822,7 @@ mod tests {
             let other = match (v, &item.ctl) {
                 (Val::Bool(b), _) => Val::Bool(!b),
                 (Val::Choice(i), Ctl::Choice(l)) => Val::Choice((i + 1) % l.len()),
-                (Val::Num(_), _) => Val::Num(if item.key == Key::FontSize { 16. } else { 500. }),
+                (Val::Num(_), _) => Val::Num(match item.key { Key::FontSize => 16., Key::Zoom => 150., _ => 500. }),
                 _ => panic!("{} has a mismatched control", item.label),
             };
             set(&mut s, item.key, other);
@@ -831,6 +838,8 @@ mod tests {
         assert!(parse_num(Key::FontSize, "40").is_err());
         assert!(parse_num(Key::Scrollback, "1.5").is_err());
         assert_eq!(parse_num(Key::Scrollback, "0"), Ok(0.));
+        assert_eq!(parse_num(Key::Zoom, "120 %"), Ok(120.));
+        assert!(parse_num(Key::Zoom, "40").is_err());
     }
 
     #[test]

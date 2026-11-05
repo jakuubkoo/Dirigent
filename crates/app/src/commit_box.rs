@@ -8,11 +8,11 @@ use std::rc::Rc;
 
 use gpui::{
     Bounds, ClickEvent, ClipboardItem, Context, FocusHandle, HighlightStyle, KeyDownEvent, MouseButton, MouseDownEvent,
-    MouseMoveEvent, StyledText, TextLayout, WeakEntity, Window, canvas, div, fill, prelude::*, px, size,
+    MouseMoveEvent, StyledText, TextLayout, WeakEntity, Window, canvas, div, fill, prelude::*, size,
 };
 
 use crate::text_area::{Key, TextArea};
-use crate::theme::{self, MONO_FONT, radius, space, text_size};
+use crate::theme::{z, self, MONO_FONT, radius, space, text_size};
 use crate::ui::{self, icon, tip};
 use crate::workspace::Workspace;
 
@@ -187,7 +187,7 @@ impl CommitBox {
                     .children(cursor.map(|col| {
                         canvas(|_, _, _| {}, move |_, _, window, _| {
                             if let Some(p) = layout.position_for_index(col) {
-                                window.paint_quad(fill(Bounds::new(p, size(px(1.5), layout.line_height())), color));
+                                window.paint_quad(fill(Bounds::new(p, size(z(1.5), layout.line_height())), color));
                             }
                         })
                         .absolute()
@@ -217,24 +217,24 @@ impl Render for CommitBox {
             .on_mouse_up(MouseButton::Left, cx.listener(|b: &mut Self, _, _, _| b.dragging = false))
             .cursor_text()
             .relative()
-            .h(line_h * n as f32 + px(space::SM * 2.))
+            .h(line_h * n as f32 + z(space::SM * 2.))
             .overflow_y_scroll()
-            .px(px(space::MD))
-            .py(px(space::SM))
-            .rounded(px(radius::MD))
+            .px(z(space::MD))
+            .py(z(space::SM))
+            .rounded(z(radius::MD))
             .bg(t.bg.input)
             .border_1()
             .border_color(if focused { t.accent } else { t.border.subtle })
             .font_family(MONO_FONT)
-            .text_size(px(text_size::SM))
+            .text_size(z(text_size::SM))
             .text_color(t.text.primary)
             .children(lines)
             .when(empty && !focused, |d| {
                 d.child(
                     div()
                         .absolute()
-                        .top(px(space::SM))
-                        .left(px(space::MD))
+                        .top(z(space::SM))
+                        .left(z(space::MD))
                         .text_color(t.text.faint)
                         .child(if self.amend { "Amended message" } else { "Commit message (Ctrl+Enter to commit)" }),
                 )
@@ -245,10 +245,10 @@ impl Render for CommitBox {
             div()
                 .id(id)
                 .flex_none()
-                .px(px(space::SM))
-                .py(px(space::XXS))
-                .rounded(px(radius::SM))
-                .text_size(px(text_size::XS))
+                .px(z(space::SM))
+                .py(z(space::XXS))
+                .rounded(z(radius::SM))
+                .text_size(z(text_size::XS))
                 .when(primary && enabled, |d| d.bg(t.accent).text_color(t.text.on_accent))
                 .when(!primary && enabled, |d| d.border_1().border_color(t.border.subtle).text_color(t.text.primary))
                 .when(enabled, |d| d.cursor_pointer().hover(|s| s.opacity(0.85)))
@@ -265,8 +265,8 @@ impl Render for CommitBox {
             div()
                 .id(id)
                 .flex_none()
-                .p(px(space::XXS))
-                .rounded(px(radius::SM))
+                .p(z(space::XXS))
+                .rounded(z(radius::SM))
                 .when(!generating, |d| d.cursor_pointer().hover(|s| s.bg(t.bg.hover)))
                 .child(ui::icon(icon::GENERATE, 13., if generating { t.text.faint } else { t.accent }))
                 .tooltip(tip(if generating { "Generating…" } else { hint }))
@@ -280,20 +280,20 @@ impl Render for CommitBox {
         let row = div()
             .flex()
             .items_center()
-            .gap(px(space::SM))
-            .text_size(px(text_size::XS))
+            .gap(z(space::SM))
+            .text_size(z(text_size::XS))
             .text_color(t.text.muted)
             .child(
                 div()
                     .id("commit-amend")
                     .flex()
                     .items_center()
-                    .gap(px(space::XS))
+                    .gap(z(space::XS))
                     .cursor_pointer()
                     .child(
                         div()
-                            .size(px(11.))
-                            .rounded(px(3.))
+                            .size(z(11.))
+                            .rounded(z(3.))
                             .border_1()
                             .border_color(if self.amend { t.accent } else { t.border.strong })
                             .when(self.amend, |d| d.bg(t.accent)),
@@ -330,16 +330,16 @@ impl Render for CommitBox {
         div()
             .flex()
             .flex_col()
-            .gap(px(space::SM))
-            .px(px(space::LG))
-            .pt(px(space::MD))
-            .pb(px(space::SM))
+            .gap(z(space::SM))
+            .px(z(space::LG))
+            .pt(z(space::MD))
+            .pb(z(space::SM))
             .child(
                 div()
                     .flex()
                     .items_center()
-                    .gap(px(space::XS))
-                    .text_size(px(text_size::XS))
+                    .gap(z(space::XS))
+                    .text_size(z(text_size::XS))
                     .text_color(t.text.muted)
                     .child(ui::icon(icon::BRANCH, 12., t.text.muted))
                     .child(div().min_w_0().truncate().text_color(t.text.primary).child(p.branch.clone())),

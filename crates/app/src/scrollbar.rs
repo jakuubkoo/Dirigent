@@ -3,12 +3,13 @@
 //! with the frame being drawn and costs nothing while idle (no state, no timers, no extra renders). Dragging the
 //! thumb or clicking the track moves the list and notifies the owning view only.
 
+use crate::theme::z;
 use std::cell::Cell;
 use std::rc::Rc;
 
 use gpui::{
     Bounds, CursorStyle, EntityId, HitboxBehavior, IntoElement, MouseButton, MouseDownEvent, MouseMoveEvent,
-    MouseUpEvent, Pixels, Styled, UniformListScrollHandle, canvas, point, px,
+    MouseUpEvent, Pixels, Styled, UniformListScrollHandle, canvas, point,
 };
 
 const WIDTH: f32 = 8.;
@@ -21,11 +22,11 @@ pub type Drag = Rc<Cell<Option<Pixels>>>;
 fn thumb(track: Bounds<Pixels>, handle: &UniformListScrollHandle) -> Option<(Bounds<Pixels>, Pixels)> {
     let base = &handle.0.borrow().base_handle;
     let max = base.max_offset().y;
-    if max <= px(0.) {
+    if max <= z(0.) {
         return None;
     }
     let view = track.size.height;
-    let h = (view * (view / (view + max))).max(px(MIN_THUMB)).min(view);
+    let h = (view * (view / (view + max))).max(z(MIN_THUMB)).min(view);
     let top = (-base.offset().y / max).clamp(0., 1.) * (view - h);
     Some((Bounds { origin: point(track.origin.x, track.origin.y + top), size: gpui::size(track.size.width, h) }, max))
 }
@@ -34,8 +35,8 @@ fn thumb(track: Bounds<Pixels>, handle: &UniformListScrollHandle) -> Option<(Bou
 fn scroll_thumb_to(track: Bounds<Pixels>, handle: &UniformListScrollHandle, y: Pixels) {
     let Some((t, max)) = thumb(track, handle) else { return };
     let room = track.size.height - t.size.height;
-    let frac = if room > px(0.) { ((y - track.origin.y) / room).clamp(0., 1.) } else { 0. };
-    handle.0.borrow().base_handle.set_offset(point(px(0.), -max * frac));
+    let frac = if room > z(0.) { ((y - track.origin.y) / room).clamp(0., 1.) } else { 0. };
+    handle.0.borrow().base_handle.set_offset(point(z(0.), -max * frac));
 }
 
 /// Place inside a `relative()` parent that also holds the list.
@@ -48,8 +49,8 @@ pub fn scrollbar(handle: UniformListScrollHandle, drag: Drag, view: EntityId) ->
             window.set_cursor_style(CursorStyle::Arrow, &hitbox);
             let s = &crate::theme::get().scrollbar;
             let color = if drag.get().is_some() { s.active } else { s.thumb };
-            let inset = Bounds { origin: point(t.origin.x + px(2.), t.origin.y), size: gpui::size(px(WIDTH - 3.), t.size.height) };
-            window.paint_quad(gpui::fill(inset, color).corner_radii(px(3.)));
+            let inset = Bounds { origin: point(t.origin.x + z(2.), t.origin.y), size: gpui::size(z(WIDTH - 3.), t.size.height) };
+            window.paint_quad(gpui::fill(inset, color).corner_radii(z(3.)));
 
             let (h, d) = (handle.clone(), drag.clone());
             window.on_mouse_event(move |e: &MouseDownEvent, phase, window, cx| {
@@ -91,5 +92,5 @@ pub fn scrollbar(handle: UniformListScrollHandle, drag: Drag, view: EntityId) ->
     .top_0()
     .right_0()
     .bottom_0()
-    .w(px(WIDTH))
+    .w(z(WIDTH))
 }

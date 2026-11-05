@@ -2,9 +2,10 @@
 //! server-side decorations). X11 and KDE keep server decorations and get none of this.
 //! No `window.refresh()` here: resize cursors come from plain hitboxes, so mouse movement never repaints.
 
+use crate::theme::z;
 use gpui::{
     AnyElement, CursorStyle, Decorations, Div, MouseButton, Pixels, ResizeEdge, Stateful, Tiling, Window, div,
-    prelude::*, px,
+    prelude::*,
 };
 
 use crate::ui::{self, icon};
@@ -22,9 +23,9 @@ pub struct Chrome {
 impl Chrome {
     pub fn of(window: &Window) -> Self {
         match window.window_decorations() {
-            Decorations::Server => Self { csd: false, tiling: Tiling::default(), border: px(0.) },
+            Decorations::Server => Self { csd: false, tiling: Tiling::default(), border: z(0.) },
             Decorations::Client { tiling } => {
-                let border = if tiling.is_tiled() { px(0.) } else { px(1.) };
+                let border = if tiling.is_tiled() { z(0.) } else { z(1.) };
                 Self { csd: true, tiling, border }
             }
         }
@@ -32,7 +33,7 @@ impl Chrome {
 
     /// Height taken by the title bar and borders (subtracted from the terminal area).
     pub fn vertical(&self) -> Pixels {
-        if self.csd { px(TITLE_BAR) + self.border * 2. } else { px(0.) }
+        if self.csd { z(TITLE_BAR) + self.border * 2. } else { z(0.) }
     }
 
     pub fn horizontal(&self) -> Pixels {
@@ -47,7 +48,7 @@ pub fn window_controls(window: &Window) -> impl IntoElement {
     let button = |id: &'static str, glyph: &'static str, hover_bg: gpui::Rgba| {
         div()
             .id(id)
-            .w(px(40.))
+            .w(z(40.))
             .h_full()
             .flex()
             .items_center()
@@ -86,7 +87,7 @@ pub fn resize_handles(tiling: Tiling) -> Vec<AnyElement> {
                 cx.stop_propagation();
             })
     };
-    let (e, c) = (px(EDGE), px(CORNER));
+    let (e, c) = (z(EDGE), z(CORNER));
     let mut out = Vec::new();
     let mut add = |on: bool, el: Stateful<Div>| {
         if on {

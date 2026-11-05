@@ -8,11 +8,11 @@ use std::sync::Arc;
 use git::text::FileText;
 use gpui::{
     ClickEvent, Context, FocusHandle, Focusable, HighlightStyle, KeyDownEvent, Pixels, ScrollStrategy, SharedString,
-    StyledText, UniformListScrollHandle, WeakEntity, Window, div, prelude::*, px, uniform_list,
+    StyledText, UniformListScrollHandle, WeakEntity, Window, div, prelude::*, uniform_list,
 };
 
 use crate::file_tree::{Key, Marks, Row};
-use crate::theme::{self, MONO_FONT, height, radius, space, text_size};
+use crate::theme::{z, self, MONO_FONT, height, radius, space, text_size};
 use crate::ui::{self, icon, line_counts, tip};
 use crate::scrollbar::{self, scrollbar};
 use crate::workspace::Workspace;
@@ -114,14 +114,14 @@ impl FilesPanel {
             .id(("tree-row", ix))
             .w_full()
             .overflow_hidden()
-            .h(px(height::LIST_ROW))
-            .pl(px(space::MD + INDENT * row.depth as f32))
-            .pr(px(14.)) // room for the scrollbar
+            .h(z(height::LIST_ROW))
+            .pl(z(space::MD + INDENT * row.depth as f32))
+            .pr(z(14.)) // room for the scrollbar
             .flex()
             .items_center()
-            .gap(px(space::XS))
+            .gap(z(space::XS))
             .cursor_pointer()
-            .text_size(px(text_size::MD))
+            .text_size(z(text_size::MD))
             .when(selected, |d| d.bg(t.bg.selected_focus))
             .when(!selected && open, |d| d.bg(t.bg.selected))
             .when(!selected && !open, |d| d.hover(|s| s.bg(t.bg.hover)))
@@ -132,16 +132,16 @@ impl FilesPanel {
             })
             .child(match chevron {
                 Some(c) => ui::icon(c, 12., t.text.dim).into_any_element(),
-                None => div().flex_none().w(px(12.)).into_any_element(),
+                None => div().flex_none().w(z(12.)).into_any_element(),
             })
             .child(ui::icon(file_icon, 14., icon_color))
             .child(div().min_w_0().truncate().text_color(color).child(e.name.clone()))
             .when(e.is_dir && d.marks.dirs.contains(&e.path), |d| {
-                d.child(div().flex_none().size(px(5.)).rounded_full().bg(t.git.modified))
+                d.child(div().flex_none().size(z(5.)).rounded_full().bg(t.git.modified))
             })
             // Touched by this session's agent: a small accent ring (git kinds keep the color).
             .when(!e.is_dir && d.agent.touched.contains(&e.path), |el| {
-                el.child(div().flex_none().size(px(6.)).rounded_full().border_1().border_color(t.accent))
+                el.child(div().flex_none().size(z(6.)).rounded_full().border_1().border_color(t.accent))
             })
             .into_any_element()
     }
@@ -164,10 +164,10 @@ impl Render for FilesPanel {
             .flex()
             .flex_none()
             .items_center()
-            .gap(px(space::SM))
-            .h(px(height::LIST_ROW))
-            .px(px(space::LG))
-            .text_size(px(text_size::XS))
+            .gap(z(space::SM))
+            .h(z(height::LIST_ROW))
+            .px(z(space::LG))
+            .text_size(z(text_size::XS))
             .text_color(t.text.muted)
             .child(ui::icon(icon::FOLDER_OPEN, 12., t.text.dim))
             .child(div().flex_1().min_w_0().truncate().child(root_name.unwrap_or_default()))
@@ -175,8 +175,8 @@ impl Render for FilesPanel {
                 div()
                     .id("toggle-ignored")
                     .flex_none()
-                    .p(px(space::XXS))
-                    .rounded(px(radius::SM))
+                    .p(z(space::XXS))
+                    .rounded(z(radius::SM))
                     .cursor_pointer()
                     .hover(|s| s.bg(t.bg.hover))
                     .child(ui::icon(if d.show_ignored { icon::SHOW } else { icon::HIDE }, 14., t.text.dim))
@@ -327,12 +327,12 @@ impl FileView {
             workspace,
             line_height: m.line_height,
             cell_width: m.cell_width,
-            font_size: m.font_size - px(1.),
+            font_size: m.font_size - z(1.),
         }
     }
 
     pub fn set_metrics(&mut self, m: &crate::terminal_element::Metrics, cx: &mut Context<Self>) {
-        (self.line_height, self.cell_width, self.font_size) = (m.line_height, m.cell_width, m.font_size - px(1.));
+        (self.line_height, self.cell_width, self.font_size) = (m.line_height, m.cell_width, m.font_size - z(1.));
         cx.notify();
     }
 
@@ -414,14 +414,14 @@ impl Render for FileView {
                 .flex_none()
                 .flex()
                 .items_center()
-                .gap(px(space::XS))
-                .px(px(space::MD))
-                .py(px(space::XXS))
-                .rounded(px(radius::SM))
+                .gap(z(space::XS))
+                .px(z(space::MD))
+                .py(z(space::XXS))
+                .rounded(z(radius::SM))
                 .cursor_pointer()
                 .bg(t.bg.selected)
                 .hover(|s| s.bg(t.bg.hover))
-                .text_size(px(text_size::XS))
+                .text_size(z(text_size::XS))
                 .child(ui::icon(icon::CHANGES, 12., t.accent))
                 .child("Show diff")
                 .on_click(move |_: &ClickEvent, window, cx| {
@@ -434,7 +434,7 @@ impl Render for FileView {
         let header = ui::overlay_header()
             .child(ui::icon(ui::file_icon(&name), 14., icon_color))
             .child(div().min_w_0().truncate().text_color(t.text.primary).child(rel(&self.path, self.base.as_deref())))
-            .children(self.change.as_ref().map(|c| div().flex_none().text_size(px(text_size::XS)).child(line_counts(c.lines))))
+            .children(self.change.as_ref().map(|c| div().flex_none().text_size(z(text_size::XS)).child(line_counts(c.lines))))
             .children(show_diff)
             .child(ui::hint("Esc to close"));
         let body = match (&self.content, self.failed) {
@@ -446,7 +446,7 @@ impl Render for FileView {
                 let (lines, lh, truncated) = (lines.clone(), self.line_height, *truncated);
                 let colors = self.colors.clone();
                 let digits = lines.len().to_string().len().max(3) as f32;
-                let gutter = self.cell_width * digits + px(space::XL);
+                let gutter = self.cell_width * digits + z(space::XL);
                 let count = lines.len() + truncated as usize;
                 let list = uniform_list("file-lines", count, move |range, _, _| {
                     let t = theme::get();
@@ -454,19 +454,19 @@ impl Render for FileView {
                         .map(|ix| {
                             let row = div().h(lh).flex().whitespace_nowrap().overflow_hidden();
                             let Some(text) = lines.get(ix) else {
-                                return row.pl(px(space::LG)).text_color(t.state.needs_you).child("… file truncated (too large to show)");
+                                return row.pl(z(space::LG)).text_color(t.state.needs_you).child("… file truncated (too large to show)");
                             };
                             row.child(
                                 div()
                                     .flex_none()
                                     .w(gutter)
-                                    .pr(px(space::LG))
+                                    .pr(z(space::LG))
                                     .flex()
                                     .justify_end()
                                     .text_color(t.text.faint)
                                     .child((ix + 1).to_string()),
                             )
-                            .child(div().pr(px(14.)).text_color(t.diff.context).child(
+                            .child(div().pr(z(14.)).text_color(t.diff.context).child(
                                 match colors.as_ref().and_then(|c| c.get(ix)).filter(|s| !s.is_empty()) {
                                     Some(spans) => StyledText::new(text.clone())
                                         .with_highlights(spans.iter().filter_map(|(r, c)| {
