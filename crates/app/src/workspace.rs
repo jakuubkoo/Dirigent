@@ -25,7 +25,7 @@ use crate::terminal_view::{Banner, PADDING, TerminalView};
 actions!(
     agent_ide,
     [
-        NewSession, CloseSession, NextSession, PrevSession, Rename, ToggleSidebar, NextNeedsYou, ResumeAll, ShowChanges, ShowFiles,
+        NewSession, CloseSession, NextSession, PrevSession, Rename, ToggleSidebar, NextNeedsYou, ResumeAll, ShowChanges, ShowFiles, ToggleDiffMode,
         Activate1, Activate2, Activate3, Activate4, Activate5, Activate6, Activate7, Activate8, Activate9
     ]
 );
@@ -141,6 +141,8 @@ pub struct Workspace {
     files_panel: Entity<FilesPanel>,
     panel_tab: PanelTab,
     show_ignored: bool,
+    /// Unified or split diffs (saved); split falls back to unified while the main area is narrow.
+    diff_mode: persist::DiffMode,
     /// Directory listings shown by any spawned tab's tree.
     tree_cache: file_tree::Cache,
     /// Listing requests in flight: directory → request id (only the newest applies).
@@ -230,6 +232,7 @@ impl Workspace {
             files_panel,
             panel_tab: saved.git_panel.tab,
             show_ignored: saved.git_panel.show_ignored,
+            diff_mode: saved.diff_mode,
             tree_cache: Default::default(),
             tree_pending: HashMap::new(),
             tree_req: 0,
@@ -489,6 +492,7 @@ impl Workspace {
             n += view.update(cx, |v, _| v.resize_to(size)) as u64;
         }
         crate::perf::pty_resizes(n);
+        self.sync_diff_mode(cx);
         if let Some(view) = self.tabs.get(self.active).and_then(|t| t.view.as_ref()) {
             view.update(cx, |_, cx| cx.notify());
         }
@@ -889,6 +893,7 @@ impl Workspace {
                 tab: self.panel_tab,
                 show_ignored: self.show_ignored,
             },
+            diff_mode: self.diff_mode,
             ..Saved::default()
         }
     }
@@ -1164,8 +1169,41 @@ impl Workspace {
         }
         let ws = cx.entity().downgrade();
         let lh = self.metrics.line_height;
-        let view = cx.new(|cx| DiffView::new(root, file, lh, ws, cx));
+        let mode = (self.diff_mode, self.diff_narrow(window));
+        let view = cx.new(|cx| DiffView::new(root, file, lh, mode, ws, cx));
         self.show_overlay(Overlay::Diff(view), window, cx);
+    }
+
+    fn diff_narrow(&self, window: &Window) -> bool {
+        self.grid_size(window).cols < git_panel::MIN_SPLIT_COLS
+    }
+
+    /// Ctrl+Shift+D (only while a diff is open) and the diff header's switch.
+    pub fn toggle_diff_mode(&mut self, cx: &mut Context<Self>) {
+        if matches!(self.overlay, Some(Overlay::Diff(_))) {
+            let mode = match self.diff_mode {
+                persist::DiffMode::Unified => persist::DiffMode::Split,
+                persist::DiffMode::Split => persist::DiffMode::Unified,
+            };
+            self.set_diff_mode(mode, cx);
+        }
+    }
+
+    pub fn set_diff_mode(&mut self, mode: persist::DiffMode, cx: &mut Context<Self>) {
+        if mode != self.diff_mode {
+            self.diff_mode = mode;
+            self.mark_dirty(cx);
+            self.sync_diff_mode(cx);
+        }
+    }
+
+    /// Hands the mode and the (settled) main-area width to the open diff; it re-renders only if either changed.
+    fn sync_diff_mode(&self, cx: &mut Context<Self>) {
+        if let Some(Overlay::Diff(v)) = &self.overlay {
+            let narrow = self.applied.cols < git_panel::MIN_SPLIT_COLS;
+            let mode = self.diff_mode;
+            v.update(cx, |v, cx| v.set_mode(mode, narrow, cx));
+        }
     }
 
     /// Opens a file's preview over the terminal; with `toggle`, the open one closes instead.
@@ -1247,9 +1285,9 @@ impl Workspace {
         match self.overlay.clone() {
             None => {}
             Some(Overlay::Diff(view)) => {
-                let (root, old) = {
+                let (root, old, prev) = {
                     let v = view.read(cx);
-                    (v.root.clone(), v.file.clone())
+                    (v.root.clone(), v.file.clone(), v.layout())
                 };
                 let Some(repo) = self.repos.repo(&root).cloned() else { return };
                 let file = self
@@ -1263,17 +1301,31 @@ impl Workspace {
                     let lines = cx
                         .background_executor()
                         .spawn(async move {
-                            git::diff(&repo, &read_file, || current.load(Ordering::Relaxed) != generation).map(DiffView::prepare)
+                            let diff = git::diff(&repo, &read_file, || current.load(Ordering::Relaxed) != generation)?;
+                            // Same diff as shown: keep its layout (no work, and the view sees no change).
+                            let hash = git::layout::hash(&diff);
+                            if let Some(prev) = prev.filter(|p| p.hash == hash) {
+                                return Some((prev, None));
+                            }
+                            let t = Instant::now();
+                            let layout = Arc::new(git::layout::layout(&diff));
+                            Some((layout, Some(t.elapsed())))
                         })
                         .await;
                     if current2.load(Ordering::Relaxed) != generation {
                         return; // a newer read or a close happened meanwhile
                     }
-                    crate::perf::event_with(|| {
-                        let n = lines.as_ref().map_or(0, |(l, _)| l.len());
-                        format!("diff read: {n} lines in {:.1} ms", started.elapsed().as_secs_f64() * 1e3)
+                    crate::perf::event_with(|| match &lines {
+                        Some((l, Some(took))) => format!(
+                            "diff read: {} lines in {:.1} ms (layout {:.1} ms)",
+                            l.lines.len(),
+                            started.elapsed().as_secs_f64() * 1e3,
+                            took.as_secs_f64() * 1e3
+                        ),
+                        Some((_, None)) => "diff read: unchanged, layout reused".into(),
+                        None => "diff read failed".into(),
                     });
-                    view.update(cx, |v, cx| v.set_lines(lines, file, cx));
+                    view.update(cx, |v, cx| v.set_layout(lines.map(|(l, _)| l), file, cx));
                 }));
             }
             Some(Overlay::File(view)) => {

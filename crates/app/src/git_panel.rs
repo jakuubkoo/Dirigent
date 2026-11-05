@@ -7,15 +7,17 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 use async_channel::{Receiver, Sender};
-use git::{Diff, FileChange, LineKind, Status};
+use git::layout::{DLine, Layout, SplitRow};
+use git::{FileChange, LineKind, Status};
 use gpui::{
-    ClickEvent, Context, FocusHandle, Focusable, KeyDownEvent, SharedString, UniformListScrollHandle, WeakEntity,
-    Window, div, prelude::*, px, uniform_list,
+    ClickEvent, Context, FocusHandle, Focusable, HighlightStyle, KeyDownEvent, StyledText,
+    UniformListScrollHandle, WeakEntity, Window, div, prelude::*, px, uniform_list,
 };
 
 use crate::scrollbar::{self, scrollbar};
 use crate::theme::{self, MONO_FONT, TERMINAL_FONT_SIZE, height, radius, space, text_size};
 use crate::ui::{self, icon, line_counts, tip};
+use crate::persist::DiffMode;
 use crate::workspace::Workspace;
 
 /// One watcher per repo root, refcounted by the tabs whose cwd is in it. The last tab leaving drops it (and its
@@ -309,17 +311,20 @@ impl Render for GitPanel {
     }
 }
 
-/// A diff ready to show: rows (SharedString: cloning a visible row per frame is a refcount bump), truncated.
-pub type Prepared = (Arc<Vec<(LineKind, SharedString)>>, bool);
+/// Below this many terminal columns in the main area, split falls back to unified (each side needs ~50 columns
+/// of code plus its gutter).
+pub const MIN_SPLIT_COLS: u16 = 120;
 
 /// The diff of one file, over the terminal area. Esc closes it.
 pub struct DiffView {
     pub root: PathBuf,
     pub file: FileChange,
     /// None while the first read is running; later reads keep showing the previous diff until they finish.
-    lines: Option<Arc<Vec<(LineKind, SharedString)>>>,
-    truncated: bool,
+    layout: Option<Arc<Layout>>,
     failed: bool,
+    /// The saved preference; `narrow` forces unified without changing it.
+    mode: DiffMode,
+    narrow: bool,
     scroll: UniformListScrollHandle,
     drag: scrollbar::Drag,
     focus: FocusHandle,
@@ -328,13 +333,21 @@ pub struct DiffView {
 }
 
 impl DiffView {
-    pub fn new(root: PathBuf, file: FileChange, line_height: gpui::Pixels, workspace: WeakEntity<Workspace>, cx: &mut Context<Self>) -> Self {
+    pub fn new(
+        root: PathBuf,
+        file: FileChange,
+        line_height: gpui::Pixels,
+        (mode, narrow): (DiffMode, bool),
+        workspace: WeakEntity<Workspace>,
+        cx: &mut Context<Self>,
+    ) -> Self {
         Self {
             root,
             file,
-            lines: None,
-            truncated: false,
+            layout: None,
             failed: false,
+            mode,
+            narrow,
             scroll: UniformListScrollHandle::new(),
             drag: Default::default(),
             focus: cx.focus_handle(),
@@ -343,30 +356,18 @@ impl DiffView {
         }
     }
 
-    /// Run off the UI thread. The file header (diff --git, index, ---/+++) is dropped: the view's own header says
-    /// it all. Hunk headers show only their section context.
-    pub fn prepare(diff: Diff) -> Prepared {
-        let rows = diff
-            .lines
-            .into_iter()
-            .filter(|l| l.kind != LineKind::Header)
-            .map(|l| {
-                let text = if l.kind == LineKind::Hunk { hunk_context(&l.text) } else { l.text };
-                (l.kind, text.into())
-            })
-            .collect();
-        (Arc::new(rows), diff.truncated)
+    /// The current layout, handed to the next read so an unchanged diff isn't laid out again.
+    pub fn layout(&self) -> Option<Arc<Layout>> {
+        self.layout.clone()
     }
 
-    pub fn set_lines(&mut self, lines: Option<Prepared>, file: FileChange, cx: &mut Context<Self>) {
-        match lines {
-            Some((lines, truncated)) => {
-                let same = self.lines.as_ref().is_some_and(|l| **l == *lines) && self.truncated == truncated;
-                if same && file == self.file {
+    pub fn set_layout(&mut self, layout: Option<Arc<Layout>>, file: FileChange, cx: &mut Context<Self>) {
+        match layout {
+            Some(l) => {
+                if self.layout.as_ref().is_some_and(|old| Arc::ptr_eq(old, &l)) && file == self.file && !self.failed {
                     return;
                 }
-                self.lines = Some(lines);
-                self.truncated = truncated;
+                self.layout = Some(l);
                 self.failed = false;
             }
             None => self.failed = true,
@@ -375,20 +376,189 @@ impl DiffView {
         cx.notify();
     }
 
+    fn split(&self) -> bool {
+        self.mode == DiffMode::Split && !self.narrow
+    }
+
+    /// Mode or width changed: keep the line at the top in view across the switch.
+    pub fn set_mode(&mut self, mode: DiffMode, narrow: bool, cx: &mut Context<Self>) {
+        if (mode, narrow) == (self.mode, self.narrow) {
+            return;
+        }
+        let was_split = self.split();
+        (self.mode, self.narrow) = (mode, narrow);
+        if was_split != self.split()
+            && let Some(l) = &self.layout
+        {
+            let top = self.scroll.0.borrow().base_handle.logical_scroll_top().0;
+            let row = if was_split { split_to_line(l, top) } else { line_to_split(l, top) };
+            self.scroll.scroll_to_item_strict(row, gpui::ScrollStrategy::Top);
+        }
+        cx.notify();
+    }
+
     /// Perf harness: how many rows are loaded, and jump to one.
     pub fn loaded_rows(&self) -> usize {
-        self.lines.as_ref().map_or(0, |l| l.len())
+        self.layout.as_ref().map_or(0, |l| if self.split() { l.split.len() } else { l.lines.len() })
     }
 
     pub fn scroll_to(&mut self, ix: usize, cx: &mut Context<Self>) {
         self.scroll.scroll_to_item(ix, gpui::ScrollStrategy::Top);
         cx.notify();
     }
+
+    fn mode_switch(&self) -> impl IntoElement + use<> {
+        let t = theme::get();
+        let split = self.split();
+        let narrow = self.narrow;
+        let seg = |id: &'static str, label: &'static str, on: bool, enabled: bool| {
+            div()
+                .id(id)
+                .px(px(space::SM))
+                .rounded(px(radius::SM))
+                .text_size(px(text_size::XS))
+                .when(on, |d| d.bg(t.bg.selected).text_color(t.text.primary))
+                .when(!on && enabled, |d| d.text_color(t.text.muted).cursor_pointer().hover(|s| s.bg(t.bg.hover)))
+                .when(!enabled, |d| d.text_color(t.text.faint).cursor_not_allowed())
+                .child(label)
+        };
+        let ws = self.workspace.clone();
+        let ws2 = self.workspace.clone();
+        div()
+            .flex()
+            .flex_none()
+            .p(px(space::XXS))
+            .gap(px(space::XXS))
+            .rounded(px(radius::MD))
+            .border_1()
+            .border_color(t.border.subtle)
+            .child(
+                seg("diff-unified", "Unified", !split, true)
+                    .tooltip(tip("Unified diff (Ctrl+Shift+D)"))
+                    .on_click(move |_: &ClickEvent, _, cx| {
+                        let _ = ws.update(cx, |w, cx| w.set_diff_mode(DiffMode::Unified, cx));
+                    }),
+            )
+            .child(
+                seg("diff-split", "Split", split, !narrow)
+                    .tooltip(tip(if narrow { "Too narrow for split" } else { "Side by side (Ctrl+Shift+D)" }))
+                    .on_click(move |_: &ClickEvent, _, cx| {
+                        if !narrow {
+                            let _ = ws2.update(cx, |w, cx| w.set_diff_mode(DiffMode::Split, cx));
+                        }
+                    }),
+            )
+    }
+}
+
+/// First split row showing unified line `ix` (on either side).
+fn line_to_split(l: &Layout, ix: usize) -> usize {
+    let ix = ix as u32;
+    l.split
+        .iter()
+        .position(|r| match *r {
+            SplitRow::Full(i) => i >= ix,
+            SplitRow::Pair(a, b) => a.is_some_and(|i| i >= ix) || b.is_some_and(|i| i >= ix),
+        })
+        .unwrap_or(0)
+}
+
+/// The unified line at split row `ix`.
+fn split_to_line(l: &Layout, ix: usize) -> usize {
+    match l.split.get(ix) {
+        Some(SplitRow::Full(i)) => *i as usize,
+        Some(SplitRow::Pair(a, b)) => a.or(*b).unwrap_or(0) as usize,
+        None => 0,
+    }
 }
 
 impl Focusable for DiffView {
     fn focus_handle(&self, _: &gpui::App) -> FocusHandle {
         self.focus.clone()
+    }
+}
+
+/// Digit columns of the old/new line-number gutters.
+#[derive(Clone, Copy)]
+struct Geom {
+    lh: gpui::Pixels,
+    old: usize,
+    new: usize,
+}
+
+fn digits(n: u32) -> usize {
+    n.max(1).ilog10() as usize + 1
+}
+
+fn line_colors(kind: LineKind) -> (Option<gpui::Rgba>, gpui::Rgba, Option<gpui::Rgba>, char) {
+    let t = theme::get();
+    let d = &t.diff;
+    match kind {
+        LineKind::Add => (Some(d.add_bg), d.add_fg, Some(d.add_word_bg), '+'),
+        LineKind::Del => (Some(d.del_bg), d.del_fg, Some(d.del_word_bg), '-'),
+        LineKind::Hunk => (None, d.hunk, None, ' '),
+        LineKind::Header | LineKind::Meta => (None, t.text.dim, None, ' '),
+        LineKind::Context => (None, d.context, None, ' '),
+    }
+}
+
+/// One line as a single text run: right-aligned line numbers (`nums`: number, width), marker, text; gutter
+/// color and word highlights as highlight ranges. One shaped line per row keeps scrolling cheap.
+fn line_text(l: &DLine, nums: &[(Option<u32>, usize)]) -> gpui::Div {
+    use std::fmt::Write;
+    let (_, fg, word_bg, marker) = line_colors(l.kind);
+    let mut s = String::with_capacity(l.text.len() + 16);
+    for &(n, w) in nums {
+        match n {
+            Some(n) => write!(s, "{n:>w$} ").unwrap(),
+            None => write!(s, "{:w$} ", "").unwrap(),
+        }
+    }
+    let gutter = s.len();
+    write!(s, " {marker} ").unwrap();
+    let start = s.len();
+    s.push_str(&l.text);
+    let mut hl = vec![(0..gutter, HighlightStyle { color: Some(theme::get().diff.gutter.into()), ..Default::default() })];
+    if let Some(bg) = word_bg {
+        let style = HighlightStyle { background_color: Some(bg.into()), ..Default::default() };
+        hl.extend(l.words.iter().map(|r| (start + r.start as usize..start + r.end as usize, style)));
+    }
+    div()
+        .flex_1()
+        .min_w_0()
+        .overflow_hidden()
+        .whitespace_nowrap()
+        .text_color(fg)
+        .child(StyledText::new(s).with_highlights(hl))
+}
+
+fn unified_row(l: &DLine, g: Geom) -> gpui::Div {
+    let (bg, ..) = line_colors(l.kind);
+    div().flex().w_full().h(g.lh).pr(px(14.)).when_some(bg, |r, bg| r.bg(bg)).child(line_text(l, &[(l.old, g.old), (l.new, g.new)]))
+}
+
+fn split_half(l: Option<&DLine>, old_side: bool, g: Geom) -> gpui::Div {
+    let half = div().flex().flex_1().flex_basis(px(0.)).min_w_0().h_full().overflow_hidden();
+    let Some(l) = l else { return half.bg(theme::get().diff.filler) };
+    let (bg, ..) = line_colors(l.kind);
+    let num = if old_side { (l.old, g.old) } else { (l.new, g.new) };
+    half.when_some(bg, |h, bg| h.bg(bg)).child(line_text(l, &[num]))
+}
+
+fn split_row(l: &Layout, r: SplitRow, g: Geom) -> gpui::Div {
+    match r {
+        SplitRow::Full(i) => div().flex().w_full().h(g.lh).child(line_text(&l.lines[i as usize], &[(None, g.old)])),
+        SplitRow::Pair(a, b) => {
+            let get = |i: Option<u32>| i.map(|i| &l.lines[i as usize]);
+            div()
+                .flex()
+                .w_full()
+                .h(g.lh)
+                .pr(px(14.))
+                .child(split_half(get(a), true, g))
+                .child(div().flex_none().w(px(1.)).h_full().bg(theme::get().border.subtle))
+                .child(split_half(get(b), false, g))
+        }
     }
 }
 
@@ -411,37 +581,37 @@ impl Render for DiffView {
                 _ if f.kind == '?' => "untracked",
                 _ => "unstaged",
             }))
-            .child(ui::hint("Esc to close"));
-        let body = match (&self.lines, self.failed) {
+            .child(div().ml_auto().child(self.mode_switch()))
+            .child(div().flex_none().text_size(px(text_size::XS)).text_color(t.text.dim).child("Esc to close"));
+        let body = match (&self.layout, self.failed) {
             (_, true) => ui::note("Couldn't read the diff").text_color(t.state.error).into_any_element(),
             (None, _) => ui::note("Loading…").into_any_element(),
-            (Some(lines), _) if lines.is_empty() => ui::note("No textual changes (mode change or binary)").into_any_element(),
-            (Some(lines), _) => {
-                let (lines, lh, truncated) = (lines.clone(), self.line_height, self.truncated);
-                let count = lines.len() + truncated as usize;
+            (Some(l), _) if l.lines.is_empty() => ui::note("No textual changes (mode change or binary)").into_any_element(),
+            (Some(l), _) => {
+                let (l, split) = (l.clone(), self.split());
+                let g = Geom { lh: self.line_height, old: digits(l.max_old), new: digits(l.max_new) };
+                let rows = if split { l.split.len() } else { l.lines.len() };
+                let count = rows + l.truncated as usize;
                 let list = uniform_list("diff-lines", count, move |range, _, _| {
-                    let d = &theme::get().diff;
                     range
                         .map(|ix| {
-                            let row = div().h(lh).pl(px(space::LG)).pr(px(14.)).whitespace_nowrap().overflow_hidden();
-                            let Some((kind, text)) = lines.get(ix) else {
-                                return row.text_color(theme::get().state.needs_you).child("… diff truncated (too large to show)");
-                            };
-                            let (bg, fg) = match kind {
-                                LineKind::Add => (Some(d.add_bg), d.add_fg),
-                                LineKind::Del => (Some(d.del_bg), d.del_fg),
-                                LineKind::Hunk => (None, d.hunk),
-                                LineKind::Header | LineKind::Meta => (None, theme::get().text.dim),
-                                LineKind::Context => (None, d.context),
-                            };
-                            row.when_some(bg, |r, bg| r.bg(bg)).text_color(fg).child(text.clone())
+                            if ix >= rows {
+                                return div()
+                                    .h(g.lh)
+                                    .pl(px(space::LG))
+                                    .text_color(theme::get().state.needs_you)
+                                    .child("… diff truncated (too large to show)");
+                            }
+                            if split { split_row(&l, l.split[ix], g) } else { unified_row(&l.lines[ix], g) }
                         })
                         .collect::<Vec<_>>()
                 })
                 .track_scroll(&self.scroll)
                 .font_family(MONO_FONT)
+                // One glyph per character: a ligature (`>=` → `≥`) would split under a word highlight.
+                .font_features(gpui::FontFeatures::disable_ligatures())
                 .text_size(px(TERMINAL_FONT_SIZE - 1.))
-                .line_height(lh);
+                .line_height(self.line_height);
                 div()
                     .relative()
                     .flex_1()
@@ -473,40 +643,9 @@ impl Render for DiffView {
     }
 }
 
-/// `@@ -1,2 +1,3 @@ fn main()` → `⋯ fn main()`; just `⋯` when git found no section context.
-fn hunk_context(line: &str) -> String {
-    match line.splitn(3, "@@").nth(2).map(str::trim).filter(|c| !c.is_empty()) {
-        Some(c) => format!("⋯ {c}"),
-        None => "⋯".into(),
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn diff_rows_without_file_header() {
-        let raw = git::Diff {
-            lines: [
-                (LineKind::Header, "diff --git a/x b/x"),
-                (LineKind::Header, "index 1..2"),
-                (LineKind::Header, "--- a/x"),
-                (LineKind::Header, "+++ b/x"),
-                (LineKind::Hunk, "@@ -1,2 +1,2 @@ fn main() {"),
-                (LineKind::Del, "-a"),
-                (LineKind::Hunk, "@@ -9 +9 @@"),
-                (LineKind::Add, "+b"),
-            ]
-            .into_iter()
-            .map(|(kind, t)| git::Line { kind, text: t.into() })
-            .collect(),
-            truncated: false,
-        };
-        let (rows, _) = DiffView::prepare(raw);
-        let got: Vec<_> = rows.iter().map(|(_, t)| t.to_string()).collect();
-        assert_eq!(got, vec!["⋯ fn main() {", "-a", "⋯", "+b"]);
-    }
 
     fn repo(name: &str) -> git::Repo {
         let d = std::env::temp_dir().join(format!("agent-ide-repos-{}-{name}", std::process::id()));

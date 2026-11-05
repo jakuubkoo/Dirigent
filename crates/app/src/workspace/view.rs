@@ -130,6 +130,7 @@ impl Render for Workspace {
             .on_action(cx.listener(|w, _: &ResumeAll, window, cx| w.resume_all(window, cx)))
             .on_action(cx.listener(|w, _: &ShowChanges, window, cx| w.show_panel_tab(PanelTab::Changes, window, cx)))
             .on_action(cx.listener(|w, _: &ShowFiles, window, cx| w.show_panel_tab(PanelTab::Files, window, cx)))
+            .on_action(cx.listener(|w, _: &ToggleDiffMode, _, cx| w.toggle_diff_mode(cx)))
             .on_action(cx.listener(|w, _: &Activate1, window, cx| w.activate_nth(0, window, cx)))
             .on_action(cx.listener(|w, _: &Activate2, window, cx| w.activate_nth(1, window, cx)))
             .on_action(cx.listener(|w, _: &Activate3, window, cx| w.activate_nth(2, window, cx)))

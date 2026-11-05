@@ -20,6 +20,8 @@ pub struct State {
     /// Right-side git panel (added after version 1 shipped: missing in older files).
     #[serde(default)]
     pub git_panel: PanelState,
+    #[serde(default)]
+    pub diff_mode: DiffMode,
 }
 
 impl Default for State {
@@ -33,6 +35,7 @@ impl Default for State {
             last_dir: None,
             git_panel: PanelState::default(),
             collapsed_groups: Vec::new(),
+            diff_mode: DiffMode::Unified,
         }
     }
 }
@@ -73,6 +76,15 @@ impl Default for PanelState {
     fn default() -> Self {
         Self { width: 340., open: true, tab: PanelTab::Changes, show_ignored: true }
     }
+}
+
+/// How the diff view lays out changes.
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum DiffMode {
+    #[default]
+    Unified,
+    Split,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -192,6 +204,7 @@ mod tests {
             window: Some(WindowState { mode: WindowMode::Maximized, x: 10., y: 20., w: 1200., h: 750. }),
             last_dir: Some("/home/x".into()),
             git_panel: PanelState { width: 400., open: false, tab: PanelTab::Files, show_ignored: false },
+            diff_mode: DiffMode::Split,
             ..State::default()
         }
     }
@@ -210,6 +223,7 @@ mod tests {
         assert_eq!(old.tabs[0].claude_session, None);
         assert_eq!(old.git_panel, PanelState::default(), "files from before the git panel load with its defaults");
         assert!(old.tabs[0].expanded.is_empty());
+        assert_eq!(old.diff_mode, DiffMode::Unified);
         // A git panel saved before the file tree existed keeps its width/open.
         std::fs::write(&p, r#"{"version":1,"tabs":[],"active":0,"sidebar":{"width":200,"open":false},"window":null,
             "last_dir":null,"git_panel":{"width":280,"open":false}}"#).unwrap();

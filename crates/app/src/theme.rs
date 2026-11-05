@@ -66,8 +66,15 @@ pub struct DiffColors {
     pub add_fg: Rgba,
     pub del_bg: Rgba,
     pub del_fg: Rgba,
+    /// Changed words inside a paired removed/added line.
+    pub add_word_bg: Rgba,
+    pub del_word_bg: Rgba,
     pub hunk: Rgba,
     pub context: Rgba,
+    /// Split view: the empty side of a one-sided row.
+    pub filler: Rgba,
+    /// Line numbers.
+    pub gutter: Rgba,
 }
 
 pub struct Scrollbar {
@@ -138,8 +145,12 @@ pub static DARK: Theme = Theme {
         add_fg: hex(0xb5e3c0),
         del_bg: hex(0x2a1417),
         del_fg: hex(0xf2b8bd),
+        add_word_bg: hex(0x1f5132),
+        del_word_bg: hex(0x6b2a31),
         hunk: hex(0x5f6b8a),
         context: hex(0xc8c8ce),
+        filler: hex(0x101013),
+        gutter: hex(0x45454d),
     },
     scrollbar: Scrollbar { thumb: hexa(0xffffff1f), active: hexa(0xffffff47) },
     meter: Meter { track: hexa(0xffffff14), ok: hex(0x7c8aff), warn: hex(0xf5a524), crit: hex(0xf87171) },

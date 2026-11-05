@@ -7,3 +7,4 @@ license.workspace = true
 [dependencies]
 notify.workspace = true
 ignore = "0.4.22"
+imara-diff = "=0.2.0"

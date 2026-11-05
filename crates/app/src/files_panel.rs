@@ -413,6 +413,7 @@ impl Render for FileView {
                 })
                 .track_scroll(&self.scroll)
                 .font_family(MONO_FONT)
+                .font_features(gpui::FontFeatures::disable_ligatures())
                 .text_size(px(TERMINAL_FONT_SIZE - 1.))
                 .line_height(lh);
                 div()

@@ -2,6 +2,7 @@
 //! watcher that refreshes the status only after real changes. No UI dependencies. Shells out to `git`.
 
 mod fs;
+pub mod layout;
 pub mod text;
 mod watch;
 

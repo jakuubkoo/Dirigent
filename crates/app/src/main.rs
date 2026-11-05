@@ -46,6 +46,7 @@ fn main() {
             KeyBinding::new("ctrl-shift-r", ResumeAll, ctx),
             KeyBinding::new("ctrl-shift-g", ShowChanges, ctx),
             KeyBinding::new("ctrl-shift-e", ShowFiles, ctx),
+            KeyBinding::new("ctrl-shift-d", ToggleDiffMode, ctx),
             KeyBinding::new("ctrl-1", Activate1, ctx),
             KeyBinding::new("ctrl-2", Activate2, ctx),
             KeyBinding::new("ctrl-3", Activate3, ctx),
