@@ -28,6 +28,9 @@ pub struct State {
     pub diff_engine: DiffEngine,
     #[serde(default)]
     pub notifications: Notifications,
+    /// Remembered projects (added later: missing in older files → seeded from the tabs).
+    #[serde(default)]
+    pub projects: Option<Vec<crate::projects::Project>>,
 }
 
 impl Default for State {
@@ -45,6 +48,7 @@ impl Default for State {
             split_style: SplitStyle::Clean,
             diff_engine: DiffEngine::Auto,
             notifications: Notifications::default(),
+            projects: None,
         }
     }
 }
@@ -232,6 +236,17 @@ pub fn transcript_exists(session_id: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn projects_missing_in_old_files_and_round_trip() {
+        let old = r#"{"version":1,"tabs":[],"active":0,"sidebar":{"width":220.0,"open":true},"window":null,"last_dir":null}"#;
+        let st: State = serde_json::from_str(old).unwrap();
+        assert_eq!(st.projects, None, "None = seed from the tabs on first load");
+        let mut st = st;
+        st.projects = Some(vec![crate::projects::Project { root: "/p".into(), pinned: true, auto_claude: true, claude_args: vec!["--model".into(), "opus".into()], ..Default::default() }]);
+        let back: State = serde_json::from_str(&serde_json::to_string(&st).unwrap()).unwrap();
+        assert_eq!(back, st);
+    }
 
     fn tmp(name: &str) -> PathBuf {
         let d = std::env::temp_dir().join(format!("agent-ide-persist-{}-{name}", std::process::id()));

@@ -13,6 +13,7 @@ mod line_edit;
 mod notify;
 mod perf;
 mod persist;
+mod projects;
 mod scrollbar;
 mod terminal_element;
 mod text_area;
@@ -104,6 +105,7 @@ fn main() {
         let ctx = Some("Workspace");
         cx.bind_keys([
             KeyBinding::new("ctrl-shift-t", NewSession, ctx),
+            KeyBinding::new("ctrl-shift-n", NewInProject, ctx),
             KeyBinding::new("ctrl-shift-w", CloseSession, ctx),
             KeyBinding::new("ctrl-tab", NextSession, ctx),
             KeyBinding::new("ctrl-shift-tab", PrevSession, ctx),

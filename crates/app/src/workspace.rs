@@ -27,7 +27,7 @@ use crate::terminal_view::{Banner, PADDING, TerminalView};
 actions!(
     agent_ide,
     [
-        NewSession, CloseSession, NextSession, PrevSession, Rename, ToggleSidebar, NextNeedsYou, ResumeAll, ShowChanges, ShowFiles, ToggleDiffMode,
+        NewSession, NewInProject, CloseSession, NextSession, PrevSession, Rename, ToggleSidebar, NextNeedsYou, ResumeAll, ShowChanges, ShowFiles, ToggleDiffMode,
         Activate1, Activate2, Activate3, Activate4, Activate5, Activate6, Activate7, Activate8, Activate9
     ]
 );
@@ -37,6 +37,8 @@ const COLLAPSED: f32 = 10.;
 const MIN_SIDEBAR: f32 = 180.;
 const RESIZE_DEBOUNCE: Duration = Duration::from_millis(100);
 const SAVE_DEBOUNCE: Duration = Duration::from_millis(500);
+/// The second option of claude's folder trust dialog (2.1.318), answered when we start claude in a new session.
+const TRUST_PROMPT: &str = "Yes, I trust this folder";
 
 struct Tab {
     id: usize,
@@ -62,6 +64,8 @@ struct Tab {
     notified_seq: u64,
     /// Changes panel: This agent (Some(true)) / All; None = the default (This agent when an agent ran).
     agent_only: Option<bool>,
+    /// Opened as a new session (picker, `+`, CLI): its project is remembered once its repo is resolved.
+    remember: bool,
 }
 
 /// What covers the terminal area: a diff or a file preview. The active session is hidden meanwhile.
@@ -83,8 +87,12 @@ enum TabRepo {
 }
 
 enum Modal {
-    NewSession { edit: LineEdit, error: Option<String> },
+    /// New session: the project picker (Ctrl+Shift+T, the title-bar `+`).
+    Picker(Box<projects_ui::Picker>),
     Rename { tab: usize, edit: LineEdit },
+    ProjectRename { root: PathBuf, edit: LineEdit },
+    /// Per-project defaults: start claude in new sessions, its flags (typed; filtered on save).
+    ProjectDefaults { root: PathBuf, auto: bool, edit: LineEdit },
     /// "Discard …?" / "Commit … files of this agent?" before a git write; `ok` is the action button's label.
     Confirm {
         title: String,
@@ -149,6 +157,12 @@ pub struct Workspace {
     _click_task: Option<Task<()>>,
     /// `agent-ide <path>` requests from other processes.
     _cli_task: Option<Task<()>>,
+    /// Remembered projects (picker, sidebar groups, per-project defaults).
+    projects: crate::projects::Projects,
+    /// The state file had no project list yet: fill it from the restored tabs' groups (`hint_groups`).
+    seed_projects: bool,
+    /// An open dropdown (sidebar group header).
+    menu: Option<Menu>,
     /// A file `agent-ide <file>` asked for in a new tab: shown once that tab's repo is resolved (tab id, file).
     pending_open: Option<(usize, PathBuf)>,
     _subscriptions: Vec<gpui::Subscription>,
@@ -270,6 +284,9 @@ impl Workspace {
             notifications: saved.notifications,
             _click_task: None,
             _cli_task: None,
+            projects: crate::projects::Projects(saved.projects.clone().unwrap_or_default()),
+            seed_projects: saved.projects.is_none(),
+            menu: None,
             pending_open: None,
             _subscriptions: Vec::new(),
             state_path,
@@ -712,6 +729,7 @@ impl Workspace {
             group_hint: None,
             notified_seq: 0,
             agent_only: None,
+            remember: false,
         });
         self.tabs.len() - 1
     }
@@ -751,6 +769,11 @@ impl Workspace {
             return;
         }
         crate::perf::switch_started();
+        if let Some(g) = self.tab_group(idx)
+            && let Some(p) = self.projects.get_mut(&g)
+        {
+            p.last_used = now_secs(); // saved with the next change
+        }
         self.drop_overlay();
         self.tree_rows = None;
         if let Some(old) = self.tabs.get(self.active).and_then(|t| t.view.as_ref()) {
@@ -813,10 +836,19 @@ impl Workspace {
                 })
                 .await;
             let _ = this.update(cx, |w, cx| {
-                for (id, hint) in hints {
+                let seed = std::mem::take(&mut w.seed_projects);
+                let now = now_secs();
+                for (n, (id, hint)) in hints.into_iter().enumerate() {
                     if let Some(t) = w.tabs.iter_mut().find(|t| t.id == id) {
+                        if seed {
+                            // First start with projects: the existing tabs' repos / directories, in tab order.
+                            w.projects.touch(hint.as_deref().unwrap_or(&t.cwd), now - n as i64);
+                        }
                         t.group_hint = hint;
                     }
+                }
+                if seed {
+                    w.mark_dirty(cx);
                 }
                 cx.notify();
             });
@@ -826,16 +858,51 @@ impl Workspace {
 
     /// Sidebar groups: (repo root or None for "Other", tab indices), see `group_order`.
     fn groups(&self) -> Vec<(Option<PathBuf>, Vec<usize>)> {
-        let keys: Vec<Option<PathBuf>> = self
-            .tabs
-            .iter()
-            .map(|t| match &t.repo {
-                TabRepo::Repo(root) => Some(root.clone()),
-                TabRepo::Unknown | TabRepo::Pending => t.group_hint.clone(),
-                TabRepo::NotRepo | TabRepo::GitMissing => None,
-            })
-            .collect();
-        group_order(&keys)
+        let keys: Vec<Option<PathBuf>> = (0..self.tabs.len()).map(|i| self.tab_group(i)).collect();
+        let pinned: Vec<PathBuf> = self.projects.sorted().into_iter().map(|i| &self.projects.0[i]).filter(|p| p.pinned).map(|p| p.root.clone()).collect();
+        with_pinned(group_order(&keys), &pinned)
+    }
+
+    /// A tab's sidebar group: its repo root; outside repos the known project its directory is in, else "Other".
+    fn tab_group(&self, i: usize) -> Option<PathBuf> {
+        let t = &self.tabs[i];
+        match &t.repo {
+            TabRepo::Repo(root) => Some(root.clone()),
+            TabRepo::Unknown | TabRepo::Pending if t.group_hint.is_some() => t.group_hint.clone(),
+            _ => self.projects.of_dir(&t.cwd).map(|p| p.root.clone()),
+        }
+    }
+
+    /// Opens a session in `dir` (picker, group `+`, Ctrl+Shift+N, `agent-ide <path>`): its project is remembered;
+    /// claude starts when asked, else per the project's default, with the project's flags.
+    pub(super) fn new_session(&mut self, dir: PathBuf, claude: Option<bool>, window: &mut Window, cx: &mut Context<Self>) -> usize {
+        let project = self.projects.of_dir(&dir).cloned().unwrap_or_default();
+        self.last_dir = dir.clone();
+        let i = self.add_tab(None, dir, None, Vec::new(), Vec::new());
+        self.tabs[i].remember = true;
+        self.activate(i, window, cx);
+        self.mark_dirty(cx);
+        if claude.unwrap_or(project.auto_claude)
+            && let Some(v) = &self.tabs[i].view
+        {
+            // Our shim is first on the session's PATH: claude starts with our hooks. The PTY holds the line until the
+            // shell has read its rc files.
+            let line: String = std::iter::once("claude".to_string()).chain(project.claude_args.iter().map(|a| sh_word(a))).collect::<Vec<_>>().join(" ");
+            let session = v.read(cx).session.clone();
+            session.write(format!("{line}\r").as_bytes());
+            // A folder claude hasn't seen asks "Do you trust the files in this folder?" with "No, exit" selected:
+            // Down + Enter picks "Yes, I trust this folder". Only for this start, within 30 s; a trusted folder never
+            // shows it and the watch expires. (To become a setting: on/off.)
+            session.answer_once(TRUST_PROMPT, vec![b"\x1b[B".to_vec(), b"\r".to_vec()], Duration::from_secs(30));
+        }
+        i
+    }
+
+    /// Ctrl+Shift+N: a new session in the active session's project (its group), no dialog.
+    fn new_in_project(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(t) = self.tabs.get(self.active) else { return self.open_new_session(window, cx) };
+        let dir = self.tab_group(self.active).unwrap_or_else(|| t.cwd.clone());
+        self.new_session(dir, None, window, cx);
     }
 
     fn visual_order(&self) -> Vec<usize> {
@@ -902,17 +969,27 @@ impl Workspace {
         cx.notify();
     }
 
-    fn open_new_session(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.modal = Some(Modal::NewSession { edit: LineEdit::new(tilde(&self.last_dir)), error: None });
-        window.focus(&self.focus, cx);
-        cx.notify();
-    }
 
     fn start_rename(&mut self, idx: usize, window: &mut Window, cx: &mut Context<Self>) {
         let Some(tab) = self.tabs.get(idx) else { return };
         self.modal = Some(Modal::Rename { tab: idx, edit: LineEdit::new(tab.name.clone()) });
         window.focus(&self.focus, cx);
         cx.notify();
+    }
+
+    /// Session rename (Enter, or a click anywhere outside the field): keep the typed name unless it is empty.
+    fn commit_rename(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(Modal::Rename { tab, edit }) = self.modal.take() {
+            let name = edit.text.trim();
+            if let Some(t) = self.tabs.get_mut(tab)
+                && !name.is_empty()
+                && t.name != name
+            {
+                t.name = name.to_string();
+                self.mark_dirty(cx);
+            }
+            self.close_modal(window, cx);
+        }
     }
 
     fn close_modal(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -923,10 +1000,25 @@ impl Workspace {
     }
 
     fn modal_key(&mut self, ev: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(modal) = self.modal.as_mut() else { return };
         let ks = &ev.keystroke;
+        if self.menu.is_some() {
+            if ks.key == "escape" {
+                self.menu = None;
+                cx.notify();
+            }
+            cx.stop_propagation(); // a dropdown is open: keys go nowhere else
+            return;
+        }
+        let Some(modal) = self.modal.as_mut() else { return };
         let edit = match modal {
-            Modal::NewSession { edit, .. } | Modal::Rename { edit, .. } => edit,
+            Modal::Picker(_) => return self.picker_key(ev, window, cx),
+            Modal::ProjectDefaults { auto, .. } if ks.key == "tab" => {
+                *auto = !*auto;
+                cx.stop_propagation();
+                cx.notify();
+                return;
+            }
+            Modal::Rename { edit, .. } | Modal::ProjectRename { edit, .. } | Modal::ProjectDefaults { edit, .. } => edit,
             Modal::Confirm { .. } => {
                 match ks.key.as_str() {
                     "enter" => self.confirm_ok(window, cx),
@@ -950,28 +1042,33 @@ impl Workspace {
             Edit::Changed => {}
             Edit::Cancel => self.close_modal(window, cx),
             Edit::Submit => match self.modal.take() {
-                Some(Modal::Rename { tab, edit }) => {
+                rename @ Some(Modal::Rename { .. }) => {
+                    self.modal = rename;
+                    self.commit_rename(window, cx);
+                }
+                Some(Modal::ProjectRename { root, edit }) => {
                     let name = edit.text.trim();
-                    if let Some(t) = self.tabs.get_mut(tab)
-                        && !name.is_empty()
-                    {
-                        t.name = name.to_string();
+                    let folder = root.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+                    if self.projects.get(&root).is_none() {
+                        self.projects.touch(&root, now_secs());
+                    }
+                    if let Some(p) = self.projects.get_mut(&root) {
+                        // Empty or the folder name: no custom name.
+                        p.name = (!name.is_empty() && name != folder).then(|| name.to_string());
                         self.mark_dirty(cx);
                     }
                     self.close_modal(window, cx);
                 }
-                Some(Modal::NewSession { edit, .. }) => {
-                    let dir = untilde(edit.text.trim());
-                    if dir.is_dir() {
-                        self.last_dir = dir.clone();
-                        self.modal = None;
-                        let i = self.add_tab(None, dir, None, Vec::new(), Vec::new());
-                        self.activate(i, window, cx);
-                        self.mark_dirty(cx);
-                    } else {
-                        let error = Some(format!("Not a directory: {}", dir.display()));
-                        self.modal = Some(Modal::NewSession { edit, error });
+                Some(Modal::ProjectDefaults { root, auto, edit }) => {
+                    if self.projects.get(&root).is_none() {
+                        self.projects.touch(&root, now_secs()); // a group that wasn't remembered yet
                     }
+                    if let Some(p) = self.projects.get_mut(&root) {
+                        p.auto_claude = auto;
+                        p.claude_args = hook::resume_args(&hook::split_words(&edit.text));
+                        self.mark_dirty(cx);
+                    }
+                    self.close_modal(window, cx);
                 }
                 other => self.modal = other,
             },
@@ -1091,20 +1188,10 @@ impl Workspace {
                     if !dir.is_dir() {
                         return Err(format!("no such directory: {}", dir.display()));
                     }
-                    self.last_dir = dir.clone();
-                    let i = self.add_tab(None, dir, None, Vec::new(), Vec::new());
-                    self.activate(i, window, cx);
-                    self.mark_dirty(cx);
-                    i
+                    // `--claude` forces claude; otherwise the project's default decides.
+                    self.new_session(dir, req.claude.then_some(true), window, cx)
                 }
             };
-            if req.claude && picked.is_none() {
-                // Our shim is first on the session's PATH: claude starts with our hooks. The PTY holds the line until
-                // the shell has read its rc files.
-                if let Some(v) = &self.tabs[i].view {
-                    v.read(cx).session.write(b"claude\r");
-                }
-            }
             if let Some(file) = req.open {
                 if matches!(self.tabs[i].repo, TabRepo::Unknown | TabRepo::Pending) {
                     self.pending_open = Some((self.tabs[i].id, file)); // shown by `render` once resolved
@@ -1197,6 +1284,7 @@ impl Workspace {
             split_style: self.split_style,
             diff_engine: self.diff_engine,
             notifications: self.notifications,
+            projects: Some(self.projects.0.clone()),
             ..Saved::default()
         }
     }
@@ -1350,7 +1438,10 @@ impl Workspace {
 }
 
 mod git_write;
+mod projects_ui;
 mod view;
+
+use projects_ui::Menu;
 
 /// Git: repo resolution per tab, cwd following, the panel and the diff view.
 impl Workspace {
@@ -1388,6 +1479,14 @@ impl Workspace {
         });
         if let TabRepo::Repo(old) = std::mem::replace(&mut t.repo, new) {
             self.repos.release(&old);
+        }
+        if std::mem::take(&mut t.remember) {
+            let root = match &t.repo {
+                TabRepo::Repo(r) => r.clone(),
+                _ => t.cwd.clone(),
+            };
+            self.projects.touch(&root, now_secs());
+            self.mark_dirty(cx);
         }
         if let git::Discovery::Repo(r) = found {
             self.repos.acquire(r);
@@ -1427,6 +1526,13 @@ impl Workspace {
             changed |= self.repos_seen.insert(root.clone(), ptr) != Some(ptr);
         }
         self.repos_seen.retain(|r, _| roots.contains(r));
+        for root in &roots {
+            if let (Some(st), Some(p)) = (self.repos.status(root), self.projects.get_mut(root))
+                && p.branch.as_deref() != Some(st.branch.as_str())
+            {
+                p.branch = Some(st.branch.clone()); // saved with the next change (the picker shows it)
+            }
+        }
         crate::perf::event(if changed { "git refresh (changed)" } else { "git refresh (same)" });
         if changed {
             cx.notify();
@@ -2078,6 +2184,14 @@ fn group_order(keys: &[Option<PathBuf>]) -> Vec<(Option<PathBuf>, Vec<usize>)> {
     groups
 }
 
+/// Pinned projects without tabs become empty groups after the tab groups (before "Other").
+fn with_pinned(mut groups: Vec<(Option<PathBuf>, Vec<usize>)>, pinned: &[PathBuf]) -> Vec<(Option<PathBuf>, Vec<usize>)> {
+    let at = groups.iter().position(|(k, _)| k.is_none()).unwrap_or(groups.len());
+    let empty: Vec<_> = pinned.iter().filter(|p| !groups.iter().any(|(k, _)| k.as_ref() == Some(*p))).map(|p| (Some(p.clone()), Vec::new())).collect();
+    groups.splice(at..at, empty);
+    groups
+}
+
 fn home() -> PathBuf {
     std::env::var_os("HOME").map(PathBuf::from).unwrap_or_else(|| PathBuf::from("/"))
 }
@@ -2087,13 +2201,6 @@ fn tilde(p: &Path) -> String {
         Ok(rest) if rest.as_os_str().is_empty() => "~".into(),
         Ok(rest) => format!("~/{}", rest.display()),
         Err(_) => p.display().to_string(),
-    }
-}
-
-fn untilde(s: &str) -> PathBuf {
-    match s.strip_prefix('~') {
-        Some(rest) if rest.is_empty() || rest.starts_with('/') => home().join(rest.trim_start_matches('/')),
-        _ => PathBuf::from(s),
     }
 }
 
@@ -2144,7 +2251,7 @@ fn sh_word(s: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{fmt_remaining, group_order, sh_word};
+    use super::{fmt_remaining, group_order, sh_word, with_pinned};
     use std::path::PathBuf;
 
     #[test]
@@ -2155,6 +2262,14 @@ mod tests {
         assert_eq!(groups, vec![(b, vec![1, 3]), (a, vec![2]), (None, vec![0, 4])]);
         let order: Vec<usize> = groups.into_iter().flat_map(|(_, m)| m).collect();
         assert_eq!(order, vec![1, 3, 2, 0, 4], "Ctrl+Tab / Ctrl+N follow this order");
+    }
+
+    #[test]
+    fn pinned_projects_without_tabs_are_empty_groups_before_other() {
+        let (a, p) = (PathBuf::from("/a"), PathBuf::from("/p"));
+        let groups = with_pinned(group_order(&[None, Some(a.clone())]), &[a.clone(), p.clone()]);
+        assert_eq!(groups, vec![(Some(a), vec![1]), (Some(p.clone()), vec![]), (None, vec![0])], "a has tabs: once");
+        assert_eq!(with_pinned(Vec::new(), std::slice::from_ref(&p)), vec![(Some(p), vec![])]);
     }
 
     #[test]

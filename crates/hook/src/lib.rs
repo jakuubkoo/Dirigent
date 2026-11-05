@@ -173,9 +173,44 @@ pub fn resume_args(args: &[String]) -> Vec<String> {
     out
 }
 
+/// Splits a typed flag line into words like a shell would for plain words: whitespace separates, `'…'` and `"…"`
+/// group (no expansion), `\` escapes the next char. An unterminated quote takes the rest of the line.
+pub fn split_words(line: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut word: Option<String> = None;
+    let mut chars = line.chars();
+    while let Some(c) = chars.next() {
+        match c {
+            c if c.is_whitespace() => out.extend(word.take()),
+            '\'' | '"' => {
+                let w = word.get_or_insert_with(String::new);
+                for q in chars.by_ref() {
+                    if q == c {
+                        break;
+                    }
+                    w.push(q);
+                }
+            }
+            '\\' => word.get_or_insert_with(String::new).extend(chars.next()),
+            c => word.get_or_insert_with(String::new).push(c),
+        }
+    }
+    out.extend(word);
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn split_words_like_a_shell() {
+        assert_eq!(split_words("  --model opus --add-dir '/a b' \"c\"d\\ e ''"), ["--model", "opus", "--add-dir", "/a b", "cd e", ""]);
+        assert!(split_words("   ").is_empty());
+        // Typed defaults go through the resume allowlist: bypasses never survive.
+        let words = split_words("--model opus --dangerously-skip-permissions --permission-mode bypassPermissions --permission-mode=bypassPermissions --foo x --effort high");
+        assert_eq!(resume_args(&words), ["--model", "opus", "--effort", "high"]);
+    }
 
     fn fixture(name: &str) -> String {
         std::fs::read_to_string(format!("{}/tests/fixtures/{name}.json", env!("CARGO_MANIFEST_DIR"))).unwrap()

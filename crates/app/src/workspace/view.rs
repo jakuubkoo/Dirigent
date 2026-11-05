@@ -122,7 +122,14 @@ impl Render for Workspace {
             .when(chrome.border > px(0.), |d| d.border(chrome.border).border_color(t.border.strong))
             // Capture phase: an open modal gets every key first, wherever focus ended up (a click can focus the diff).
             .capture_key_down(cx.listener(Self::modal_key))
+            // A click outside the inline session rename field saves it (like Enter).
+            .on_mouse_down(MouseButton::Left, cx.listener(|w, _, window, cx| {
+                if matches!(w.modal, Some(Modal::Rename { .. })) {
+                    w.commit_rename(window, cx);
+                }
+            }))
             .on_action(cx.listener(|w, _: &NewSession, window, cx| w.open_new_session(window, cx)))
+            .on_action(cx.listener(|w, _: &NewInProject, window, cx| w.new_in_project(window, cx)))
             .on_action(cx.listener(|w, _: &CloseSession, window, cx| w.close_active(window, cx)))
             .on_action(cx.listener(|w, _: &NextSession, window, cx| w.cycle(1, window, cx)))
             .on_action(cx.listener(|w, _: &PrevSession, window, cx| w.cycle(-1, window, cx)))
@@ -181,7 +188,8 @@ impl Render for Workspace {
                     .children(right),
             )
             .child(self.status_bar())
-            .children(self.modal_view(cx))
+            .children(self.modal_view(window, cx))
+            .children(self.menu_view(cx))
             .when(chrome.csd, |d| d.children(window_chrome::resize_handles(chrome.tiling)))
     }
 }
@@ -375,11 +383,54 @@ impl Workspace {
         for (key, members) in self.groups() {
             let collapsed = self.collapsed.contains(&group_id(&key));
             let needs = members.iter().filter(|&&i| self.agent(i).state == agent::State::NeedsYou).count();
+            let project = key.as_ref().and_then(|r| self.projects.get(r));
+            let pinned = project.is_some_and(|p| p.pinned);
             let name: SharedString = match &key {
-                Some(root) => root.file_name().map_or(root.display().to_string(), |n| n.to_string_lossy().into_owned()).into(),
+                Some(root) => project.map(|p| p.display()).unwrap_or_else(|| {
+                    root.file_name().map_or(root.display().to_string(), |n| n.to_string_lossy().into_owned())
+                }).into(),
                 None => "Other".into(),
             };
             let id = group_id(&key);
+            let gname = SharedString::from(format!("gh-{}", id.display()));
+            let menu_here = self.menu.as_ref().is_some_and(|m| Some(&m.root) == key.as_ref());
+            // Hover buttons: + (a session per the project default; Shift: the opposite), ▾ (with/without claude),
+            // ⋯ (pin, rename, defaults, remove). Never toggle the group.
+            let buttons = key.clone().map(|root| {
+                let b = |id: &'static str, glyph: &'static str, hint: &'static str| {
+                    div()
+                        .id(id)
+                        .flex_none()
+                        .size(px(20.))
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .rounded(px(radius::SM))
+                        .cursor_pointer()
+                        .hover(|s| s.bg(t.bg.selected))
+                        .child(ui::icon(glyph, 13., t.text.muted))
+                        .tooltip(tip(hint))
+                };
+                let (r1, r2, r3) = (root.clone(), root.clone(), root);
+                div()
+                    .ml_auto()
+                    .flex_none()
+                    .flex()
+                    .items_center()
+                    .when(!menu_here, |d| d.opacity(0.).group_hover(gname.clone(), |s| s.opacity(1.)))
+                    .child(b("g-plus", icon::PLUS, "New session here (Shift: the other claude choice)").on_click(cx.listener(move |w, ev: &ClickEvent, window, cx| {
+                        cx.stop_propagation();
+                        w.group_plus(r1.clone(), ev.modifiers().shift, window, cx);
+                    })))
+                    .child(b("g-new", icon::CHEVRON_DOWN, "New session…").on_click(cx.listener(move |w, ev: &ClickEvent, _, cx| {
+                        cx.stop_propagation();
+                        w.open_menu(r2.clone(), projects_ui::MenuKind::New, ev.position(), cx);
+                    })))
+                    .child(b("g-more", icon::MORE, "Project: pin, rename, defaults").on_click(cx.listener(move |w, ev: &ClickEvent, _, cx| {
+                        cx.stop_propagation();
+                        w.open_menu(r3.clone(), projects_ui::MenuKind::Project, ev.position(), cx);
+                    })))
+            });
             items.push(
                 div()
                     .id(SharedString::from(format!("group-{}", id.display())))
@@ -395,18 +446,21 @@ impl Workspace {
                     .hover(|s| s.bg(t.bg.hover))
                     .text_size(px(text_size::SM))
                     .child(ui::icon(if collapsed { icon::CHEVRON_RIGHT } else { icon::CHEVRON_DOWN }, 12., t.text.dim))
+                    .group(gname.clone())
                     .child(div().min_w_0().truncate().font_weight(FontWeight::MEDIUM).text_color(t.text.muted).child(name))
+                    .when(pinned, |d| d.child(div().flex_none().child(ui::icon(icon::PIN, 10., t.text.dim))))
                     .child(div().flex_none().text_size(px(text_size::XS)).text_color(t.text.dim).child(members.len().to_string()))
                     .when(needs > 0, |d| {
                         d.child(
                             div()
-                                .ml_auto()
+                                .when(buttons.is_none(), |d| d.ml_auto())
                                 .flex_none()
                                 .text_size(px(text_size::XS))
                                 .text_color(t.state.needs_you)
                                 .child(format!("{needs} need{} you", if needs == 1 { "s" } else { "" })),
                         )
                     })
+                    .children(buttons)
                     .on_click(cx.listener(move |w, _: &ClickEvent, _, cx| w.toggle_group(id.clone(), cx)))
                     .into_any_element(),
             );
@@ -438,7 +492,13 @@ impl Workspace {
         if let Some(Modal::Rename { tab: r, edit }) = &self.modal
             && *r == i
         {
-            return div().id(("tab", tab.id)).px(px(space::MD)).py(px(space::XS)).child(text_field(edit)).into_any_element();
+            return div()
+                .id(("tab", tab.id))
+                .px(px(space::MD))
+                .py(px(space::XS))
+                .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation()) // inside: keep editing
+                .child(text_field(edit))
+                .into_any_element();
         }
         let bold = agent.unseen || (unread && !active);
         let state_icon: gpui::AnyElement = match agent.state {
@@ -700,7 +760,7 @@ impl Workspace {
             })
     }
 
-    fn modal_view(&self, cx: &mut Context<Self>) -> Option<gpui::AnyElement> {
+    fn modal_view(&self, window: &Window, cx: &mut Context<Self>) -> Option<gpui::AnyElement> {
         let t = theme::get();
         let card = || {
             div()
@@ -805,26 +865,87 @@ impl Workspace {
                     .into_any_element(),
             );
         }
-        let Some(Modal::NewSession { edit, error }) = &self.modal else { return None };
-        Some(
-            scrim().child(
-                card()
+        match &self.modal {
+            Some(Modal::Picker(p)) => Some(
+                div()
+                    .absolute()
+                    .size_full()
+                    .occlude()
+                    .flex()
+                    .justify_center()
+                    .items_center()
+                    .bg(t.bg.scrim)
+                    .child(self.picker_view(p, window, cx))
+                    .into_any_element(),
+            ),
+            Some(Modal::ProjectRename { root, edit }) => Some(
+                scrim()
                     .child(
-                        div()
-                            .flex()
-                            .items_center()
-                            .gap(px(space::SM))
-                            .child(ui::icon(icon::PLUS, 15., t.accent))
-                            .child(div().font_weight(FontWeight::SEMIBOLD).child("New session")),
+                        card()
+                            .child(div().font_weight(FontWeight::SEMIBOLD).child(format!("Rename {}", short_path(root))))
+                            .child(div().text_size(px(text_size::SM)).text_color(t.text.muted).child("Shown in the sidebar and the picker. Empty: the folder name."))
+                            .child(text_field(edit))
+                            .child(div().text_size(px(text_size::XS)).text_color(t.text.dim).child("Enter to save · Esc to cancel")),
                     )
-                    .child(div().text_size(px(text_size::SM)).text_color(t.text.muted).child("Working directory the shell starts in."))
-                    .child(text_field(edit))
-                    .children(error.clone().map(|e| div().text_size(px(text_size::SM)).text_color(t.state.error).child(e)))
-                    .child(div().text_size(px(text_size::XS)).text_color(t.text.dim).child("Enter to create · Esc to cancel")),
-            )
-            .into_any_element(),
-        )
+                    .into_any_element(),
+            ),
+            Some(Modal::ProjectDefaults { root, auto, edit }) => {
+                let words = hook::split_words(&edit.text);
+                let kept = hook::resume_args(&words);
+                let dropped = dropped_words(&words, &kept);
+                let auto = *auto;
+                Some(
+                    scrim()
+                        .child(
+                            card()
+                                .child(div().font_weight(FontWeight::SEMIBOLD).child(format!("Defaults for {}", short_path(root))))
+                                .child(
+                                    div()
+                                        .id("defaults-auto")
+                                        .flex()
+                                        .items_center()
+                                        .gap(px(space::SM))
+                                        .cursor_pointer()
+                                        .text_size(px(text_size::SM))
+                                        .child(div().size(px(12.)).rounded(px(3.)).border_1().border_color(if auto { t.accent } else { t.border.strong }).when(auto, |d| d.bg(t.accent)))
+                                        .child("Start claude in new sessions (Tab)")
+                                        .on_click(cx.listener(|w, _: &ClickEvent, _, cx| {
+                                            if let Some(Modal::ProjectDefaults { auto, .. }) = &mut w.modal {
+                                                *auto = !*auto;
+                                                cx.notify();
+                                            }
+                                        })),
+                                )
+                                .child(div().text_size(px(text_size::SM)).text_color(t.text.muted).child("Claude flags for new sessions here (e.g. --model opus --effort high). Only flags safe to replay are kept; permission bypasses never."))
+                                .child(text_field(edit))
+                                .when(!dropped.is_empty(), |d| {
+                                    d.child(div().text_size(px(text_size::XS)).text_color(t.state.needs_you).child(format!("Will be dropped (not allowed): {}", dropped.join(" "))))
+                                })
+                                .child(div().text_size(px(text_size::XS)).text_color(t.text.dim).child("Enter to save · Esc to cancel")),
+                        )
+                        .into_any_element(),
+                )
+            }
+            _ => None,
+        }
     }
+}
+
+/// The typed words `resume_args` didn't keep (kept is a subsequence of words).
+fn dropped_words(words: &[String], kept: &[String]) -> Vec<String> {
+    let mut k = kept.iter().peekable();
+    words
+        .iter()
+        .filter(|w| {
+            if k.peek() == Some(w) {
+                k.next();
+                false
+            } else {
+                true
+            }
+        })
+        .cloned()
+        .collect()
 }
 
 fn text_field(edit: &LineEdit) -> impl IntoElement {

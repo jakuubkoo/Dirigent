@@ -1,6 +1,7 @@
 //! One agent session: a PTY running a shell plus its terminal state. No UI dependencies.
 
 pub mod keys;
+pub mod expect;
 pub mod osc7;
 
 use std::io::{Read, Write};
@@ -98,6 +99,30 @@ impl EventListener for Listener {
 const DEFAULT_COLORS: (Rgb, Rgb) = (Rgb { r: 0xd8, g: 0xd8, b: 0xd8 }, Rgb { r: 0x1e, g: 0x1e, b: 0x24 });
 static REPORTED: std::sync::OnceLock<(Rgb, Rgb)> = std::sync::OnceLock::new();
 
+/// Reader thread: feeds the pending `answer_once`; on a match the reply goes out from a short-lived thread (the
+/// pauses must not stall reading).
+fn answer(flags: &Flags, writer: &Writer, chunk: &[u8]) {
+    let mut slot = flags.expect.lock().unwrap();
+    let Some(e) = slot.as_mut() else { return };
+    let expired = std::time::Instant::now() > e.deadline;
+    let hit = !expired && e.feed(chunk);
+    if hit || expired {
+        let done = slot.take();
+        flags.expecting.store(false, Ordering::Release);
+        if let (true, Some(e)) = (hit, done) {
+            let writer = writer.clone();
+            let _ = thread::Builder::new().name("pty-answer".into()).spawn(move || {
+                for part in &e.reply {
+                    // The TUI drops keys sent right as it draws (claude 2.1.318's trust dialog: ~0.5 s): wait each time.
+                    thread::sleep(std::time::Duration::from_millis(400));
+                    let mut w = writer.lock().unwrap();
+                    let _ = w.write_all(part).and_then(|_| w.flush());
+                }
+            });
+        }
+    }
+}
+
 /// The foreground/background the terminal reports to apps that ask (OSC 10/11): set once at startup to the
 /// UI theme's terminal colors, so e.g. Claude Code picks its light/dark styling to match.
 pub fn set_reported_colors(fg: [u8; 3], bg: [u8; 3]) {
@@ -129,6 +154,9 @@ struct Flags {
     /// Last directory the shell reported (OSC 7); `cwd_changed` until the UI takes it.
     cwd: Mutex<Option<PathBuf>>,
     cwd_changed: AtomicBool,
+    /// A prompt to answer once (`answer_once`); checked per chunk only while set.
+    expect: Mutex<Option<expect::Expect>>,
+    expecting: AtomicBool,
 }
 
 impl Session {
@@ -159,7 +187,7 @@ impl Session {
         let flags = Arc::new(Flags::default());
 
         let (tx, wakeups) = async_channel::bounded(1);
-        let (term2, flags2, child2) = (term.clone(), flags.clone(), child.clone());
+        let (term2, flags2, child2, writer2) = (term.clone(), flags.clone(), child.clone(), writer.clone());
         thread::Builder::new().name("pty-reader".into()).spawn(move || {
             let mut parser: Processor = Processor::new();
             let mut buf = vec![0u8; 64 * 1024];
@@ -179,6 +207,9 @@ impl Session {
                     }
                     changed
                 });
+                if flags2.expecting.load(Ordering::Acquire) {
+                    answer(&flags2, &writer2, &buf[..n]);
+                }
                 // Lock held only while parsing this chunk, never while the UI shapes/paints.
                 parser.advance(&mut *term2.lock(), &buf[..n]);
                 // Hidden sessions wake the UI only on the unread flip, so background floods cost the UI nothing.
@@ -210,6 +241,13 @@ impl Session {
             child,
             size: size_shared,
         })
+    }
+
+    /// Answers a prompt once: when `needle` (whitespace ignored, escapes stripped) appears in the output before
+    /// `within` runs out, writes `reply`'s parts, each after a 400 ms pause. Replaces an earlier one.
+    pub fn answer_once(&self, needle: &str, reply: Vec<Vec<u8>>, within: std::time::Duration) {
+        *self.flags.expect.lock().unwrap() = Some(expect::Expect::new(needle, reply, std::time::Instant::now() + within));
+        self.flags.expecting.store(true, Ordering::Release);
     }
 
     pub fn write(&self, bytes: &[u8]) {

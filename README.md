@@ -22,6 +22,13 @@ It checks the build dependencies first and, if something is missing, prints the 
 
 `agent-ide --version` prints the installed build (git hash and commit date).
 
+## Projects
+
+Every directory you open a session in is remembered as a project (its repo root, or the directory).
+Ctrl+Shift+T opens the picker: type to fuzzy-search projects, or a path (`/`, `~`, `.`) with Tab completion;
+Enter opens a session, Shift+Enter also starts claude. Hover a sidebar group for `+` (new session there),
+`▾` (with or without claude) and `⋯` (pin to sidebar, rename, defaults: start claude automatically and its flags).
+
 ## Open from the terminal
 
 ```sh
@@ -61,7 +68,8 @@ named by `AGENT_IDE_STATE`. Your `~/.claude/settings.json` is never modified.
 
 | Keys | Action |
 |---|---|
-| Ctrl+Shift+T | New session |
+| Ctrl+Shift+T | New session (project picker) |
+| Ctrl+Shift+N | New session in the current project |
 | Ctrl+Shift+W | Close session |
 | Ctrl+Tab / Ctrl+Shift+Tab | Next / previous session |
 | Ctrl+1..9 | Jump to session |

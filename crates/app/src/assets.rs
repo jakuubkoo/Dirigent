@@ -20,7 +20,7 @@ static ICONS: &[(&str, &[u8])] = icons![
     "files", "git-compare", "circle-check", "loader-circle", "moon", "triangle-alert", "git-branch",
     "refresh-cw", "rotate-ccw", "eye", "eye-off", "folder", "folder-open", "file", "file-code", "file-text",
     "file-json", "file-cog", "file-lock", "file-image", "file-terminal", "file-archive", "terminal",
-    "users", "square-terminal", "sparkles",
+    "users", "square-terminal", "sparkles", "pin", "ellipsis",
 ];
 
 static FONTS: &[&[u8]] = &[

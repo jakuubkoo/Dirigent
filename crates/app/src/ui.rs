@@ -45,6 +45,8 @@ pub mod icon {
     pub const VIA_COMMAND: &str = "icons/square-terminal.svg";
     /// Commit box: generate a message.
     pub const GENERATE: &str = "icons/sparkles.svg";
+    pub const PIN: &str = "icons/pin.svg";
+    pub const MORE: &str = "icons/ellipsis.svg";
 }
 
 #[cfg(test)]
@@ -54,7 +56,7 @@ pub const ALL_ICONS: &[&str] = &[
     icon::RESUMABLE, icon::WARNING, icon::BRANCH, icon::REFRESH, icon::RESTART, icon::SHOW, icon::HIDE, icon::FOLDER,
     icon::FOLDER_OPEN, icon::FILE, icon::FILE_CODE, icon::FILE_TEXT, icon::FILE_JSON, icon::FILE_CONFIG,
     icon::FILE_LOCK, icon::FILE_IMAGE, icon::FILE_SHELL, icon::FILE_ARCHIVE, icon::TERMINAL,
-    icon::SHARED, icon::VIA_COMMAND, icon::GENERATE,
+    icon::SHARED, icon::VIA_COMMAND, icon::GENERATE, icon::PIN, icon::MORE,
 ];
 
 /// An icon at `size` px in `color` (rasterized once per path/size, recolored for free).
