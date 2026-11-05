@@ -17,7 +17,7 @@ use gpui::{
 use crate::scrollbar::{self, scrollbar};
 use crate::theme::{self, MONO_FONT, TERMINAL_FONT_SIZE, height, radius, space, text_size};
 use crate::ui::{self, icon, line_counts, tip};
-use crate::persist::DiffMode;
+use crate::persist::{DiffMode, SplitStyle};
 use crate::workspace::Workspace;
 
 /// One watcher per repo root, refcounted by the tabs whose cwd is in it. The last tab leaving drops it (and its
@@ -325,6 +325,7 @@ pub struct DiffView {
     /// The saved preference; `narrow` forces unified without changing it.
     mode: DiffMode,
     narrow: bool,
+    split_style: SplitStyle,
     scroll: UniformListScrollHandle,
     drag: scrollbar::Drag,
     focus: FocusHandle,
@@ -337,11 +338,12 @@ impl DiffView {
         root: PathBuf,
         file: FileChange,
         line_height: gpui::Pixels,
-        (mode, narrow): (DiffMode, bool),
+        (mode, split_style, narrow): (DiffMode, SplitStyle, bool),
         workspace: WeakEntity<Workspace>,
         cx: &mut Context<Self>,
     ) -> Self {
         Self {
+            split_style,
             root,
             file,
             layout: None,
@@ -380,11 +382,12 @@ impl DiffView {
         self.mode == DiffMode::Split && !self.narrow
     }
 
-    /// Mode or width changed: keep the line at the top in view across the switch.
-    pub fn set_mode(&mut self, mode: DiffMode, narrow: bool, cx: &mut Context<Self>) {
-        if (mode, narrow) == (self.mode, self.narrow) {
+    /// Mode, split style or width changed: keep the line at the top in view across a mode switch.
+    pub fn set_mode(&mut self, mode: DiffMode, split_style: SplitStyle, narrow: bool, cx: &mut Context<Self>) {
+        if (mode, split_style, narrow) == (self.mode, self.split_style, self.narrow) {
             return;
         }
+        self.split_style = split_style;
         let was_split = self.split();
         (self.mode, self.narrow) = (mode, narrow);
         if was_split != self.split()
@@ -413,39 +416,18 @@ impl DiffView {
     }
 
     fn mode_switch(&self) -> impl IntoElement + use<> {
-        let t = theme::get();
-        let split = self.split();
-        let narrow = self.narrow;
-        let seg = |id: &'static str, label: &'static str, on: bool, enabled: bool| {
-            div()
-                .id(id)
-                .px(px(space::SM))
-                .rounded(px(radius::SM))
-                .text_size(px(text_size::XS))
-                .when(on, |d| d.bg(t.bg.selected).text_color(t.text.primary))
-                .when(!on && enabled, |d| d.text_color(t.text.muted).cursor_pointer().hover(|s| s.bg(t.bg.hover)))
-                .when(!enabled, |d| d.text_color(t.text.faint).cursor_not_allowed())
-                .child(label)
-        };
-        let ws = self.workspace.clone();
-        let ws2 = self.workspace.clone();
-        div()
-            .flex()
-            .flex_none()
-            .p(px(space::XXS))
-            .gap(px(space::XXS))
-            .rounded(px(radius::MD))
-            .border_1()
-            .border_color(t.border.subtle)
+        let (split, narrow) = (self.split(), self.narrow);
+        let (ws, ws2) = (self.workspace.clone(), self.workspace.clone());
+        segmented()
             .child(
-                seg("diff-unified", "Unified", !split, true)
+                segment("diff-unified", "Unified", !split, true)
                     .tooltip(tip("Unified diff (Ctrl+Shift+D)"))
                     .on_click(move |_: &ClickEvent, _, cx| {
                         let _ = ws.update(cx, |w, cx| w.set_diff_mode(DiffMode::Unified, cx));
                     }),
             )
             .child(
-                seg("diff-split", "Split", split, !narrow)
+                segment("diff-split", "Split", split, !narrow)
                     .tooltip(tip(if narrow { "Too narrow for split" } else { "Side by side (Ctrl+Shift+D)" }))
                     .on_click(move |_: &ClickEvent, _, cx| {
                         if !narrow {
@@ -454,6 +436,53 @@ impl DiffView {
                     }),
             )
     }
+
+    /// Classic / Clean, shown only while the split view is.
+    fn style_switch(&self) -> impl IntoElement + use<> {
+        let clean = self.split_style == SplitStyle::Clean;
+        let (ws, ws2) = (self.workspace.clone(), self.workspace.clone());
+        segmented()
+            .child(
+                segment("split-classic", "Classic", !clean, true)
+                    .tooltip(tip("Line backgrounds and +/- markers"))
+                    .on_click(move |_: &ClickEvent, _, cx| {
+                        let _ = ws.update(cx, |w, cx| w.set_split_style(SplitStyle::Classic, cx));
+                    }),
+            )
+            .child(
+                segment("split-clean", "Clean", clean, true)
+                    .tooltip(tip("Plain code, only the changed tokens colored"))
+                    .on_click(move |_: &ClickEvent, _, cx| {
+                        let _ = ws2.update(cx, |w, cx| w.set_split_style(SplitStyle::Clean, cx));
+                    }),
+            )
+    }
+}
+
+/// A small segmented control (the diff header's switches).
+fn segmented() -> gpui::Div {
+    let t = theme::get();
+    div()
+        .flex()
+        .flex_none()
+        .p(px(space::XXS))
+        .gap(px(space::XXS))
+        .rounded(px(radius::MD))
+        .border_1()
+        .border_color(t.border.subtle)
+}
+
+fn segment(id: &'static str, label: &'static str, on: bool, enabled: bool) -> gpui::Stateful<gpui::Div> {
+    let t = theme::get();
+    div()
+        .id(id)
+        .px(px(space::SM))
+        .rounded(px(radius::SM))
+        .text_size(px(text_size::XS))
+        .when(on, |d| d.bg(t.bg.selected).text_color(t.text.primary))
+        .when(!on && enabled, |d| d.text_color(t.text.muted).cursor_pointer().hover(|s| s.bg(t.bg.hover)))
+        .when(!enabled, |d| d.text_color(t.text.faint).cursor_not_allowed())
+        .child(label)
 }
 
 /// First split row showing unified line `ix` (on either side).
@@ -507,11 +536,33 @@ fn line_colors(kind: LineKind) -> (Option<gpui::Rgba>, gpui::Rgba, Option<gpui::
     }
 }
 
+/// How a line is drawn. Clean (split only): no line background or marker; a paired changed line shows syntax
+/// colors with only its changed tokens in red/green (bold, faint background); an unpaired one is all red/green.
+#[derive(Clone, Copy, PartialEq)]
+enum Look {
+    Classic,
+    CleanPaired,
+    CleanWhole,
+}
+
+/// Clean style colors of a changed line: (text/number color, token background); None for other kinds.
+fn clean_tone(kind: LineKind) -> Option<(gpui::Rgba, gpui::Rgba)> {
+    let d = &theme::get().diff;
+    match kind {
+        LineKind::Del => Some((d.clean_del, d.clean_del_bg)),
+        LineKind::Add => Some((d.clean_add, d.clean_add_bg)),
+        _ => None,
+    }
+}
+
 /// One line as a single text run: right-aligned line numbers (`nums`: number, width), marker, text; gutter
-/// color and word highlights as highlight ranges. One shaped line per row keeps scrolling cheap.
-fn line_text(l: &DLine, nums: &[(Option<u32>, usize)]) -> gpui::Div {
+/// color, syntax colors and word highlights as highlight ranges. One shaped line per row keeps scrolling cheap.
+fn line_text(l: &DLine, nums: &[(Option<u32>, usize)], look: Look) -> gpui::Div {
     use std::fmt::Write;
-    let (_, fg, word_bg, marker) = line_colors(l.kind);
+    let t = theme::get();
+    let (_, mut fg, word_bg, marker) = line_colors(l.kind);
+    let tone = clean_tone(l.kind).filter(|_| look != Look::Classic);
+    let marker = if tone.is_some() { ' ' } else { marker };
     let mut s = String::with_capacity(l.text.len() + 16);
     for &(n, w) in nums {
         match n {
@@ -523,17 +574,38 @@ fn line_text(l: &DLine, nums: &[(Option<u32>, usize)]) -> gpui::Div {
     write!(s, " {marker} ").unwrap();
     let start = s.len();
     s.push_str(&l.text);
-    let mut hl = vec![(0..gutter, HighlightStyle { color: Some(theme::get().diff.gutter.into()), ..Default::default() })];
-    // Syntax sets the text color; the word-diff background sits on top.
-    let syntax = &theme::get().syntax;
-    hl.extend(l.runs.iter().map(|r| {
-        let style = HighlightStyle {
-            color: r.class.and_then(|c| syntax.color(c)).map(Into::into),
-            background_color: word_bg.filter(|_| r.word).map(Into::into),
-            ..Default::default()
-        };
-        (start + r.range.start as usize..start + r.range.end as usize, style)
-    }));
+    let gutter_color = tone.map_or(t.diff.gutter, |(c, _)| c);
+    let mut hl = vec![(0..gutter, HighlightStyle { color: Some(gutter_color.into()), ..Default::default() })];
+    let range = |r: &git::layout::Run| start + r.range.start as usize..start + r.range.end as usize;
+    match (look, tone) {
+        // Whole added/removed line: all of it in the tone, nothing else.
+        (Look::CleanWhole, Some((c, _))) => fg = c,
+        (Look::CleanPaired, Some((c, bg))) => {
+            fg = t.diff.context;
+            hl.extend(l.runs.iter().map(|r| {
+                let style = if r.word {
+                    HighlightStyle {
+                        color: Some(c.into()),
+                        background_color: Some(bg.into()),
+                        font_weight: Some(gpui::FontWeight::BOLD),
+                        ..Default::default()
+                    }
+                } else {
+                    HighlightStyle { color: r.class.and_then(|c| t.syntax.color(c)).map(Into::into), ..Default::default() }
+                };
+                (range(r), style)
+            }));
+        }
+        // Classic (and context lines): syntax sets the text color; the word-diff background sits on top.
+        _ => hl.extend(l.runs.iter().map(|r| {
+            let style = HighlightStyle {
+                color: r.class.and_then(|c| t.syntax.color(c)).map(Into::into),
+                background_color: word_bg.filter(|_| r.word).map(Into::into),
+                ..Default::default()
+            };
+            (range(r), style)
+        })),
+    }
     div()
         .flex_1()
         .min_w_0()
@@ -545,30 +617,63 @@ fn line_text(l: &DLine, nums: &[(Option<u32>, usize)]) -> gpui::Div {
 
 fn unified_row(l: &DLine, g: Geom) -> gpui::Div {
     let (bg, ..) = line_colors(l.kind);
-    div().flex().w_full().h(g.lh).pr(px(14.)).when_some(bg, |r, bg| r.bg(bg)).child(line_text(l, &[(l.old, g.old), (l.new, g.new)]))
+    div()
+        .flex()
+        .w_full()
+        .h(g.lh)
+        .pr(px(14.))
+        .when_some(bg, |r, bg| r.bg(bg))
+        .child(line_text(l, &[(l.old, g.old), (l.new, g.new)], Look::Classic))
 }
 
-fn split_half(l: Option<&DLine>, old_side: bool, g: Geom) -> gpui::Div {
+fn split_half(l: Option<&DLine>, old_side: bool, g: Geom, look: Look) -> gpui::Div {
     let half = div().flex().flex_1().flex_basis(px(0.)).min_w_0().h_full().overflow_hidden();
-    let Some(l) = l else { return half.bg(theme::get().diff.filler) };
-    let (bg, ..) = line_colors(l.kind);
+    let Some(l) = l else {
+        return half.when(look == Look::Classic, |h| h.bg(theme::get().diff.filler));
+    };
     let num = if old_side { (l.old, g.old) } else { (l.new, g.new) };
-    half.when_some(bg, |h, bg| h.bg(bg)).child(line_text(l, &[num]))
+    if look == Look::Classic {
+        let (bg, ..) = line_colors(l.kind);
+        return half.when_some(bg, |h, bg| h.bg(bg)).child(line_text(l, &[num], look));
+    }
+    // Clean: a thin bar by the number marks a whole added/removed line (same width everywhere, so text aligns).
+    let bar = clean_tone(l.kind).filter(|_| look == Look::CleanWhole).map(|(c, _)| c);
+    half.child(div().flex_none().w(px(2.)).h_full().when_some(bar, |b, c| b.bg(c))).child(line_text(l, &[num], look))
 }
 
-fn split_row(l: &Layout, r: SplitRow, g: Geom) -> gpui::Div {
+/// Clean style of a split row: a removed/added pair with changed tokens to show is drawn token-wise; anything else
+/// (one-sided, too different, nothing token-level changed) as whole lines.
+fn clean_look(left: Option<&DLine>, right: Option<&DLine>) -> Look {
+    match (left, right) {
+        (Some(x), Some(y))
+            if x.kind == LineKind::Del && y.kind == LineKind::Add && !(x.words.is_empty() && y.words.is_empty()) =>
+        {
+            Look::CleanPaired
+        }
+        _ => Look::CleanWhole,
+    }
+}
+
+fn split_row(l: &Layout, r: SplitRow, g: Geom, style: SplitStyle) -> gpui::Div {
     match r {
-        SplitRow::Full(i) => div().flex().w_full().h(g.lh).child(line_text(&l.lines[i as usize], &[(None, g.old)])),
+        SplitRow::Full(i) => {
+            div().flex().w_full().h(g.lh).child(line_text(&l.lines[i as usize], &[(None, g.old)], Look::Classic))
+        }
         SplitRow::Pair(a, b) => {
             let get = |i: Option<u32>| i.map(|i| &l.lines[i as usize]);
+            let (left, right) = (get(a), get(b));
+            let look = match style {
+                SplitStyle::Classic => Look::Classic,
+                SplitStyle::Clean => clean_look(left, right),
+            };
             div()
                 .flex()
                 .w_full()
                 .h(g.lh)
                 .pr(px(14.))
-                .child(split_half(get(a), true, g))
+                .child(split_half(left, true, g, look))
                 .child(div().flex_none().w(px(1.)).h_full().bg(theme::get().border.subtle))
-                .child(split_half(get(b), false, g))
+                .child(split_half(right, false, g, look))
         }
     }
 }
@@ -592,14 +697,14 @@ impl Render for DiffView {
                 _ if f.kind == '?' => "untracked",
                 _ => "unstaged",
             }))
-            .child(div().ml_auto().child(self.mode_switch()))
+            .child(div().ml_auto().flex().gap(px(space::SM)).when(self.split(), |d| d.child(self.style_switch())).child(self.mode_switch()))
             .child(div().flex_none().text_size(px(text_size::XS)).text_color(t.text.dim).child("Esc to close"));
         let body = match (&self.layout, self.failed) {
             (_, true) => ui::note("Couldn't read the diff").text_color(t.state.error).into_any_element(),
             (None, _) => ui::note("Loading…").into_any_element(),
             (Some(l), _) if l.lines.is_empty() => ui::note("No textual changes (mode change or binary)").into_any_element(),
             (Some(l), _) => {
-                let (l, split) = (l.clone(), self.split());
+                let (l, split, style) = (l.clone(), self.split(), self.split_style);
                 let g = Geom { lh: self.line_height, old: digits(l.max_old), new: digits(l.max_new) };
                 let rows = if split { l.split.len() } else { l.lines.len() };
                 let count = rows + l.truncated as usize;
@@ -613,7 +718,7 @@ impl Render for DiffView {
                                     .text_color(theme::get().state.needs_you)
                                     .child("… diff truncated (too large to show)");
                             }
-                            if split { split_row(&l, l.split[ix], g) } else { unified_row(&l.lines[ix], g) }
+                            if split { split_row(&l, l.split[ix], g, style) } else { unified_row(&l.lines[ix], g) }
                         })
                         .collect::<Vec<_>>()
                 })
@@ -657,6 +762,25 @@ impl Render for DiffView {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn clean_style_pairs_only_rows_with_token_changes() {
+        let line = |kind, words: Vec<std::ops::Range<u32>>| DLine {
+            kind,
+            old: None,
+            new: None,
+            text: "x".into(),
+            words,
+            runs: Vec::new(),
+        };
+        let (del, add) = (line(LineKind::Del, vec![]), line(LineKind::Add, std::iter::once(0..1).collect()));
+        assert!(clean_look(Some(&del), Some(&add)) == Look::CleanPaired, "one side's change is enough");
+        let plain_add = line(LineKind::Add, vec![]);
+        assert!(clean_look(Some(&del), Some(&plain_add)) == Look::CleanWhole, "zipped/too different: whole lines");
+        assert!(clean_look(None, Some(&add)) == Look::CleanWhole);
+        let ctx = line(LineKind::Context, vec![]);
+        assert!(clean_look(Some(&ctx), Some(&ctx)) == Look::CleanWhole, "context has no tone anyway");
+    }
 
     fn repo(name: &str) -> git::Repo {
         let d = std::env::temp_dir().join(format!("agent-ide-repos-{}-{name}", std::process::id()));

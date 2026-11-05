@@ -147,6 +147,7 @@ pub struct Workspace {
     show_ignored: bool,
     /// Unified or split diffs (saved); split falls back to unified while the main area is narrow.
     diff_mode: persist::DiffMode,
+    split_style: persist::SplitStyle,
     /// Directory listings shown by any spawned tab's tree.
     tree_cache: file_tree::Cache,
     /// Listing requests in flight: directory → request id (only the newest applies).
@@ -239,6 +240,7 @@ impl Workspace {
             panel_tab: saved.git_panel.tab,
             show_ignored: saved.git_panel.show_ignored,
             diff_mode: saved.diff_mode,
+            split_style: saved.split_style,
             tree_cache: Default::default(),
             tree_pending: HashMap::new(),
             tree_req: 0,
@@ -944,6 +946,7 @@ impl Workspace {
                 show_ignored: self.show_ignored,
             },
             diff_mode: self.diff_mode,
+            split_style: self.split_style,
             ..Saved::default()
         }
     }
@@ -1219,7 +1222,7 @@ impl Workspace {
         }
         let ws = cx.entity().downgrade();
         let lh = self.metrics.line_height;
-        let mode = (self.diff_mode, self.diff_narrow(window));
+        let mode = (self.diff_mode, self.split_style, self.diff_narrow(window));
         let view = cx.new(|cx| DiffView::new(root, file, lh, mode, ws, cx));
         self.show_overlay(Overlay::Diff(view), window, cx);
     }
@@ -1247,12 +1250,20 @@ impl Workspace {
         }
     }
 
-    /// Hands the mode and the (settled) main-area width to the open diff; it re-renders only if either changed.
+    pub fn set_split_style(&mut self, style: persist::SplitStyle, cx: &mut Context<Self>) {
+        if style != self.split_style {
+            self.split_style = style;
+            self.mark_dirty(cx);
+            self.sync_diff_mode(cx);
+        }
+    }
+
+    /// Hands the mode, the split style and the (settled) main-area width to the open diff; it re-renders only if either changed.
     fn sync_diff_mode(&self, cx: &mut Context<Self>) {
         if let Some(Overlay::Diff(v)) = &self.overlay {
             let narrow = self.applied.cols < git_panel::MIN_SPLIT_COLS;
-            let mode = self.diff_mode;
-            v.update(cx, |v, cx| v.set_mode(mode, narrow, cx));
+            let (mode, style) = (self.diff_mode, self.split_style);
+            v.update(cx, |v, cx| v.set_mode(mode, style, narrow, cx));
         }
     }
 

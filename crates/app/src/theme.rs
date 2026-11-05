@@ -73,6 +73,11 @@ pub struct DiffColors {
     pub context: Rgba,
     /// Split view: the empty side of a one-sided row.
     pub filler: Rgba,
+    /// Clean split style: removed/added text and numbers, and the faint background under changed tokens.
+    pub clean_del: Rgba,
+    pub clean_add: Rgba,
+    pub clean_del_bg: Rgba,
+    pub clean_add_bg: Rgba,
     /// Line numbers.
     pub gutter: Rgba,
 }
@@ -190,6 +195,10 @@ pub static DARK: Theme = Theme {
         hunk: hex(0x5f6b8a),
         context: hex(0xc8c8ce),
         filler: hex(0x101013),
+        clean_del: hex(0xf87171),
+        clean_add: hex(0x4ade80),
+        clean_del_bg: hexa(0xf8717129),
+        clean_add_bg: hexa(0x4ade8029),
         gutter: hex(0x45454d),
     },
     scrollbar: Scrollbar { thumb: hexa(0xffffff1f), active: hexa(0xffffff47) },
