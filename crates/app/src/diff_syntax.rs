@@ -244,7 +244,7 @@ mod tests {
         fx(true, "7f70325a93", "crates/language_models/src/provider/bedrock.rs", "rename", Allow::Only(&["handler"]), Allow::Only(&["handle"]), Some(false)),
         fx(true, "719d0f0abf", "crates/editor/src/display_map/tab_map.rs", "rename", Allow::Only(&["skip_leading_tab"]), Allow::Only(&["inside_leading_tab"]), Some(false)),
         fx(true, "3d737fd268", "crates/gpui/src/geometry.rs", "rename (docs)", Allow::Only(&["upper_left"]), Allow::Only(&["top_left"]), Some(false)),
-        fx(false, "7af20d3", "crates/app/src/terminal_element.rs", "rename + edits", Allow::Any, Allow::Any, None),
+        fx(false, "71f51ae", "crates/app/src/terminal_element.rs", "rename + edits", Allow::Any, Allow::Any, None),
         // Moves: shown as moved, nothing changed inside.
         fx(true, "ec6f2a3ad4", "crates/project/src/project.rs", "move (fn, 4500 lines)", NOTHING, NOTHING, Some(true)),
         fx(true, "7ac055627e", "crates/extensions_ui/src/extensions_ui.rs", "move (impl)", NOTHING, NOTHING, Some(true)),
@@ -265,7 +265,7 @@ mod tests {
         fx(true, "93b846b2a6", "crates/file_finder/src/file_finder.rs", "added arg + rewrap", NOTHING, Allow::Only(&[",", "action", ".", "include_ignored", ":", "Option", "<", "bool", ">", "or", "(", ")"]), Some(false)),
         fx(true, "897ba9adf2", "crates/markdown/src/html/html_rendering.rs", "added arg", NOTHING, Allow::Only(&[",", "cx", ":", "&", "App"]), Some(false)),
         fx(true, "2d84af91bf", "crates/agent/src/tests/mod.rs", "added arg", Allow::Only(&["_"]), Allow::Only(&[",", "cx"]), Some(false)),
-        fx(false, "82c5b79", "crates/app/src/git_panel.rs", "added args + more", Allow::Any, Allow::Any, None),
+        fx(false, "bd36c18", "crates/app/src/git_panel.rs", "added args + more", Allow::Any, Allow::Any, None),
         // Wrapped expressions: only the wrapper.
         fx(true, "bc81ada227", "crates/multi_buffer/src/multi_buffer.rs", "wrap Some(..)", Allow::Only(&["panic", "!", "(", ")", "\"invalid excerpt id {id:?}\"", "excerpt_locator_for_id"]), Allow::Any, Some(false)),
         fx(true, "f369e9a48b", "crates/vim/src/motion.rs", "wrap Some(..)", Allow::Only(&["(", ")", ",", "{", "}", "DisplayPoint", "from"]), Allow::Any, None),
