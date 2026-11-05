@@ -145,6 +145,18 @@ pub fn status(repo: &Repo) -> std::io::Result<Status> {
     Ok(st)
 }
 
+/// A file's text at HEAD, for syntax highlighting the old side of a diff. None: unborn HEAD, not in HEAD, binary
+/// (NUL in the first 8 KB) or over `max` bytes. Blocking: run off the UI thread.
+pub fn head_text(repo: &Repo, path: &str, max: usize) -> Option<String> {
+    let mut c = git(&repo.root);
+    c.args(["cat-file", "blob"]).arg(format!("HEAD:{path}"));
+    let out = output(c).ok()?;
+    if out.len() > max || out[..out.len().min(8192)].contains(&0) {
+        return None;
+    }
+    Some(String::from_utf8_lossy(&out).into_owned())
+}
+
 /// The empty tree's id (differs between SHA-1 and SHA-256 repos): the base to diff an unborn HEAD against.
 fn empty_tree(repo: &Repo) -> std::io::Result<String> {
     let mut c = git(&repo.root);

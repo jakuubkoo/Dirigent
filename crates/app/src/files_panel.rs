@@ -7,8 +7,8 @@ use std::sync::Arc;
 
 use git::text::FileText;
 use gpui::{
-    ClickEvent, Context, FocusHandle, Focusable, KeyDownEvent, Pixels, ScrollStrategy, SharedString,
-    UniformListScrollHandle, WeakEntity, Window, div, prelude::*, px, uniform_list,
+    ClickEvent, Context, FocusHandle, Focusable, HighlightStyle, KeyDownEvent, Pixels, ScrollStrategy, SharedString,
+    StyledText, UniformListScrollHandle, WeakEntity, Window, div, prelude::*, px, uniform_list,
 };
 
 use crate::file_tree::{Key, Marks, Row};
@@ -247,14 +247,31 @@ pub enum Content {
     Lines { lines: Arc<Vec<SharedString>>, truncated: bool },
 }
 
+/// Syntax spans per shown line (display byte ranges, `syntax::Class` ids).
+pub type LineColors = Arc<Vec<Vec<(std::ops::Range<u32>, u8)>>>;
+
 impl Content {
-    pub fn prepare(t: FileText) -> Self {
+    /// The content to show, plus the raw text for syntax highlighting.
+    pub fn prepare(t: FileText) -> (Self, Option<String>) {
         match t {
-            FileText::Binary => Self::Binary,
-            FileText::Lines { lines, truncated } => {
-                Self::Lines { lines: Arc::new(lines.into_iter().map(SharedString::from).collect()), truncated }
+            FileText::Binary => (Self::Binary, None),
+            FileText::Lines { lines, truncated, raw } => {
+                let lines = Arc::new(lines.into_iter().map(SharedString::from).collect());
+                (Self::Lines { lines, truncated }, Some(raw))
             }
         }
+    }
+
+    /// Highlighted spans of `raw` mapped onto the shown lines (tabs expanded, long lines cut).
+    pub fn colors(raw: &str, h: &syntax::Highlighted) -> LineColors {
+        Arc::new(
+            raw.lines()
+                .zip(&h.lines)
+                .map(|(line, spans)| {
+                    git::text::display_spans(line, spans).into_iter().map(|(r, c)| (r, u8::from(c))).collect()
+                })
+                .collect(),
+        )
     }
 }
 
@@ -267,6 +284,8 @@ pub struct FileView {
     base: Option<PathBuf>,
     change: Option<git::FileChange>,
     content: Option<Content>,
+    /// Arrives after the content (or never: unknown language, too big, too slow).
+    colors: Option<LineColors>,
     failed: bool,
     scroll: UniformListScrollHandle,
     drag: scrollbar::Drag,
@@ -291,6 +310,7 @@ impl FileView {
             base,
             change: None,
             content: None,
+            colors: None,
             failed: false,
             scroll: UniformListScrollHandle::new(),
             drag: Default::default(),
@@ -313,6 +333,7 @@ impl FileView {
                     return;
                 }
                 self.content = Some(c);
+                self.colors = None;
                 self.failed = false;
             }
             None => self.failed = true,
@@ -324,6 +345,28 @@ impl FileView {
 }
 
 impl FileView {
+    /// Perf harness: loaded rows, whether colors arrived, and jump to a row.
+    pub fn loaded_rows(&self) -> usize {
+        match &self.content {
+            Some(Content::Lines { lines, .. }) => lines.len(),
+            _ => 0,
+        }
+    }
+
+    pub fn colored(&self) -> bool {
+        self.colors.is_some()
+    }
+
+    pub fn scroll_to(&mut self, ix: usize, cx: &mut Context<Self>) {
+        self.scroll.scroll_to_item(ix, ScrollStrategy::Top);
+        cx.notify();
+    }
+
+    pub fn set_colors(&mut self, colors: LineColors, cx: &mut Context<Self>) {
+        self.colors = Some(colors);
+        cx.notify();
+    }
+
     /// Screenshot harness: jump to the last row once loaded; returns whether it could.
     pub fn scroll_to_end(&mut self, cx: &mut Context<Self>) -> bool {
         let Some(Content::Lines { lines, truncated }) = &self.content else { return false };
@@ -386,6 +429,7 @@ impl Render for FileView {
             (Some(Content::Lines { lines, .. }), _) if lines.is_empty() => ui::note("Empty file").into_any_element(),
             (Some(Content::Lines { lines, truncated }), _) => {
                 let (lines, lh, truncated) = (lines.clone(), self.line_height, *truncated);
+                let colors = self.colors.clone();
                 let digits = lines.len().to_string().len().max(3) as f32;
                 let gutter = self.cell_width * digits + px(space::XL);
                 let count = lines.len() + truncated as usize;
@@ -407,7 +451,17 @@ impl Render for FileView {
                                     .text_color(t.text.faint)
                                     .child((ix + 1).to_string()),
                             )
-                            .child(div().pr(px(14.)).text_color(t.diff.context).child(text.clone()))
+                            .child(div().pr(px(14.)).text_color(t.diff.context).child(
+                                match colors.as_ref().and_then(|c| c.get(ix)).filter(|s| !s.is_empty()) {
+                                    Some(spans) => StyledText::new(text.clone())
+                                        .with_highlights(spans.iter().filter_map(|(r, c)| {
+                                            let color = t.syntax.color(*c)?;
+                                            Some((r.start as usize..r.end as usize, HighlightStyle { color: Some(color.into()), ..Default::default() }))
+                                        }))
+                                        .into_any_element(),
+                                    None => text.clone().into_any_element(),
+                                },
+                            ))
                         })
                         .collect::<Vec<_>>()
                 })

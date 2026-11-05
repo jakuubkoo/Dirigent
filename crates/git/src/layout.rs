@@ -31,6 +31,18 @@ pub struct DLine {
     pub text: Arc<str>,
     /// Changed byte ranges of `text` (on token boundaries); empty = plain line highlight.
     pub words: Vec<Range<u32>>,
+    /// What to draw: sorted, non-overlapping ranges with a syntax class and/or the word-diff mark. Text outside
+    /// every run uses the line's default color.
+    pub runs: Vec<Run>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Run {
+    pub range: Range<u32>,
+    /// A syntax class id (the `syntax` crate's `Class as u8`); None = default color.
+    pub class: Option<u8>,
+    /// Part of a changed-word range.
+    pub word: bool,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -41,7 +53,7 @@ pub enum SplitRow {
     Pair(Option<u32>, Option<u32>),
 }
 
-#[derive(Debug, Default, PartialEq)]
+#[derive(Clone, Debug, Default, PartialEq)]
 pub struct Layout {
     /// Unified rows, in git's order (file header dropped).
     pub lines: Vec<DLine>,
@@ -50,6 +62,74 @@ pub struct Layout {
     pub max_old: u32,
     pub max_new: u32,
     pub hash: u64,
+    /// Syntax runs applied (see `with_syntax`).
+    pub colored: bool,
+}
+
+/// One side of a diff for syntax coloring: the file's raw lines and their spans (raw-line byte ranges).
+pub struct Side<'a, C> {
+    pub lines: Vec<&'a str>,
+    pub spans: &'a [Vec<(Range<u32>, C)>],
+}
+
+impl<'a, C> Side<'a, C> {
+    pub fn new(text: &'a str, spans: &'a [Vec<(Range<u32>, C)>]) -> Self {
+        Self { lines: text.lines().collect(), spans }
+    }
+}
+
+impl Layout {
+    /// A copy with syntax colors: Del lines from the old side, Add and Context lines from the new side. A row
+    /// whose text isn't exactly that file line (changed since the diff was taken, odd encodings) stays uncolored.
+    pub fn with_syntax<C: Copy + Into<u8>>(&self, old: Option<&Side<C>>, new: Option<&Side<C>>) -> Layout {
+        let mut out = self.clone();
+        out.colored = true;
+        for l in &mut out.lines {
+            let (side, n) = match l.kind {
+                LineKind::Del => (old, l.old),
+                LineKind::Add | LineKind::Context => (new, l.new),
+                _ => continue,
+            };
+            let (Some(side), Some(n)) = (side, n) else { continue };
+            let ix = n as usize - 1;
+            let (Some(raw), Some(spans)) = (side.lines.get(ix), side.spans.get(ix)) else { continue };
+            if spans.is_empty() || crate::text::display_line(raw, 0) != *l.text {
+                continue;
+            }
+            let shown = crate::text::display_spans(raw, spans);
+            let syntax: Vec<(Range<u32>, u8)> = shown.into_iter().map(|(r, c)| (r, c.into())).collect();
+            l.runs = merge_runs(&l.words, &syntax);
+        }
+        out
+    }
+}
+
+/// Word ranges and syntax spans (each sorted, non-overlapping) → one run list.
+fn merge_runs(words: &[Range<u32>], syntax: &[(Range<u32>, u8)]) -> Vec<Run> {
+    let mut cuts: Vec<u32> = words.iter().chain(syntax.iter().map(|(r, _)| r)).flat_map(|r| [r.start, r.end]).collect();
+    cuts.sort_unstable();
+    cuts.dedup();
+    let mut out: Vec<Run> = Vec::new();
+    let (mut wi, mut si) = (0, 0);
+    for pair in cuts.windows(2) {
+        let (a, b) = (pair[0], pair[1]);
+        while wi < words.len() && words[wi].end <= a {
+            wi += 1;
+        }
+        while si < syntax.len() && syntax[si].0.end <= a {
+            si += 1;
+        }
+        let word = words.get(wi).is_some_and(|w| w.start <= a);
+        let class = syntax.get(si).filter(|(r, _)| r.start <= a).map(|(_, c)| *c);
+        if !word && class.is_none() {
+            continue;
+        }
+        match out.last_mut() {
+            Some(last) if last.range.end == a && last.class == class && last.word == word => last.range.end = b,
+            _ => out.push(Run { range: a..b, class, word }),
+        }
+    }
+    out
 }
 
 /// Identifies a diff version: equal hash → the cached layout still applies.
@@ -89,7 +169,7 @@ pub fn layout(diff: &Diff) -> Layout {
         };
         out.max_old = out.max_old.max(o.unwrap_or(0));
         out.max_new = out.max_new.max(n.unwrap_or(0));
-        out.lines.push(DLine { kind: l.kind, old: o, new: n, text: text.into(), words: Vec::new() });
+        out.lines.push(DLine { kind: l.kind, old: o, new: n, text: text.into(), words: Vec::new(), runs: Vec::new() });
     }
     pair_blocks(&mut out);
     out
@@ -323,6 +403,8 @@ fn pair_blocks(out: &mut Layout) {
                     budget -= 1;
                     let (dl, al) = (dels[d], adds[a]);
                     if let Some((wd, wa)) = word_ranges(&lines[dl].text.clone(), &lines[al].text.clone()) {
+                        lines[dl].runs = merge_runs(&wd, &[]);
+                        lines[al].runs = merge_runs(&wa, &[]);
                         lines[dl].words = wd;
                         lines[al].words = wa;
                     }
@@ -552,6 +634,41 @@ mod tests {
     fn missing_newline_meta_goes_after_the_block() {
         let lay = real_diff("eof", "a\nlast", "a\nlast\nmore\n");
         assert!(matches!(lay.split.last(), Some(SplitRow::Full(i)) if lay.lines[*i as usize].kind == LineKind::Meta));
+    }
+
+    #[test]
+    fn runs_merge_words_over_syntax() {
+        let r = |a: u32, b: u32, class: Option<u8>, word: bool| Run { range: a..b, class, word };
+        // syntax: 0..3 kw(1), 4..9 var(2); word: 4..6
+        assert_eq!(
+            merge_runs(std::slice::from_ref(&(4..6)), &[(0..3, 1), (4..9, 2)]),
+            [r(0, 3, Some(1), false), r(4, 6, Some(2), true), r(6, 9, Some(2), false)]
+        );
+        assert_eq!(merge_runs(std::slice::from_ref(&(2..5)), &[]), [r(2, 5, None, true)]);
+        assert_eq!(merge_runs(&[], &[(1..2, 3), (2..4, 3)]), [r(1, 4, Some(3), false)], "adjacent same class merge");
+    }
+
+    #[test]
+    fn syntax_maps_onto_both_sides_and_skips_mismatched_lines() {
+        let before = "\tlet a = 1;\nkeep();\n";
+        let after = "\tlet b = 1;\nkeep();\nnew();\n";
+        let lay = real_diff("syn", before, after);
+        // Fake "syntax": the first 3 bytes of every raw line as class 7.
+        let spans = |t: &str| t.lines().map(|l| vec![(0..3.min(l.len() as u32), 7u8)]).collect::<Vec<_>>();
+        let (os, ns) = (spans(before), spans(after));
+        let colored = lay.with_syntax(Some(&Side::new(before, &os)), Some(&Side::new(after, &ns)));
+        let del = colored.lines.iter().find(|l| l.kind == LineKind::Del).unwrap();
+        // Raw "\tle" → display "    le": the tab span covers 4 spaces.
+        assert_eq!(del.runs[0], Run { range: 0..6, class: Some(7), word: false });
+        assert!(del.runs.iter().any(|r| r.word), "word highlight kept");
+        let ctx = colored.lines.iter().find(|l| l.kind == LineKind::Context).unwrap();
+        assert_eq!(ctx.runs, [Run { range: 0..3, class: Some(7), word: false }]);
+        // The new side changed since the diff: rows that no longer match stay plain.
+        let edited = "\tlet b = 2;\nkeep();\nnew();\n";
+        let es = spans(edited);
+        let stale = lay.with_syntax(Some(&Side::new(before, &os)), Some(&Side::new(edited, &es)));
+        let add = stale.lines.iter().find(|l| l.kind == LineKind::Add).unwrap();
+        assert!(add.runs.iter().all(|r| r.class.is_none()));
     }
 
     #[test]

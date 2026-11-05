@@ -3,7 +3,7 @@
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
 use gpui::{
@@ -138,6 +138,10 @@ pub struct Workspace {
     overlay_gen: Arc<AtomicU64>,
     /// The overlay's repo refresh count when it was last read.
     overlay_seen: u64,
+    /// Set (non-zero) to abort the in-flight syntax parse of the overlay; replaced per load.
+    overlay_cancel: Arc<AtomicUsize>,
+    /// Highlighted files by content hash (with their parse trees), shared by diff and preview loads.
+    syntax_cache: Arc<syntax::Cache>,
     files_panel: Entity<FilesPanel>,
     panel_tab: PanelTab,
     show_ignored: bool,
@@ -229,6 +233,8 @@ impl Workspace {
             _overlay_task: None,
             overlay_gen: Arc::new(AtomicU64::new(0)),
             overlay_seen: 0,
+            overlay_cancel: Default::default(),
+            syntax_cache: Default::default(),
             files_panel,
             panel_tab: saved.git_panel.tab,
             show_ignored: saved.git_panel.show_ignored,
@@ -347,6 +353,18 @@ impl Workspace {
                         break;
                     }
                 }
+                if !syntax_off() {
+                    while started.elapsed() < Duration::from_secs(5) {
+                        let colored = this
+                            .update(cx, |w, cx| matches!(&w.overlay, Some(Overlay::Diff(d)) if d.read(cx).colored()))
+                            .unwrap_or(false);
+                        if colored {
+                            eprintln!("[perf] diff colored {:.0} ms", started.elapsed().as_secs_f64() * 1e3);
+                            break;
+                        }
+                        timer(5).await;
+                    }
+                }
                 eprintln!("[perf] diff scroll start");
                 let steps = std::env::var("AGENT_IDE_PERF_STEPS").ok().and_then(|n| n.parse().ok()).unwrap_or(100);
                 for step in 1..=steps {
@@ -386,6 +404,38 @@ impl Workspace {
                     if !matches!(done, Ok(false)) {
                         break;
                     }
+                }
+                if let Some(steps) = std::env::var("AGENT_IDE_PERF_STEPS").ok().and_then(|n| n.parse::<usize>().ok()) {
+                    // Scroll harness: wait for the rows and the colors, then jump 40 rows every 50 ms.
+                    let started = Instant::now();
+                    let (mut rows_at, mut colored_at) = (None, None);
+                    while started.elapsed() < Duration::from_secs(5) && colored_at.is_none() {
+                        cx.background_executor().timer(Duration::from_millis(5)).await;
+                        let (rows, colored) = this
+                            .update(cx, |w, cx| match &w.overlay {
+                                Some(Overlay::File(f)) => (f.read(cx).loaded_rows(), f.read(cx).colored()),
+                                _ => (0, false),
+                            })
+                            .unwrap_or((0, false));
+                        if rows > 0 && rows_at.is_none() {
+                            rows_at = Some(started.elapsed());
+                        }
+                        if colored {
+                            colored_at = Some(started.elapsed());
+                        }
+                    }
+                    let ms = |d: Option<Duration>| d.map_or("-".into(), |d| format!("{:.0} ms", d.as_secs_f64() * 1e3));
+                    eprintln!("[perf] preview rows ready {}, colored {}", ms(rows_at), ms(colored_at));
+                    eprintln!("[perf] preview scroll start");
+                    for step in 1..=steps {
+                        cx.background_executor().timer(Duration::from_millis(50)).await;
+                        let _ = this.update(cx, |w, cx| {
+                            if let Some(Overlay::File(f)) = &w.overlay {
+                                f.update(cx, |f, cx| f.scroll_to(step * 40, cx));
+                            }
+                        });
+                    }
+                    eprintln!("[perf] preview scroll end");
                 }
                 if std::env::var_os("AGENT_IDE_PERF_OPEN_END").is_some() {
                     for _ in 0..100 {
@@ -1274,6 +1324,7 @@ impl Workspace {
     /// Forgets the overlay and cancels its read; returns whether one was open.
     fn drop_overlay(&mut self) -> bool {
         self.overlay_gen.fetch_add(1, Ordering::Relaxed);
+        self.overlay_cancel.store(1, Ordering::Relaxed);
         self._overlay_task = None;
         self.overlay.take().is_some()
     }
@@ -1282,6 +1333,9 @@ impl Workspace {
     fn load_overlay(&mut self, cx: &mut Context<Self>) {
         let generation = self.overlay_gen.fetch_add(1, Ordering::Relaxed) + 1;
         let (current, current2) = (self.overlay_gen.clone(), self.overlay_gen.clone());
+        self.overlay_cancel.store(1, Ordering::Relaxed);
+        self.overlay_cancel = Default::default();
+        let (cancel, cache) = (self.overlay_cancel.clone(), self.syntax_cache.clone());
         match self.overlay.clone() {
             None => {}
             Some(Overlay::Diff(view)) => {
@@ -1296,6 +1350,8 @@ impl Workspace {
                     .and_then(|s| s.files.iter().find(|f| f.path == old.path).cloned())
                     .unwrap_or(old);
                 let read_file = file.clone();
+                let syn_file = file.clone();
+                let syn_repo = repo.clone();
                 self._overlay_task = Some(cx.spawn(async move |_, cx| {
                     let started = Instant::now();
                     let lines = cx
@@ -1312,6 +1368,7 @@ impl Workspace {
                             Some((layout, Some(t.elapsed())))
                         })
                         .await;
+                    let plain = lines.as_ref().filter(|(l, _)| !l.colored).map(|(l, _)| l.clone());
                     if current2.load(Ordering::Relaxed) != generation {
                         return; // a newer read or a close happened meanwhile
                     }
@@ -1325,7 +1382,23 @@ impl Workspace {
                         Some((_, None)) => "diff read: unchanged, layout reused".into(),
                         None => "diff read failed".into(),
                     });
-                    view.update(cx, |v, cx| v.set_layout(lines.map(|(l, _)| l), file, cx));
+                    view.update(cx, |v, cx| v.set_layout(lines.map(|(l, _)| l), file.clone(), cx));
+                    // Second pass: syntax colors (both sides parsed as whole files), then one more publish.
+                    let Some(plain) = plain.filter(|_| !syntax_off()) else { return };
+                    let started = Instant::now();
+                    let colored = cx
+                        .background_executor()
+                        .spawn(async move { color_diff(&plain, &syn_repo, &syn_file, &cache, &cancel).map(Arc::new) })
+                        .await;
+                    if current2.load(Ordering::Relaxed) != generation {
+                        return;
+                    }
+                    crate::perf::event_with(|| {
+                        format!("diff syntax: {} in {:.1} ms", if colored.is_some() { "colored" } else { "plain" }, started.elapsed().as_secs_f64() * 1e3)
+                    });
+                    if let Some(colored) = colored {
+                        view.update(cx, |v, cx| v.set_layout(Some(colored), file, cx));
+                    }
                 }));
             }
             Some(Overlay::File(view)) => {
@@ -1339,7 +1412,8 @@ impl Workspace {
                 });
                 self._overlay_task = Some(cx.spawn(async move |_, cx| {
                     let started = Instant::now();
-                    let content = cx
+                    let lang = syntax::detect(&path);
+                    let read = cx
                         .background_executor()
                         .spawn(async move { git::text::read_file(&path).ok().map(Content::prepare) })
                         .await;
@@ -1347,7 +1421,26 @@ impl Workspace {
                         return;
                     }
                     crate::perf::event_with(|| format!("file read in {:.1} ms", started.elapsed().as_secs_f64() * 1e3));
+                    let (content, raw) = match read {
+                        Some((c, raw)) => (Some(c), raw),
+                        None => (None, None),
+                    };
                     view.update(cx, |v, cx| v.set_content(content, change, cx));
+                    let (Some(lang), Some(raw), false) = (lang, raw, syntax_off()) else { return };
+                    let started = Instant::now();
+                    let colors = cx
+                        .background_executor()
+                        .spawn(async move { cache.get(lang, &raw, &cancel).ok().map(|h| Content::colors(&raw, &h)) })
+                        .await;
+                    if current2.load(Ordering::Relaxed) != generation {
+                        return;
+                    }
+                    crate::perf::event_with(|| {
+                        format!("file syntax: {} in {:.1} ms", if colors.is_some() { "colored" } else { "plain" }, started.elapsed().as_secs_f64() * 1e3)
+                    });
+                    if let Some(colors) = colors {
+                        view.update(cx, |v, cx| v.set_colors(colors, cx));
+                    }
                 }));
             }
         }
@@ -1700,10 +1793,97 @@ fn sh_word(s: &str) -> String {
     }
 }
 
+/// `AGENT_IDE_SYNTAX=off`: no syntax highlighting (escape hatch, and the plain baseline for perf runs).
+fn syntax_off() -> bool {
+    static OFF: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *OFF.get_or_init(|| std::env::var("AGENT_IDE_SYNTAX").is_ok_and(|v| v == "off"))
+}
+
+/// The diff's syntax colors: the old side from HEAD, the new side from the working tree, each highlighted as a
+/// whole file (cached by content). None when the language is unknown or neither side could be highlighted.
+fn color_diff(
+    plain: &git::layout::Layout,
+    repo: &git::Repo,
+    file: &git::FileChange,
+    cache: &syntax::Cache,
+    cancel: &AtomicUsize,
+) -> Option<git::layout::Layout> {
+    let lang = syntax::detect(Path::new(&file.path))?;
+    let old_text = (file.kind != '?')
+        .then(|| git::head_text(repo, file.orig.as_deref().unwrap_or(&file.path), syntax::MAX_BYTES))
+        .flatten();
+    let new_text = match git::text::read_file(&repo.root.join(&file.path)) {
+        Ok(git::text::FileText::Lines { raw, .. }) => Some(raw),
+        _ => None,
+    };
+    // Both sides in parallel: a big file's two parses take about as long as one.
+    let (old, new) = std::thread::scope(|s| {
+        let old = s.spawn(|| old_text.as_deref().and_then(|t| cache.get(lang, t, cancel).ok()));
+        let new = new_text.as_deref().and_then(|t| cache.get(lang, t, cancel).ok());
+        (old.join().ok().flatten(), new)
+    });
+    if old.is_none() && new.is_none() {
+        return None;
+    }
+    let old_side = old.as_ref().zip(old_text.as_deref()).map(|(h, t)| git::layout::Side::new(t, &h.lines));
+    let new_side = new.as_ref().zip(new_text.as_deref()).map(|(h, t)| git::layout::Side::new(t, &h.lines));
+    Some(plain.with_syntax(old_side.as_ref(), new_side.as_ref()))
+}
+
 #[cfg(test)]
 mod tests {
     use super::{fmt_remaining, group_order, sh_word};
     use std::path::PathBuf;
+
+    /// Staged + unstaged edits: every colored row comes from the right side (HEAD for removed lines, the working
+    /// tree for added/context lines), so its text is exactly that file line.
+    #[test]
+    fn diff_colors_come_from_head_and_worktree() {
+        use std::process::Command;
+        let d = std::env::temp_dir().join(format!("agent-ide-color-diff-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        let git = |args: &[&str]| {
+            let ok = Command::new("git")
+                .args(["-c", "user.name=t", "-c", "user.email=t@t", "-c", "commit.gpgsign=false"])
+                .args(args)
+                .current_dir(&d)
+                .status()
+                .unwrap()
+                .success();
+            assert!(ok, "{args:?}");
+        };
+        git(&["init", "-q", "-b", "main"]);
+        let head = "fn one() {\n    let a = \"x\";\n}\n\nfn two() {\n\tlet b = 2;\n}\n";
+        std::fs::write(d.join("m.rs"), head).unwrap();
+        git(&["add", "."]);
+        git(&["commit", "-q", "-m", "init"]);
+        std::fs::write(d.join("m.rs"), head.replace("\"x\"", "\"staged\"")).unwrap();
+        git(&["add", "."]);
+        let work = head.replace("\"x\"", "\"staged\"").replace("let b = 2;", "let b = 3; // unstaged");
+        std::fs::write(d.join("m.rs"), &work).unwrap();
+
+        let git::Discovery::Repo(repo) = git::discover(&d) else { panic!("repo") };
+        let file = git::status(&repo).unwrap().files.into_iter().find(|f| f.path == "m.rs").unwrap();
+        let diff = git::diff(&repo, &file, || false).unwrap();
+        let plain = git::layout::layout(&diff);
+        let colored = super::color_diff(&plain, &repo, &file, &syntax::Cache::default(), &Default::default()).unwrap();
+        let shown = |t: &str, n: Option<u32>| git::text::display_line(t.lines().nth(n.unwrap() as usize - 1).unwrap(), 0);
+        let mut checked = 0;
+        for l in colored.lines.iter().filter(|l| l.runs.iter().any(|r| r.class.is_some())) {
+            let expect = match l.kind {
+                git::LineKind::Del => shown(head, l.old),
+                _ => shown(&work, l.new),
+            };
+            assert_eq!(*l.text, expect, "{:?} row matches its side", l.kind);
+            checked += 1;
+        }
+        assert!(checked >= 4, "colored rows: {checked}");
+        let add = colored.lines.iter().find(|l| l.kind == git::LineKind::Add && l.text.contains("unstaged")).unwrap();
+        let comment = syntax::Class::Comment as u8;
+        assert!(add.runs.iter().any(|r| r.class == Some(comment)), "{:?}", add.runs);
+        let _ = std::fs::remove_dir_all(&d);
+    }
 
     #[test]
     fn grouping_and_order() {

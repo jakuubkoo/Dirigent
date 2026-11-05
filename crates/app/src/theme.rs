@@ -96,6 +96,45 @@ pub struct Terminal {
     pub ansi: [Rgba; 16],
 }
 
+/// Syntax colors, one per `syntax::Class`.
+pub struct Syntax {
+    pub keyword: Rgba,
+    pub string: Rgba,
+    pub number: Rgba,
+    pub comment: Rgba,
+    pub function: Rgba,
+    pub r#type: Rgba,
+    pub variable: Rgba,
+    pub constant: Rgba,
+    pub property: Rgba,
+    pub punctuation: Rgba,
+    pub operator: Rgba,
+    pub tag: Rgba,
+    pub attribute: Rgba,
+}
+
+impl Syntax {
+    /// The color of a `syntax::Class` id (`Class as u8`).
+    pub fn color(&self, class: u8) -> Option<Rgba> {
+        use syntax::Class::*;
+        Some(match syntax::Class::from_u8(class)? {
+            Keyword => self.keyword,
+            String => self.string,
+            Number => self.number,
+            Comment => self.comment,
+            Function => self.function,
+            Type => self.r#type,
+            Variable => self.variable,
+            Constant => self.constant,
+            Property => self.property,
+            Punctuation => self.punctuation,
+            Operator => self.operator,
+            Tag => self.tag,
+            Attribute => self.attribute,
+        })
+    }
+}
+
 pub struct Theme {
     pub bg: Bg,
     pub border: Border,
@@ -107,6 +146,7 @@ pub struct Theme {
     pub scrollbar: Scrollbar,
     pub meter: Meter,
     pub terminal: Terminal,
+    pub syntax: Syntax,
     /// The window close button's hover background.
     pub danger_hover: Rgba,
 }
@@ -164,6 +204,21 @@ pub static DARK: Theme = Theme {
             hex(0x5a5a66), hex(0xff8a93), hex(0xa8e6a3), hex(0xf5d58a),
             hex(0x8bbcff), hex(0xd7aaf5), hex(0x7fdcf0), hex(0xf4f4f6),
         ],
+    },
+    syntax: Syntax {
+        keyword: hex(0xc4a1ff),
+        string: hex(0x9ece6a),
+        number: hex(0xff9e64),
+        comment: hex(0x6b6b76),
+        function: hex(0x7aa2f7),
+        r#type: hex(0x5ccfe6),
+        variable: hex(0xd6d6dc),
+        constant: hex(0xf5a97f),
+        property: hex(0xa9b8f5),
+        punctuation: hex(0x8b8b96),
+        operator: hex(0x89ddff),
+        tag: hex(0xf7768e),
+        attribute: hex(0xe0af68),
     },
     danger_hover: hex(0xc4314b),
 };

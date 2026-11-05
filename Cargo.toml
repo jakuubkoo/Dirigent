@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["crates/session", "crates/app", "crates/hook", "crates/git"]
+members = ["crates/session", "crates/app", "crates/hook", "crates/git", "crates/syntax"]
 
 [workspace.package]
 edition = "2024"
@@ -17,6 +17,7 @@ notify = "=9.0.0-rc.4"
 session = { path = "crates/session" }
 hook = { path = "crates/hook" }
 git = { path = "crates/git" }
+syntax = { path = "crates/syntax" }
 
 # Cargo ignores a dependency's [patch]: these mirror Zed's root Cargo.toml at the pinned rev.
 [patch.crates-io]

@@ -397,6 +397,11 @@ impl DiffView {
         cx.notify();
     }
 
+    /// Perf harness: syntax colors arrived.
+    pub fn colored(&self) -> bool {
+        self.layout.as_ref().is_some_and(|l| l.colored)
+    }
+
     /// Perf harness: how many rows are loaded, and jump to one.
     pub fn loaded_rows(&self) -> usize {
         self.layout.as_ref().map_or(0, |l| if self.split() { l.split.len() } else { l.lines.len() })
@@ -519,10 +524,16 @@ fn line_text(l: &DLine, nums: &[(Option<u32>, usize)]) -> gpui::Div {
     let start = s.len();
     s.push_str(&l.text);
     let mut hl = vec![(0..gutter, HighlightStyle { color: Some(theme::get().diff.gutter.into()), ..Default::default() })];
-    if let Some(bg) = word_bg {
-        let style = HighlightStyle { background_color: Some(bg.into()), ..Default::default() };
-        hl.extend(l.words.iter().map(|r| (start + r.start as usize..start + r.end as usize, style)));
-    }
+    // Syntax sets the text color; the word-diff background sits on top.
+    let syntax = &theme::get().syntax;
+    hl.extend(l.runs.iter().map(|r| {
+        let style = HighlightStyle {
+            color: r.class.and_then(|c| syntax.color(c)).map(Into::into),
+            background_color: word_bg.filter(|_| r.word).map(Into::into),
+            ..Default::default()
+        };
+        (start + r.range.start as usize..start + r.range.end as usize, style)
+    }));
     div()
         .flex_1()
         .min_w_0()
