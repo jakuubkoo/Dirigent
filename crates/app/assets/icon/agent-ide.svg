@@ -1,0 +1,14 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" width="256" height="256">
+  <!-- agent-ide app icon (original, same license as the app): a terminal prompt with an agent-state dot. -->
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#22222a"/>
+      <stop offset="1" stop-color="#141417"/>
+    </linearGradient>
+  </defs>
+  <rect x="16" y="16" width="224" height="224" rx="52" fill="url(#bg)"/>
+  <rect x="16.5" y="16.5" width="223" height="223" rx="51.5" fill="none" stroke="#ffffff" stroke-opacity="0.08"/>
+  <path d="M68 92 L112 128 L68 164" fill="none" stroke="#7c8aff" stroke-width="20" stroke-linecap="round" stroke-linejoin="round"/>
+  <rect x="124" y="152" width="64" height="18" rx="9" fill="#d6d6dc"/>
+  <circle cx="186" cy="80" r="18" fill="#f5a524"/>
+</svg>

@@ -3,6 +3,8 @@
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+pub mod notice;
+
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 pub struct Msg {
     pub tab: u32,
@@ -11,8 +13,16 @@ pub struct Msg {
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 pub enum Kind {
-    /// `cwd`: Claude Code's working directory (every payload has it).
-    Hook { event: String, notification_type: Option<String>, session_id: Option<String>, cwd: Option<String> },
+    /// `cwd`: Claude Code's working directory (every payload has it). `message`: what a desktop notification
+    /// says (PermissionRequest: the tool, and the path for file tools; Notification: its message), short.
+    Hook {
+        event: String,
+        notification_type: Option<String>,
+        session_id: Option<String>,
+        cwd: Option<String>,
+        #[serde(default)]
+        message: Option<String>,
+    },
     /// The arguments `claude` was started with in this tab (sent by the shim before it execs claude).
     Argv { args: Vec<String> },
     Status { model: Option<String>, context_pct: Option<f32>, five_hour: Option<Limit>, seven_day: Option<Limit> },
@@ -30,12 +40,21 @@ pub fn parse(mode: &str, json: &str) -> Option<Kind> {
     let v: Value = serde_json::from_str(json).ok()?;
     let s = |v: &Value| v.as_str().map(str::to_owned);
     match mode {
-        "hook" => Some(Kind::Hook {
-            event: s(&v["hook_event_name"])?,
-            notification_type: s(&v["notification_type"]),
-            session_id: s(&v["session_id"]),
-            cwd: s(&v["cwd"]),
-        }),
+        "hook" => {
+            let event = s(&v["hook_event_name"])?;
+            let message = match event.as_str() {
+                "PermissionRequest" => s(&v["tool_name"]).map(|t| notice::permission_text(&t, &v["tool_input"])),
+                "Notification" => v["message"].as_str().map(notice::message_text),
+                _ => None,
+            };
+            Some(Kind::Hook {
+                event,
+                notification_type: s(&v["notification_type"]),
+                session_id: s(&v["session_id"]),
+                cwd: s(&v["cwd"]),
+                message,
+            })
+        }
         "status" => {
             let limit = |w: &Value| {
                 Some(Limit { used_pct: w["used_percentage"].as_f64()? as f32, resets_at: w["resets_at"].as_i64()? })
@@ -237,18 +256,21 @@ mod tests {
         );
     }
 
+    /// Captured from claude 2.1.318 (interactive, default permission mode): the PermissionRequest names the tool
+    /// and its input; the Notification that follows ~6 s later only has a generic message.
     #[test]
-    fn notification_from_docs() {
-        // No captured fixture (auto mode never prompted); shape from code.claude.com/docs/en/hooks.
-        let json = r#"{"session_id":"x","hook_event_name":"Notification","message":"Claude needs your permission",
-            "notification_type":"permission_prompt"}"#;
+    fn permission_hooks_from_real_claude() {
+        let Some(Kind::Hook { event, message, .. }) = parse("hook", &fixture("hook_PermissionRequest")) else { panic!() };
+        assert_eq!(event, "PermissionRequest");
+        assert_eq!(message.as_deref(), Some("Wants to run a command"), "the command itself is never shown");
         let want = Kind::Hook {
             event: "Notification".into(),
             notification_type: Some("permission_prompt".into()),
-            session_id: Some("x".into()),
-            cwd: None,
+            session_id: Some("00000000-0000-4000-8000-000000000001".into()),
+            cwd: Some("/home/user/project".into()),
+            message: Some("Claude needs your permission".into()),
         };
-        assert_eq!(parse("hook", json), Some(want));
+        assert_eq!(parse("hook", &fixture("hook_Notification")), Some(want));
     }
 
     #[test]

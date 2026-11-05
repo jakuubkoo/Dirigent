@@ -41,6 +41,10 @@ pub struct Agent {
     pub last_activity: Option<i64>,
     /// Unix secs when `state` last changed.
     pub state_since: Option<i64>,
+    /// Bumped each time `state` changes to NeedsYou or Done: one desktop notification per change at most.
+    pub notice_seq: u64,
+    /// What that notification says (built by the hook helper); None = a generic text.
+    pub note: Option<String>,
 }
 
 fn now_secs() -> i64 {
@@ -66,7 +70,7 @@ impl Board {
                 agent.args = Some(args);
                 agent.started = false;
             }
-            Kind::Hook { event, notification_type, session_id, cwd } => {
+            Kind::Hook { event, notification_type, session_id, cwd, message } => {
                 agent.last_activity = Some(now_secs());
                 if let Some(cwd) = cwd {
                     agent.cwd = Some(cwd.into());
@@ -105,8 +109,20 @@ impl Board {
                     agent.unseen = next == State::Done && (agent.state != State::Done || agent.unseen);
                     if next != agent.state {
                         agent.state_since = Some(now_secs());
+                        if matches!(next, State::NeedsYou | State::Done) {
+                            agent.notice_seq += 1;
+                            agent.note = None;
+                        }
                     }
                     agent.state = next;
+                    // The first detail wins: the generic Notification after a PermissionRequest keeps its text.
+                    if matches!(next, State::NeedsYou | State::Done) && agent.note.is_none() {
+                        agent.note = match event.as_str() {
+                            "StopFailure" => Some("Stopped with an error".into()),
+                            "Stop" | "Notification" if next == State::Done => None,
+                            _ => message,
+                        };
+                    }
                 }
             }
             Kind::Status { model, context_pct, five_hour, seven_day } => {
@@ -171,11 +187,10 @@ pub struct Hub {
 
 impl Hub {
     pub fn start() -> std::io::Result<Self> {
-        let runtime = std::env::var_os("XDG_RUNTIME_DIR")
-            .map(PathBuf::from)
-            .unwrap_or_else(std::env::temp_dir);
-        remove_stale_dirs(&runtime);
-        let dir = runtime.join(format!("agent-ide-{}", std::process::id()));
+        let dir = runtime_dir();
+        if let Some(runtime) = dir.parent() {
+            remove_stale_dirs(runtime);
+        }
         let (bin, zdotdir) = (dir.join("bin"), dir.join("zsh"));
         std::fs::create_dir_all(&bin)?;
         std::fs::create_dir_all(&zdotdir)?;
@@ -261,6 +276,12 @@ impl Hub {
         self.board.lock().unwrap().tabs.remove(&tab);
         let _ = std::fs::remove_file(self.dir.join(format!("tab-{tab}.json")));
     }
+}
+
+/// This instance's runtime dir (`$XDG_RUNTIME_DIR/agent-ide-<pid>`), removed on quit.
+pub fn runtime_dir() -> PathBuf {
+    let runtime = std::env::var_os("XDG_RUNTIME_DIR").map(PathBuf::from).unwrap_or_else(std::env::temp_dir);
+    runtime.join(format!("agent-ide-{}", std::process::id()))
 }
 
 /// Removes runtime dirs left behind by app instances that are no longer running (crash, kill -9).
@@ -366,8 +387,47 @@ mod tests {
                 notification_type: nt.map(Into::into),
                 session_id: Some(id.into()),
                 cwd: None,
+                message: None,
             },
         }
+    }
+
+    /// A real hook payload (crates/hook/tests/fixtures), parsed like the helper does.
+    fn real(tab: u32, name: &str) -> Msg {
+        let path = format!("{}/../hook/tests/fixtures/{name}.json", env!("CARGO_MANIFEST_DIR"));
+        Msg { tab, kind: hook::parse("hook", &std::fs::read_to_string(path).unwrap()).unwrap() }
+    }
+
+    /// One notification per change into NeedsYou/Done; the PermissionRequest's detail survives the generic
+    /// Notification that follows it.
+    #[test]
+    fn notices() {
+        let mut b = Board::default();
+        let seq = |b: &Board| (b.get(1).notice_seq, b.get(1).note.clone());
+        b.apply(hook(1, "UserPromptSubmit", None));
+        assert_eq!(seq(&b), (0, None));
+        b.apply(real(1, "hook_PermissionRequest"));
+        let (n, note) = seq(&b);
+        assert_eq!(n, 1);
+        assert_eq!(note.as_deref(), Some("Wants to run a command"));
+        b.apply(real(1, "hook_Notification"));
+        assert_eq!(seq(&b), (1, note.clone()), "same prompt: no new notice, detail kept");
+        b.apply(hook(1, "PostToolUse", None));
+        b.apply(real(1, "hook_Stop"));
+        assert_eq!(seq(&b), (2, None), "done: generic text");
+        b.apply(hook(1, "Stop", None));
+        assert_eq!(seq(&b).0, 2, "done again: no new notice");
+        b.apply(hook(1, "UserPromptSubmit", None));
+        b.apply(hook(1, "StopFailure", None));
+        assert_eq!(seq(&b), (3, Some("Stopped with an error".into())));
+        // A Notification-only prompt (elicitation) uses its message.
+        b.apply(hook(1, "UserPromptSubmit", None));
+        let mut ask = real(1, "hook_Notification");
+        if let Kind::Hook { notification_type, .. } = &mut ask.kind {
+            *notification_type = Some("elicitation_dialog".into());
+        }
+        b.apply(ask);
+        assert_eq!(seq(&b), (4, Some("Claude needs your permission".into())));
     }
 
     fn status(tab: u32, ctx: Option<f32>, five: Option<Limit>) -> Msg {

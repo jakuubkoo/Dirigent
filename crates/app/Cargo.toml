@@ -16,3 +16,10 @@ serde = { version = "1", features = ["derive"] }
 async-channel = "2.5"
 # Same version gpui uses; only to see whether the compositor offers blur (blur.rs).
 wayland-client = "0.31.15"
+# Desktop notifications (notify.rs). All already in gpui's graph (same versions/features): nothing new is built.
+zbus = { version = "5.19", default-features = false, features = ["async-io", "blocking-api"] }
+wayland-backend = { version = "0.3.17", features = ["client_system"] }
+wayland-protocols = { version = "0.32.13", features = ["client", "staging"] }
+raw-window-handle = "0.6"
+# The X11 window icon (gpui takes an RgbaImage); already in gpui's graph.
+image = { version = "0.25.10", default-features = false, features = ["png"] }

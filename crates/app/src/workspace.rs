@@ -18,6 +18,7 @@ use crate::file_tree::{self, Marks, Row};
 use crate::files_panel::{Content, FileView, FilesPanel, TreeData};
 use crate::git_panel::{self, DiffView, GitPanel, PanelView, Repos};
 use crate::line_edit::{Edit, LineEdit};
+use crate::notify;
 use crate::persist::{self, PanelTab, State as Saved, TabState, WindowMode, WindowState};
 use crate::window_chrome::{self, Chrome};
 use crate::terminal_element::Metrics;
@@ -57,6 +58,8 @@ struct Tab {
     tree: file_tree::TreeState,
     /// Sidebar group of a tab that isn't spawned yet (nearest ancestor with `.git`; no git call, no watcher).
     group_hint: Option<PathBuf>,
+    /// The agent's `notice_seq` last considered for a desktop notification.
+    notified_seq: u64,
 }
 
 /// What covers the terminal area: a diff or a file preview. The active session is hidden meanwhile.
@@ -121,6 +124,11 @@ pub struct Workspace {
     /// visible.
     _minute: Option<Task<()>>,
     window_visible: bool,
+    /// The window has keyboard focus (desktop notifications skip what you're looking at).
+    window_active: bool,
+    notifier: Box<dyn notify::Notifier>,
+    notifications: persist::Notifications,
+    _click_task: Option<Task<()>>,
     _subscriptions: Vec<gpui::Subscription>,
     state_path: PathBuf,
     _save_task: Option<Task<()>>,
@@ -201,6 +209,7 @@ impl Workspace {
         let dir_watcher = git::DirWatcher::start(repos.reporter())
             .map_err(|e| eprintln!("agent-ide: no directory watcher for file trees: {e}"))
             .ok();
+        let (notifier, clicks) = notify::start(agent::runtime_dir().join("icon.svg"));
         let mut this = Self {
             tabs: Vec::new(),
             active: 0,
@@ -222,6 +231,10 @@ impl Workspace {
             _agent_task: None,
             _minute: None,
             window_visible: true,
+            window_active: window.is_window_active(),
+            notifier,
+            notifications: saved.notifications,
+            _click_task: None,
             _subscriptions: Vec::new(),
             state_path,
             _save_task: None,
@@ -279,6 +292,21 @@ impl Workspace {
             }
             Err(e) => eprintln!("agent-ide: Claude Code integration disabled: {e}"),
         }
+        this._subscriptions.push(cx.observe_window_activation(window, |w, window, _| {
+            w.window_active = window.is_window_active();
+            crate::perf::event_with(|| format!("window active: {}", w.window_active));
+            // Looking at the session now: its notification is done.
+            if let (true, Some(tab)) = (w.window_active, w.tabs.get(w.active)) {
+                w.notifier.close(tab.id as u32);
+            }
+        }));
+        this._click_task = Some(cx.spawn_in(window, async move |this, cx| {
+            while let Ok(click) = clicks.recv().await {
+                if this.update_in(cx, |w, window, cx| w.open_from_notification(click, window, cx)).is_err() {
+                    return;
+                }
+            }
+        }));
         this._subscriptions.push(cx.observe_window_visibility(window, |w, visibility, _, cx| {
             w.window_visible = visibility == gpui::WindowVisibility::Visible;
             if !w.window_visible {
@@ -613,6 +641,7 @@ impl Workspace {
             hook_cwd: None,
             tree: file_tree::TreeState { expanded: expanded.into_iter().collect(), selected: None },
             group_hint: None,
+            notified_seq: 0,
         });
         self.tabs.len() - 1
     }
@@ -671,6 +700,7 @@ impl Workspace {
         if let Some(hub) = &self.agents {
             hub.board.lock().unwrap().mark_seen(new.id as u32);
         }
+        self.notifier.close(new.id as u32);
         // It may have output since its cached frame was recorded.
         view.update(cx, |_, cx| cx.notify());
         if self.modal.is_none() {
@@ -767,6 +797,7 @@ impl Workspace {
         if let Some(hub) = &self.agents {
             hub.remove_tab(tab.id as u32);
         }
+        self.notifier.close(tab.id as u32);
         if let TabRepo::Repo(root) = &tab.repo {
             self.repos.release(root);
         }
@@ -909,7 +940,47 @@ impl Workspace {
         for (i, dir) in moves {
             self.set_cwd(i, dir, cx);
         }
+        self.notify_changes();
         cx.notify();
+    }
+
+    /// One desktop notification per agent state change into "needs you"/"done", unless it's the session you're
+    /// looking at (see `notify::should_notify`).
+    fn notify_changes(&mut self) {
+        let Some(hub) = &self.agents else { return };
+        let board = hub.board.lock().unwrap();
+        for (i, tab) in self.tabs.iter_mut().enumerate() {
+            let a = board.get(tab.id as u32);
+            if a.notice_seq == tab.notified_seq {
+                continue;
+            }
+            tab.notified_seq = a.notice_seq;
+            if !notify::should_notify(a.state, self.window_active, i == self.active, self.notifications) {
+                continue;
+            }
+            let project = match &tab.repo {
+                TabRepo::Repo(root) => root.file_name(),
+                _ => tab.cwd.file_name(),
+            }
+            .map(|n| n.to_string_lossy().into_owned());
+            let title = match project {
+                Some(p) if p != tab.name => format!("{} · {p}", tab.name),
+                _ => tab.name.clone(),
+            };
+            let urgent = a.state == agent::State::NeedsYou;
+            let body = a.note.clone().unwrap_or_else(|| if urgent { "Needs your input" } else { "Finished" }.into());
+            crate::perf::event_with(|| format!("notify tab {}: {body}", tab.id));
+            self.notifier.show(notify::Notice { tab: tab.id as u32, title, body, urgent, sound: self.notifications.sound });
+        }
+    }
+
+    /// A notification was clicked: show its session and bring the window up.
+    fn open_from_notification(&mut self, click: notify::Click, window: &mut Window, cx: &mut Context<Self>) {
+        crate::perf::event_with(|| format!("notification click: tab {} (token: {})", click.tab, click.token.is_some()));
+        if let Some(i) = self.tabs.iter().position(|t| t.id as u32 == click.tab) {
+            self.activate(i, window, cx);
+        }
+        notify::raise(window, click.token.as_deref());
     }
 
     fn tab_of_view(&self, view_id: EntityId) -> Option<usize> {
@@ -966,6 +1037,7 @@ impl Workspace {
             diff_mode: self.diff_mode,
             split_style: self.split_style,
             diff_engine: self.diff_engine,
+            notifications: self.notifications,
             ..Saved::default()
         }
     }

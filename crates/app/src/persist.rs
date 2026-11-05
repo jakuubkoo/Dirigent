@@ -26,6 +26,8 @@ pub struct State {
     pub split_style: SplitStyle,
     #[serde(default)]
     pub diff_engine: DiffEngine,
+    #[serde(default)]
+    pub notifications: Notifications,
 }
 
 impl Default for State {
@@ -42,6 +44,7 @@ impl Default for State {
             diff_mode: DiffMode::Unified,
             split_style: SplitStyle::Clean,
             diff_engine: DiffEngine::Auto,
+            notifications: Notifications::default(),
         }
     }
 }
@@ -101,6 +104,23 @@ pub enum SplitStyle {
     Classic,
     #[default]
     Clean,
+}
+
+/// Desktop notifications (no settings UI yet: edit the state file). Fields default individually.
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq)]
+#[serde(default)]
+pub struct Notifications {
+    /// A session needs you (permission prompt, question).
+    pub needs_you: bool,
+    /// A session finished its turn.
+    pub done: bool,
+    pub sound: bool,
+}
+
+impl Default for Notifications {
+    fn default() -> Self {
+        Self { needs_you: true, done: true, sound: false }
+    }
 }
 
 /// What finds the changes in a diff: Auto = the structural (syntax tree) diff when the file allows it, else the
@@ -233,6 +253,7 @@ mod tests {
             diff_mode: DiffMode::Split,
             split_style: SplitStyle::Classic,
             diff_engine: DiffEngine::Word,
+            notifications: Notifications { needs_you: true, done: false, sound: true },
             ..State::default()
         }
     }
@@ -254,6 +275,10 @@ mod tests {
         assert_eq!(old.diff_mode, DiffMode::Unified);
         assert_eq!(old.split_style, SplitStyle::Clean, "Clean is the default split style");
         assert_eq!(old.diff_engine, DiffEngine::Auto, "structural when possible by default");
+        assert_eq!(old.notifications, Notifications { needs_you: true, done: true, sound: false });
+        std::fs::write(&p, r#"{"version":1,"tabs":[],"active":0,"sidebar":{"width":200,"open":false},"window":null,
+            "last_dir":null,"notifications":{"done":false}}"#).unwrap();
+        assert_eq!(load(&p).notifications, Notifications { done: false, ..Notifications::default() }, "per field");
         // A git panel saved before the file tree existed keeps its width/open.
         std::fs::write(&p, r#"{"version":1,"tabs":[],"active":0,"sidebar":{"width":200,"open":false},"window":null,
             "last_dir":null,"git_panel":{"width":280,"open":false}}"#).unwrap();

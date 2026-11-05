@@ -6,6 +6,7 @@ mod file_tree;
 mod files_panel;
 mod git_panel;
 mod line_edit;
+mod notify;
 mod perf;
 mod persist;
 mod scrollbar;
@@ -23,6 +24,13 @@ use gpui::{
 use workspace::*;
 
 fn main() {
+    if let Some(flag @ ("--install-desktop" | "--uninstall-desktop")) = std::env::args().nth(1).as_deref() {
+        if let Err(e) = desktop_entry(flag == "--install-desktop") {
+            eprintln!("agent-ide: {e}");
+            std::process::exit(1);
+        }
+        return;
+    }
     perf::process_started();
     // The only synchronous file IO: a small file, read before any window exists.
     let state_path = persist::path();
@@ -82,6 +90,8 @@ fn main() {
                     WindowBackgroundAppearance::Opaque
                 },
                 app_id: Some("agent-ide".into()),
+                // X11 only; on Wayland the dock takes the icon from agent-ide.desktop (`--install-desktop`).
+                icon: image::load_from_memory(assets::APP_ICON_PNG).ok().map(|i| std::sync::Arc::new(i.into_rgba8())),
                 ..Default::default()
             },
             |window, cx| cx.new(|cx| Workspace::new(saved.clone(), state_path.clone(), translucent, window, cx)),
@@ -90,4 +100,39 @@ fn main() {
         cx.on_window_closed(|cx, _| cx.quit()).detach();
         cx.activate(true);
     });
+}
+
+/// `--install-desktop`: `~/.local/share/applications/agent-ide.desktop` (launching this binary) and the icon, so
+/// GNOME names notifications and shows the dock icon; `--uninstall-desktop` removes both. Nothing else ever writes
+/// to your home directory.
+fn desktop_entry(install: bool) -> std::io::Result<()> {
+    let data = std::env::var_os("XDG_DATA_HOME")
+        .filter(|d| !d.is_empty())
+        .map(std::path::PathBuf::from)
+        .or_else(|| std::env::var_os("HOME").map(|h| std::path::PathBuf::from(h).join(".local/share")))
+        .ok_or_else(|| std::io::Error::other("no HOME"))?;
+    let entry = data.join("applications/agent-ide.desktop");
+    let icon = data.join("icons/hicolor/scalable/apps/agent-ide.svg");
+    if !install {
+        for p in [&entry, &icon] {
+            match std::fs::remove_file(p) {
+                Ok(()) => println!("removed {}", p.display()),
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                Err(e) => return Err(e),
+            }
+        }
+        return Ok(());
+    }
+    let exe = std::env::current_exe()?;
+    let body = format!(
+        "[Desktop Entry]\nType=Application\nName=agent-ide\nComment=Many Claude Code sessions in one window\n\
+         Exec=\"{}\"\nIcon=agent-ide\nTerminal=false\nCategories=Development;\nStartupWMClass=agent-ide\n",
+        exe.display()
+    );
+    for (path, bytes) in [(&entry, body.as_bytes()), (&icon, assets::APP_ICON_SVG)] {
+        std::fs::create_dir_all(path.parent().unwrap())?;
+        std::fs::write(path, bytes)?;
+        println!("wrote {}", path.display());
+    }
+    Ok(())
 }

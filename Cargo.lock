@@ -118,11 +118,16 @@ dependencies = [
  "gpui",
  "gpui_platform",
  "hook",
+ "image",
+ "raw-window-handle",
  "serde",
  "serde_json",
  "session",
  "syntax",
+ "wayland-backend",
  "wayland-client",
+ "wayland-protocols",
+ "zbus",
 ]
 
 [[package]]
