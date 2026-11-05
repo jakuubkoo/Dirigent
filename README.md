@@ -1,55 +1,40 @@
-# agent-ide
+# Dirigent
 
-A native desktop IDE (Rust + gpui) for running many Claude Code sessions at once: terminal sessions in a sidebar,
-agent states and usage limits, a git panel with diffs, staging and commits, a file tree, and desktop notifications.
-Linux (Ubuntu, Wayland and X11) for now.
+A native desktop app for conducting many [Claude Code](https://claude.com/claude-code) sessions at once. Each
+session is a real terminal; Dirigent watches what the agents in them are doing, tells you which one needs you, shows
+what each agent changed in git, and lets you stage, commit or put an agent in its own git worktree, without leaving
+the window. Written in Rust on [gpui](https://github.com/zed-industries/zed) (GPU-rendered, no web view), built to
+stay at zero lag and 0 % CPU when idle. Linux (Wayland and X11) for now.
+
+<!-- TODO: add docs/screenshot.png, then uncomment:
+![Dirigent](docs/screenshot.png)
+-->
+
+## Features
+
+- **Sessions:** a sidebar grouped by project, agent states (working / needs you / done) with desktop notifications,
+  Claude usage limits, sessions restored and resumed after a restart.
+- **Projects:** a fuzzy project picker, pinned projects, and per-project defaults (start claude automatically, its flags).
+- **Worktrees:** give a session its own branch and directory in one dialog; when you close it, keep it or remove it
+  safely.
+- **Git:** changes and diffs (word-level, split, syntax-highlighted, structural with moved code), per-agent change
+  tracking, staging per file or hunk, commits with an optional generated message.
+- **Files:** a file tree and a file preview.
+- **From the terminal:** `dirigent .` opens a session in the running app (single instance).
 
 ## Install
 
+Needs Rust (https://rustup.rs) and the build packages; the script checks them first and prints the exact
+`sudo apt install …` line if something is missing (it never runs sudo itself).
+
 ```sh
+git clone https://github.com/jakuubkoo/Dirigent.git
+cd Dirigent
 scripts/install.sh
 ```
 
-It checks the build dependencies first and, if something is missing, prints the exact `sudo apt install …` line
-(it never runs sudo itself). Then it builds a release and installs:
-
-| Path | What |
-|---|---|
-| `~/.local/lib/agent-ide/agent-ide` | the app |
-| `~/.local/lib/agent-ide/agent-ide-hook` | Claude Code hook helper (must stay next to the app) |
-| `~/.local/bin/agent-ide` | symlink to the app |
-| `~/.local/share/applications/agent-ide.desktop` + icon | GNOME launcher entry |
-
-`agent-ide --version` prints the installed build (git hash and commit date).
-
-## Projects
-
-Every directory you open a session in is remembered as a project (its repo root, or the directory).
-Ctrl+Shift+T opens the picker: type to fuzzy-search projects, or a path (`/`, `~`, `.`) with Tab completion;
-Enter opens a session, Shift+Enter also starts claude. Hover a sidebar group for `+` (new session there),
-`▾` (with or without claude) and `⋯` (pin to sidebar, rename, defaults: start claude automatically and its flags).
-
-### Worktrees
-
-Enter in the picker (or `▾` → New session… on a group) opens a setup dialog: name the session, and optionally give it
-its own git worktree (new branch from a base branch, next to the repo in `<repo>-worktrees/`), start claude with a
-first prompt. Ctrl+Enter in the picker skips the dialog. Closing the last session in a worktree asks whether to keep
-or remove it; removing warns about uncommitted or unpushed work. `⋯` → Worktrees… lists all of the repo's worktrees.
-Per project (`⋯` → Defaults…): a setup command for new worktrees (e.g. `pnpm install`) and where they go.
-
-## Open from the terminal
-
-```sh
-agent-ide .                 # a session in this directory (focuses an existing one there)
-agent-ide src/main.rs       # a session in its directory, the file in the preview
-agent-ide --new ~/proj      # always a new session
-agent-ide --claude .        # ... and start claude in it
-agent-ide                   # just start or focus the app
-```
-
-One instance: a running app gets the request over a socket in `$XDG_RUNTIME_DIR` and the command returns at
-once; otherwise the app starts in the background (its output goes to `~/.local/state/agent-ide/agent-ide.log`).
-`agent-ide --help` lists the options.
+This builds a release and installs `~/.local/bin/dirigent` (the binaries live in `~/.local/lib/dirigent/`) plus a
+launcher entry with its icon. `dirigent --version` shows the installed build.
 
 ## Update
 
@@ -57,20 +42,30 @@ once; otherwise the app starts in the background (its output goes to `~/.local/s
 git pull && scripts/install.sh
 ```
 
-Safe while the app is running: binaries are replaced atomically and the running window keeps its old copy.
-Restart the app to use the new version.
+Safe while Dirigent runs: the binaries are replaced atomically, the running window keeps its copy until you
+restart it.
 
 ## Uninstall
 
 ```sh
-scripts/uninstall.sh          # keeps your state file
+scripts/uninstall.sh          # keeps your state
 scripts/uninstall.sh --purge  # also removes it
 ```
 
-## State
+## Usage
 
-Open tabs, layout and settings live in `~/.local/state/agent-ide/state.json` (`$XDG_STATE_HOME`), or in the file
-named by `AGENT_IDE_STATE`. Your `~/.claude/settings.json` is never modified.
+```sh
+dirigent                  # start, or bring the running window to the front
+dirigent .                # a session in this directory (focuses an existing one there)
+dirigent src/main.rs      # a session in the file's directory, the file in the preview
+dirigent --new ~/proj     # always a new session
+dirigent --claude .       # ... and start claude in it
+```
+
+In the app, Ctrl+Shift+T opens the project picker: type to search your projects, or a path (`/`, `~`, `.`) with Tab
+completion. Enter opens the setup dialog (name, shared directory or a new worktree, start claude with a first
+prompt); Ctrl+Enter opens a session at once. Hover a sidebar group for `+` (new session there) and `⋯` (pin, rename,
+defaults, worktrees).
 
 ## Shortcuts
 
@@ -88,4 +83,14 @@ named by `AGENT_IDE_STATE`. Your `~/.claude/settings.json` is never modified.
 | Ctrl+Shift+G / Ctrl+Shift+E | Show Changes / Files |
 | Ctrl+Shift+D | Unified / split diff |
 | Ctrl+Enter | Commit (in the commit box) |
-| Esc | Close a diff or preview |
+| Esc | Close a diff, preview or dialog |
+
+## State
+
+Tabs, layout, projects and settings live in `~/.local/state/dirigent/state.json` (`$XDG_STATE_HOME`). Your
+`~/.claude/settings.json` is never modified: Dirigent passes its hooks to each claude it starts with `--settings`.
+
+## License
+
+MIT, see [LICENSE](LICENSE). Bundled fonts, icons, grammars and linked crates are listed with their licenses in
+[THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md).
