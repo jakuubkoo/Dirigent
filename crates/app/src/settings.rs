@@ -106,18 +106,36 @@ const KEYS: &[(&str, &[&str])] = &[
 ];
 
 impl Settings {
+    /// Only the values that differ from the defaults (a later default change reaches everyone who never set it;
+    /// a reset removes the key). Nothing set: `{}`.
     pub fn to_json(self) -> String {
-        let v = json!({
-            "general": { "trust_auto_accept": self.trust_auto_accept, "plus_opens": self.plus_opens },
-            "terminal": { "font_size": self.font_size, "scrollback": self.scrollback },
-            "notifications": {
-                "needs_you": self.notifications.needs_you,
-                "done": self.notifications.done,
-                "sound": self.notifications.sound,
-            },
-            "diff": { "mode": self.diff_mode, "split_style": self.split_style, "engine": self.diff_engine },
-        });
-        let mut s = serde_json::to_string_pretty(&v).unwrap_or_default();
+        let all = |s: Settings| {
+            json!({
+                "general": { "trust_auto_accept": s.trust_auto_accept, "plus_opens": s.plus_opens },
+                "terminal": { "font_size": s.font_size, "scrollback": s.scrollback },
+                "notifications": {
+                    "needs_you": s.notifications.needs_you,
+                    "done": s.notifications.done,
+                    "sound": s.notifications.sound,
+                },
+                "diff": { "mode": s.diff_mode, "split_style": s.split_style, "engine": s.diff_engine },
+            })
+        };
+        let (mine, defaults) = (all(self), all(Settings::default()));
+        let mut out = serde_json::Map::new();
+        for (sec, keys) in mine.as_object().into_iter().flatten() {
+            let changed: serde_json::Map<_, _> = keys
+                .as_object()
+                .into_iter()
+                .flatten()
+                .filter(|(k, v)| defaults[sec][k.as_str()] != **v)
+                .map(|(k, v)| (k.clone(), v.clone()))
+                .collect();
+            if !changed.is_empty() {
+                out.insert(sec.clone(), changed.into());
+            }
+        }
+        let mut s = serde_json::to_string_pretty(&Value::Object(out)).unwrap_or_default();
         s.push('\n');
         s
     }
@@ -344,7 +362,16 @@ mod tests {
         let p = parse(&s.to_json(), &Settings::default());
         assert_eq!(p, Parsed { settings: s, notes: vec![], broken: false });
         assert_eq!(parse("{}", &s).settings, Settings::default(), "missing keys are defaults, not the fallback");
-        assert!(Settings::default().to_json().contains("\"engine\": \"structural\""));
+        assert_eq!(Settings::default().to_json(), "{}\n", "nothing set: an empty object");
+        let one = Settings { scrollback: 500, ..Settings::default() }.to_json();
+        assert_eq!(serde_json::from_str::<Value>(&one).unwrap(), json!({ "terminal": { "scrollback": 500 } }), "only what differs");
+        // A reset (back to the default) drops the key, so a later default change applies again.
+        let back = Settings { scrollback: d_scroll(), ..Settings::default() }.to_json();
+        assert_eq!(back, "{}\n");
+    }
+
+    fn d_scroll() -> usize {
+        Settings::default().scrollback
     }
 
     #[test]
@@ -408,7 +435,11 @@ mod tests {
         assert!(l.parsed.notes.is_empty());
         let written = std::fs::read_to_string(&file).unwrap();
         assert_eq!(Some(&written), l.text.as_ref());
-        assert!(written.contains("\"engine\": \"structural\""), "auto is written as structural");
+        assert_eq!(
+            serde_json::from_str::<Value>(&written).unwrap(),
+            json!({ "notifications": { "done": false, "sound": true }, "diff": { "mode": "split", "split_style": "classic" } }),
+            "only the non-default values (auto = the default structural, needs_you = the default true)"
+        );
         assert_eq!(parse(&written, &Settings::default()).settings, s);
 
         // An existing settings file wins: the state file's leftovers are never applied again.
@@ -419,7 +450,7 @@ mod tests {
         // No state file (or one without preferences): defaults, file written.
         let (state2, file2) = (d.join("none.json"), d.join("s2.json"));
         assert_eq!(load(&file2, &state2).parsed.settings, Settings::default());
-        assert!(file2.exists());
+        assert_eq!(std::fs::read_to_string(&file2).unwrap(), "{}\n", "kept as an empty object, not deleted");
         let _ = std::fs::remove_dir_all(&d);
     }
 
