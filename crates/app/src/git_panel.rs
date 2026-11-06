@@ -403,9 +403,11 @@ impl GitPanel {
         let (label, counts, hint, strong): (&'static str, String, &'static str, bool) = match (&st.upstream, st.ab) {
             _ if detached => ("Detached", String::new(), "Not on a branch: switch to one to sync", false),
             (Some(_), None) => (
-                "Remote branch deleted (merged?)",
+                "Remote deleted",
                 String::new(),
-                "Its remote branch is gone. Click for: switch to the default branch and pull, or publish again",
+                "Remote branch deleted (merged?): it's gone from the remote, usually after its pull/merge request \
+                 was merged. Nothing is pushed by itself. Click for: switch to the default branch and pull, or \
+                 publish again (asks first).",
                 false,
             ),
             (None, _) => ("Publish", String::new(), "Push this branch to the remote and track it (push -u)", true),
