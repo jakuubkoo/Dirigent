@@ -92,8 +92,8 @@ const ITEMS: &[Item] = &[
         key: Key::Plus,
         cat: Cat::General,
         label: "Plain + opens",
-        desc: "What a click on a sidebar group's + starts (Shift+click: the other claude choice). Project = its own default.",
-        ctl: Ctl::Choice(&["Project default", "Shell", "Claude"]),
+        desc: "What a click on a sidebar group's + does. Setup dialog: name, worktree, prompt (Shift+click: a session right away). Otherwise Shift+click starts the other claude choice.",
+        ctl: Ctl::Choice(&["Setup dialog", "Project default", "Shell", "Claude"]),
     },
     Item {
         key: Key::Zoom,
@@ -217,9 +217,10 @@ fn get(s: &Settings, k: Key) -> Val {
     match k {
         Key::Trust => Val::Bool(s.trust_auto_accept),
         Key::Plus => Val::Choice(match s.plus_opens {
-            PlusOpens::Project => 0,
-            PlusOpens::Shell => 1,
-            PlusOpens::Claude => 2,
+            PlusOpens::Dialog => 0,
+            PlusOpens::Project => 1,
+            PlusOpens::Shell => 2,
+            PlusOpens::Claude => 3,
         }),
         Key::Zoom => Val::Num(s.ui_zoom as f64),
         Key::FontSize => Val::Num(s.font_size as f64),
@@ -241,7 +242,7 @@ fn set(s: &mut Settings, k: Key, v: Val) {
     match (k, v) {
         (Key::Trust, Val::Bool(b)) => s.trust_auto_accept = b,
         (Key::Plus, Val::Choice(i)) => {
-            s.plus_opens = [PlusOpens::Project, PlusOpens::Shell, PlusOpens::Claude][i.min(2)]
+            s.plus_opens = [PlusOpens::Dialog, PlusOpens::Project, PlusOpens::Shell, PlusOpens::Claude][i.min(3)]
         }
         (Key::Zoom, Val::Num(n)) => s.ui_zoom = n as u32,
         (Key::FontSize, Val::Num(n)) => s.font_size = n as f32,
@@ -1160,6 +1161,10 @@ mod tests {
             set(&mut s, item.key, v);
         }
         assert_eq!(s, d, "set back to every default");
+        for i in 0..4 {
+            set(&mut s, Key::Plus, Val::Choice(i));
+            assert_eq!(get(&s, Key::Plus), Val::Choice(i), "Plain + opens, choice {i}");
+        }
     }
 
     #[test]

@@ -329,7 +329,7 @@ impl Hub {
         let mut env = vec![
             ("DIRIGENT_TAB_ID".into(), tab.to_string()),
             ("DIRIGENT_SOCKET".into(), self.sock.display().to_string()),
-            ("DIRIGENT_SETTINGS".into(), settings.display().to_string()),
+            ("DIRIGENT_CLAUDE_SETTINGS".into(), settings.display().to_string()),
             ("DIRIGENT_BIN".into(), self.bin.display().to_string()),
             ("DIRIGENT_HOOK".into(), self.helper.display().to_string()),
             ("PATH".into(), format!("{}:{path}", self.bin.display())),
@@ -424,10 +424,10 @@ IFS=:
 for d in $PATH; do
   [ -z "$d" ] || [ "$d" = "$self_dir" ] && continue
   if [ -x "$d/claude" ] && [ ! -d "$d/claude" ]; then
-    if [ -f "$DIRIGENT_SETTINGS" ]; then
+    if [ -f "$DIRIGENT_CLAUDE_SETTINGS" ]; then
       # Remember the flags for resuming later (fire-and-forget, never reads the terminal).
       [ -x "$DIRIGENT_HOOK" ] && "$DIRIGENT_HOOK" "$DIRIGENT_SOCKET" "$DIRIGENT_TAB_ID" argv "$@" </dev/null
-      exec "$d/claude" --settings "$DIRIGENT_SETTINGS" "$@"
+      exec "$d/claude" --settings "$DIRIGENT_CLAUDE_SETTINGS" "$@"
     fi
     exec "$d/claude" "$@"
   fi
@@ -787,7 +787,7 @@ mod tests {
                 .arg("--model")
                 .arg("a b")
                 .env("PATH", format!("{}:{}:/usr/bin:/bin", shim_dir.display(), real_dir.display()))
-                .env("DIRIGENT_SETTINGS", settings)
+                .env("DIRIGENT_CLAUDE_SETTINGS", settings)
                 .env("DIRIGENT_HOOK", &fake_hook)
                 .env("DIRIGENT_SOCKET", "/nowhere")
                 .env("DIRIGENT_TAB_ID", "3")

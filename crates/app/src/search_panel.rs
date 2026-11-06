@@ -15,8 +15,8 @@ use gpui::{
 
 use crate::line_edit::{Edit, LineEdit};
 use crate::scrollbar::{self, scrollbar};
-use crate::theme::{self, MONO_FONT, height, radius, space, text_size, z};
-use crate::ui::{self, icon, tip};
+use crate::theme::{self, MONO_FONT, height, space, text_size, z};
+use crate::ui::{self, icon};
 use crate::workspace::Workspace;
 
 /// Typing pause before a search starts.
@@ -232,25 +232,8 @@ impl Render for SearchPanel {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let t = theme::get();
         let focused = self.focus.is_focused(window);
-        let toggle = |id: &'static str,
-                      label: &'static str,
-                      on: bool,
-                      hint: &'static str,
-                      which: char,
-                      cx: &mut Context<Self>| {
-            div()
-                .id(id)
-                .flex_none()
-                .px(z(space::XS))
-                .rounded(z(radius::SM))
-                .font_family(MONO_FONT)
-                .text_size(z(text_size::XS))
-                .cursor_pointer()
-                .when(on, |d| d.bg(t.bg.selected).text_color(t.text.primary))
-                .when(!on, |d| d.text_color(t.text.dim).hover(|s| s.bg(t.bg.hover)))
-                .child(label)
-                .tooltip(tip(hint))
-                .on_click(cx.listener(move |p, _: &ClickEvent, _, cx| p.toggle(which, cx)))
+        let toggle = |id, label, on, hint, which: char, cx: &mut Context<Self>| {
+            ui::toggle(id, label, on, hint).on_click(cx.listener(move |p, _: &ClickEvent, _, cx| p.toggle(which, cx)))
         };
         let status = match (&self.error, self.running, self.hits) {
             (Some(e), ..) => e.clone(),

@@ -9,3 +9,5 @@ publish.workspace = true
 alacritty_terminal.workspace = true
 portable-pty.workspace = true
 async-channel = "2.5"
+# `escape` for literal find queries (already in the graph through alacritty's regex-automata).
+regex-syntax = "0.8"

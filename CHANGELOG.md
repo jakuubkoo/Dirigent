@@ -6,8 +6,22 @@ All notable changes to Dirigent are recorded here. The format follows
 
 ## [Unreleased]
 
+### Added
+
+- **Find in the terminal** (Ctrl+Alt+F): searches the screen and the whole scrollback (also in full-screen apps),
+  highlights every match, Enter / Shift+Enter step to the next / previous one, match case and regex toggles, Esc
+  closes. Not Ctrl+F: the shell, Claude Code and less/vim use it.
+
+### Changed
+
+- The `+` on a project group header opens the New session setup dialog (name, git worktree, first prompt) for that
+  project; Shift+click starts a session right away. The old instant behavior stays available as "Plain + opens" in
+  Settings (Project default, Shell, Claude).
+
 ### Fixed
 
+- Dirigent started from a terminal inside Dirigent used that session's Claude hook file as its settings.json
+  ("Settings: 2 problems") and wrote into it. Settings are never read from or written to Dirigent's runtime folder.
 - Interrupting Claude with Esc or Ctrl+C now ends the session's "working" state within about a second, instead of
   a minute later. Esc that only closes a Claude menu or switches its vim mode doesn't count.
 

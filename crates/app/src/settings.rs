@@ -41,15 +41,31 @@ pub enum DiffEngine {
     Word,
 }
 
-/// What a plain click on a sidebar group's `+` opens (Shift: the other claude choice).
+/// What a plain click on a sidebar group's `+` opens (Shift: the other claude choice; with Dialog, a session
+/// right away per the project's default). Files without the key (Project was the default) now get Dialog.
 #[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq, Default)]
 #[serde(rename_all = "lowercase")]
 pub enum PlusOpens {
-    /// The project's "start claude" default.
+    /// The New session setup dialog.
     #[default]
+    Dialog,
+    /// The project's "start claude" default.
     Project,
     Shell,
     Claude,
+}
+
+impl PlusOpens {
+    /// A click on `+`: None = the setup dialog, else whether the new session starts claude.
+    pub fn claude(self, project_default: bool, shift: bool) -> Option<bool> {
+        match self {
+            PlusOpens::Dialog if !shift => None,
+            PlusOpens::Dialog => Some(project_default),
+            PlusOpens::Project => Some(project_default != shift),
+            PlusOpens::Shell => Some(shift),
+            PlusOpens::Claude => Some(!shift),
+        }
+    }
 }
 
 /// Desktop notifications.
@@ -117,7 +133,7 @@ impl Default for Settings {
     fn default() -> Self {
         Self {
             trust_auto_accept: true,
-            plus_opens: PlusOpens::Project,
+            plus_opens: PlusOpens::Dialog,
             ui_zoom: 100,
             font_size: crate::theme::TERMINAL_FONT_SIZE,
             scrollback: 10_000,
@@ -221,7 +237,13 @@ pub fn parse(text: &str, fallback: &Settings) -> Parsed {
     let mut g = Get { v: &v, notes: &mut notes };
     let mut s = Settings {
         trust_auto_accept: g.get("general", "trust_auto_accept", d.trust_auto_accept, "true or false", |_| true),
-        plus_opens: g.get("general", "plus_opens", d.plus_opens, "\"project\", \"shell\" or \"claude\"", |_| true),
+        plus_opens: g.get(
+            "general",
+            "plus_opens",
+            d.plus_opens,
+            "\"dialog\", \"project\", \"shell\" or \"claude\"",
+            |_| true,
+        ),
         ui_zoom: g.get("general", "ui_zoom", d.ui_zoom, "a whole number 50–200 (percent)", |n: &u32| {
             (UI_ZOOM.0..=UI_ZOOM.1).contains(n)
         }),
@@ -388,10 +410,13 @@ impl Get<'_> {
 }
 
 /// `DIRIGENT_SETTINGS`; with `DIRIGENT_STATE` (test runs) `settings.json` next to that state file, so a test never
-/// touches the real config; else `$XDG_CONFIG_HOME/dirigent/settings.json`, else `~/.config/…`.
+/// touches the real config; else `$XDG_CONFIG_HOME/dirigent/settings.json`, else `~/.config/…`. Never a file in a
+/// Dirigent runtime dir: those hold the app's own files (claude's per-tab hook settings). Older builds exported that
+/// file to sessions as `DIRIGENT_SETTINGS`, so a Dirigent started in such a session took it for its settings.json.
 pub fn path() -> PathBuf {
     let var = |k| std::env::var_os(k).filter(|v| !v.is_empty()).map(PathBuf::from);
-    path_from(var("DIRIGENT_SETTINGS"), var("DIRIGENT_STATE"), var("XDG_CONFIG_HOME"), var("HOME"))
+    let runtime = crate::agent::runtime_parent();
+    path_from(var("DIRIGENT_SETTINGS"), var("DIRIGENT_STATE"), var("XDG_CONFIG_HOME"), var("HOME"), &runtime)
 }
 
 fn path_from(
@@ -399,14 +424,24 @@ fn path_from(
     state: Option<PathBuf>,
     config: Option<PathBuf>,
     home: Option<PathBuf>,
+    runtime: &Path,
 ) -> PathBuf {
-    if let Some(p) = settings {
+    let allowed = |p: &PathBuf| !in_runtime_dir(p, runtime);
+    if let Some(p) = settings.filter(allowed) {
         return p;
     }
-    if let Some(s) = state {
-        return s.with_file_name("settings.json");
+    if let Some(p) = state.map(|s| s.with_file_name("settings.json")).filter(allowed) {
+        return p;
     }
     config.unwrap_or_else(|| home.unwrap_or_default().join(".config")).join("dirigent/settings.json")
+}
+
+/// Inside any instance's runtime dir (`<runtime parent>/dirigent-<pid>/…`).
+fn in_runtime_dir(p: &Path, runtime: &Path) -> bool {
+    p.strip_prefix(runtime)
+        .ok()
+        .and_then(|rest| rest.components().next())
+        .is_some_and(|c| c.as_os_str().to_string_lossy().starts_with("dirigent-"))
 }
 
 /// What `load` found: the values, notes, and the text as read (to tell our own writes from hand edits).
@@ -621,6 +656,40 @@ mod tests {
         assert_eq!(parse(r#"{"general":{"ui_zoom":150}}"#, &at(100)).settings.ui_zoom, 150);
     }
 
+    #[test]
+    fn plus_opens_dialog_by_default_and_keeps_saved_choices() {
+        let plus = |text: &str| parse(text, &Settings::default()).settings.plus_opens;
+        // No key: the old default (project) was never written, so those files get the new default.
+        assert_eq!(plus("{}"), PlusOpens::Dialog);
+        for (v, want) in [
+            ("dialog", PlusOpens::Dialog),
+            ("project", PlusOpens::Project),
+            ("shell", PlusOpens::Shell),
+            ("claude", PlusOpens::Claude),
+        ] {
+            assert_eq!(plus(&format!(r#"{{"general":{{"plus_opens":"{v}"}}}}"#)), want);
+        }
+        assert_eq!(Settings::default().to_json(), "{}\n", "dialog is the default: not written");
+        let project = Settings { plus_opens: PlusOpens::Project, ..Settings::default() }.to_json();
+        assert_eq!(serde_json::from_str::<Value>(&project).unwrap(), json!({ "general": { "plus_opens": "project" } }));
+        let bad = parse(r#"{"general":{"plus_opens":"popup"}}"#, &Settings::default());
+        assert_eq!((bad.settings.plus_opens, bad.notes.len()), (PlusOpens::Dialog, 1));
+    }
+
+    #[test]
+    fn plus_click_dialog_or_session() {
+        use PlusOpens::*;
+        assert_eq!(Dialog.claude(true, false), None, "plain click: the dialog");
+        assert_eq!(Dialog.claude(true, true), Some(true), "Shift: right away, project default");
+        assert_eq!(Dialog.claude(false, true), Some(false));
+        assert_eq!(Project.claude(true, false), Some(true));
+        assert_eq!(Project.claude(true, true), Some(false));
+        assert_eq!(Shell.claude(true, false), Some(false));
+        assert_eq!(Shell.claude(false, true), Some(true));
+        assert_eq!(Claude.claude(false, false), Some(true));
+        assert_eq!(Claude.claude(true, true), Some(false));
+    }
+
     fn d_scroll() -> usize {
         Settings::default().scrollback
     }
@@ -693,12 +762,23 @@ mod tests {
     #[test]
     fn path_never_leaves_a_test_run_and_follows_xdg() {
         let p = |s: Option<&str>, st: Option<&str>, c: Option<&str>| {
-            path_from(s.map(Into::into), st.map(Into::into), c.map(Into::into), Some("/home/u".into()))
+            let run = Path::new("/run/user/1000");
+            path_from(s.map(Into::into), st.map(Into::into), c.map(Into::into), Some("/home/u".into()), run)
         };
         assert_eq!(p(Some("/x/s.json"), Some("/t/state.json"), None), PathBuf::from("/x/s.json"));
         assert_eq!(p(None, Some("/t/state.json"), Some("/c")), PathBuf::from("/t/settings.json"));
         assert_eq!(p(None, None, Some("/c")), PathBuf::from("/c/dirigent/settings.json"));
         assert_eq!(p(None, None, None), PathBuf::from("/home/u/.config/dirigent/settings.json"));
+        // A session's claude hook settings (any instance's runtime dir) is never taken as settings.json.
+        let hook = Some("/run/user/1000/dirigent-282823/tab-4.json");
+        assert_eq!(p(hook, None, Some("/c")), PathBuf::from("/c/dirigent/settings.json"));
+        assert_eq!(p(hook, Some("/t/state.json"), None), PathBuf::from("/t/settings.json"));
+        assert_eq!(
+            p(None, Some("/run/user/1000/dirigent-1/state.json"), Some("/c")),
+            PathBuf::from("/c/dirigent/settings.json")
+        );
+        // Elsewhere in the runtime parent is fine (only `dirigent-*` dirs are ours).
+        assert_eq!(p(Some("/run/user/1000/mine/s.json"), None, None), PathBuf::from("/run/user/1000/mine/s.json"));
     }
 
     #[test]

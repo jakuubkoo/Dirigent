@@ -42,6 +42,9 @@ shortcuts![
     ("ctrl-p", QuickOpen, "Go to file (Command Center)"),
     ("ctrl-shift-p", CommandPalette, "Run a command (Command Center, >)"),
     ("ctrl-shift-f", FindInFiles, "Search in files (Command Center, #; results in the Search panel)"),
+    // Not Ctrl+F: ^F is the shell's forward-char (zsh-autosuggestions accepts with it), Claude Code's cursor-right
+    // and less/vim's page down.
+    ("ctrl-alt-f", FindInTerminal, "Find in terminal"),
     ("shift-f10", SessionMenu, "Session menu (also the Menu key; or right click a session)"),
     ("menu", SessionMenu, ""),
     // UI zoom (the whole window, terminal font included). Bindings are matched before any view's key handler, so
@@ -74,7 +77,9 @@ fn command_only() -> Vec<(&'static str, &'static str, Box<dyn gpui::Action>)> {
 /// Keys that only work in one place (handled by that view), shown after the table.
 pub const EXTRA: &[(&str, &str)] = &[
     ("Ctrl+1..9", "Jump to session"),
-    ("Esc", "Close a diff, preview, Settings, menu or dialog"),
+    ("Esc", "Close a diff, preview, Settings, menu, dialog or the terminal's find bar"),
+    ("Enter / Shift+Enter", "Terminal find bar: next (newer) / previous (older) match"),
+    ("Alt+C / Alt+R", "Terminal find bar: match case / regular expression"),
     ("Up / Down, Enter", "Menus: choose an item, run it"),
     (
         "Ctrl+Shift+C / Ctrl+Shift+V",
