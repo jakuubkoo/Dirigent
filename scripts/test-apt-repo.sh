@@ -41,7 +41,8 @@ dpkg-deb --root-owner-group -Zxz --build "$work/x/pkg" "$work/v2/dirigent_${newe
 cp "$deb" "$work/v2/"
 
 url="http://127.0.0.1:$port/repo"
-SITE_URL="$url" "$here/apt-repo.sh" "$work/v1" "$work/site1" "$fpr" "$work/test-key.asc"
+# Relative paths, as the release workflow passes them.
+(cd "$work" && SITE_URL="$url" "$here/apt-repo.sh" v1 site1 "$fpr" test-key.asc)
 SITE_URL="http://127.0.0.1:$port/bad" "$here/apt-repo.sh" "$work/v1" "$work/www/bad" "$bad" "$work/bad-key.asc"
 ln -sfn ../site1 "$work/www/repo"
 
