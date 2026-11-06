@@ -92,6 +92,8 @@ struct Tab {
     repo: TabRepo,
     /// Bumped per resolve: only the newest one applies (`cd a; cd b` in quick succession).
     repo_gen: u64,
+    /// Bumped per Esc/Ctrl-C typed while its agent works: only the newest interrupt check runs.
+    interrupt_gen: u64,
     /// Claude Code's cwd from its last hook, as last applied (so each change is applied once).
     hook_cwd: Option<PathBuf>,
     /// File tree: expanded directories (persisted) and the selection.
@@ -1103,6 +1105,7 @@ impl Workspace {
             claude_args,
             repo: TabRepo::Unknown,
             repo_gen: 0,
+            interrupt_gen: 0,
             hook_cwd: None,
             tree: file_tree::TreeState { expanded: expanded.into_iter().collect(), selected: None },
             group_hint: None,
@@ -1968,6 +1971,52 @@ impl Workspace {
                 w.mark_dirty(cx);
                 cx.notify();
             });
+        })
+        .detach();
+    }
+
+    /// Esc / Ctrl-C was typed into a tab whose Claude is working. Claude sends no hook for an interrupt, so for
+    /// up to `WATCH` (no timers otherwise) look for either its transcript marker (an interrupt mid-turn) or, when it
+    /// stopped before any output (no marker then; the prompt goes back to the input), the TUI going quiet: the
+    /// spinner draws every ≤ 250 ms while working (2.1.319). Esc closing a menu or switching vim mode does neither.
+    pub fn key_interrupt(&mut self, view_id: EntityId, session: std::rc::Rc<Session>, cx: &mut Context<Self>) {
+        const TICK: Duration = Duration::from_millis(250);
+        const QUIET: Duration = Duration::from_millis(1250);
+        const WATCH: Duration = Duration::from_secs(4);
+        let (Some(hub), Some(i)) = (&self.agents, self.tab_of_view(view_id)) else { return };
+        let tab = &mut self.tabs[i];
+        let a = hub.board.lock().unwrap().get(tab.id as u32);
+        let (agent::State::Working, Some(sid)) = (a.state, a.session_id) else { return };
+        tab.interrupt_gen += 1;
+        let (id, generation, prompts, board) = (tab.id, tab.interrupt_gen, a.prompts, hub.board.clone());
+        cx.spawn(async move |this, cx| {
+            let path = cx.background_executor().spawn(async move { persist::transcript_path(&sid) }).await;
+            let start = Instant::now();
+            let (mut seq, mut quiet_since) = (session.output_seq(), start);
+            while start.elapsed() < WATCH {
+                cx.background_executor().timer(TICK).await;
+                let newest = this.update(cx, |w, _| w.tabs.iter().any(|t| t.id == id && t.interrupt_gen == generation));
+                if !newest.unwrap_or(false) || board.lock().unwrap().get(id as u32).state != agent::State::Working {
+                    return;
+                }
+                if session.output_seq() != seq {
+                    (seq, quiet_since) = (session.output_seq(), Instant::now());
+                }
+                let marker = match path.clone() {
+                    Some(p) => {
+                        cx.background_executor()
+                            .spawn(async move { agent::interrupted(&agent::transcript_tail(&p)) })
+                            .await
+                    }
+                    None => false,
+                };
+                if marker || quiet_since.elapsed() >= QUIET {
+                    if board.lock().unwrap().interrupt(id as u32, prompts) {
+                        let _ = this.update(cx, |w, cx| w.agents_changed(cx));
+                    }
+                    return;
+                }
+            }
         })
         .detach();
     }
