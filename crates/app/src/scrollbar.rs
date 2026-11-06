@@ -49,7 +49,10 @@ pub fn scrollbar(handle: UniformListScrollHandle, drag: Drag, view: EntityId) ->
             window.set_cursor_style(CursorStyle::Arrow, &hitbox);
             let s = &crate::theme::get().scrollbar;
             let color = if drag.get().is_some() { s.active } else { s.thumb };
-            let inset = Bounds { origin: point(t.origin.x + z(2.), t.origin.y), size: gpui::size(z(WIDTH - 3.), t.size.height) };
+            let inset = Bounds {
+                origin: point(t.origin.x + z(2.), t.origin.y),
+                size: gpui::size(z(WIDTH - 3.), t.size.height),
+            };
             window.paint_quad(gpui::fill(inset, color).corner_radii(z(3.)));
 
             let (h, d) = (handle.clone(), drag.clone());

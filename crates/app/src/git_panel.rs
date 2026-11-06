@@ -10,14 +10,14 @@ use async_channel::{Receiver, Sender};
 use git::layout::{DLine, Engine, Layout, SplitRow};
 use git::{FileChange, LineKind, Status};
 use gpui::{
-    ClickEvent, Context, FocusHandle, Focusable, HighlightStyle, KeyDownEvent, StyledText,
-    UniformListScrollHandle, WeakEntity, Window, div, prelude::*, uniform_list,
+    ClickEvent, Context, FocusHandle, Focusable, HighlightStyle, KeyDownEvent, StyledText, UniformListScrollHandle,
+    WeakEntity, Window, div, prelude::*, uniform_list,
 };
 
 use crate::scrollbar::{self, scrollbar};
-use crate::theme::{z, self, MONO_FONT, height, radius, space, text_size};
-use crate::ui::{self, icon, line_counts, tip};
 use crate::settings::{DiffEngine, DiffMode, SplitStyle};
+use crate::theme::{self, MONO_FONT, height, radius, space, text_size, z};
+use crate::ui::{self, icon, line_counts, tip};
 use crate::workspace::Workspace;
 use syntax::structural::Fail;
 
@@ -318,8 +318,11 @@ impl GitPanel {
             // Name and directory share what's left; counts and S/U never shrink. The directory truncates first.
             .child(shrink(div().min_w_0().truncate().text_color(t.text.primary), 1.).child(name))
             .child(
-                shrink(div().flex_grow(1.).min_w_0().truncate().text_size(z(text_size::XS)).text_color(t.text.dim), 10_000.)
-                    .child(dir),
+                shrink(
+                    div().flex_grow(1.).min_w_0().truncate().text_size(z(text_size::XS)).text_color(t.text.dim),
+                    10_000.,
+                )
+                .child(dir),
             )
             .children(marks.and_then(|m| m.files.get(&f.path)).map(|m| {
                 let mark = |id: &'static str, path: &'static str, hint: &'static str| {
@@ -336,10 +339,22 @@ impl GitPanel {
             }))
             .child(discard)
             .when(f.staged, |d| {
-                d.child(tag("tag-s", "S", t.git.added, "Staged · click to unstage", crate::git_ops::Job::Unstage(vec![f.clone()])))
+                d.child(tag(
+                    "tag-s",
+                    "S",
+                    t.git.added,
+                    "Staged · click to unstage",
+                    crate::git_ops::Job::Unstage(vec![f.clone()]),
+                ))
             })
             .when(f.unstaged, |d| {
-                d.child(tag("tag-u", "U", t.git.modified, "Unstaged · click to stage", crate::git_ops::Job::Stage(vec![f.clone()])))
+                d.child(tag(
+                    "tag-u",
+                    "U",
+                    t.git.modified,
+                    "Unstaged · click to stage",
+                    crate::git_ops::Job::Stage(vec![f.clone()]),
+                ))
             })
             .child(div().flex_none().text_size(z(text_size::XS)).child(line_counts(f.lines)))
             .into_any_element()
@@ -348,7 +363,13 @@ impl GitPanel {
 
 impl GitPanel {
     /// Progress of the running git write (left) and Stage all / Stage this agent's files (right).
-    fn actions_row(&self, root: &Path, st: &Status, agent: bool, ops: &crate::git_ops::OpsView) -> impl IntoElement + use<> {
+    fn actions_row(
+        &self,
+        root: &Path,
+        st: &Status,
+        agent: bool,
+        ops: &crate::git_ops::OpsView,
+    ) -> impl IntoElement + use<> {
         let t = theme::get();
         let unstaged = st.files.iter().any(|f| f.unstaged);
         let link = |id: &'static str, label: &'static str, hint: &'static str, enabled: bool| {
@@ -382,16 +403,18 @@ impl GitPanel {
             })
             .child(div().flex_1())
             .when(agent, |d| {
-                d.child(link("stage-agent", "Stage agent's files", "Stage this session's agent files", unstaged).on_click(
-                    move |_: &ClickEvent, _, cx| {
-                        let _ = ws2.update(cx, |w, cx| {
-                            let files: Vec<_> = w.agent_files(&r2).into_iter().filter(|f| f.unstaged).collect();
-                            if !files.is_empty() {
-                                w.run_git(r2.clone(), crate::git_ops::Job::Stage(files), cx);
-                            }
-                        });
-                    },
-                ))
+                d.child(
+                    link("stage-agent", "Stage agent's files", "Stage this session's agent files", unstaged).on_click(
+                        move |_: &ClickEvent, _, cx| {
+                            let _ = ws2.update(cx, |w, cx| {
+                                let files: Vec<_> = w.agent_files(&r2).into_iter().filter(|f| f.unstaged).collect();
+                                if !files.is_empty() {
+                                    w.run_git(r2.clone(), crate::git_ops::Job::Stage(files), cx);
+                                }
+                            });
+                        },
+                    ),
+                )
             })
             .child(link("stage-all", "Stage all", "git add -A", unstaged).on_click(move |_: &ClickEvent, _, cx| {
                 if unstaged {
@@ -466,11 +489,13 @@ impl GitPanel {
             .gap(z(space::XS))
             .child(
                 segmented()
-                    .child(segment("agent-only", "This agent", only, true).tooltip(tip("Files this session's agent changed")).on_click(
-                        move |_: &ClickEvent, _, cx| {
-                            let _ = ws.update(cx, |w, cx| w.set_agent_filter(true, cx));
-                        },
-                    ))
+                    .child(
+                        segment("agent-only", "This agent", only, true)
+                            .tooltip(tip("Files this session's agent changed"))
+                            .on_click(move |_: &ClickEvent, _, cx| {
+                                let _ = ws.update(cx, |w, cx| w.set_agent_filter(true, cx));
+                            }),
+                    )
                     .child(segment("agent-all", "All", !only, true).tooltip(tip("Every change in the repo")).on_click(
                         move |_: &ClickEvent, _, cx| {
                             let _ = ws2.update(cx, |w, cx| w.set_agent_filter(false, cx));
@@ -510,7 +535,14 @@ impl Render for GitPanel {
                 let error = ops.error.clone().map(|e| self.error_banner(&root, e));
                 // This agent: only its files (indices into the status); All: everything.
                 let only: Option<Arc<Vec<usize>>> = agent.as_ref().filter(|a| a.only).map(|a| {
-                    Arc::new(st.files.iter().enumerate().filter(|(_, f)| a.view.files.contains_key(&f.path)).map(|(i, _)| i).collect())
+                    Arc::new(
+                        st.files
+                            .iter()
+                            .enumerate()
+                            .filter(|(_, f)| a.view.files.contains_key(&f.path))
+                            .map(|(i, _)| i)
+                            .collect(),
+                    )
                 });
                 let (n, add, del) = match (&only, agent) {
                     (Some(_), Some(a)) => a.view.summary.unwrap_or_default(),
@@ -528,7 +560,12 @@ impl Render for GitPanel {
                     .text_color(t.text.muted)
                     .child(ui::icon(icon::BRANCH, 12., t.text.muted))
                     .child(div().min_w_0().truncate().text_color(t.text.primary).child(st.branch.clone()))
-                    .child(div().flex_none().text_color(t.text.dim).child(format!("{n} file{}", if n == 1 { "" } else { "s" })))
+                    .child(
+                        div()
+                            .flex_none()
+                            .text_color(t.text.dim)
+                            .child(format!("{n} file{}", if n == 1 { "" } else { "s" })),
+                    )
                     .when(n > 0, |d| d.child(line_counts(Some((clamp(add), clamp(del))))))
                     .when(n > 0 && !self.narrow && agent.is_none(), |d| d.child(ui::hint("S staged · U unstaged")))
                     .children(agent.as_ref().map(|a| self.agent_switch(a.only)));
@@ -635,10 +672,26 @@ impl HunkActions {
             .flex()
             .items_center()
             .gap(z(space::XS))
-            .when(unstaged, |d| d.child(button("hunk-stage", "Stage", "Stage this hunk", Job::StageHunk(f.clone(), span), false)))
-            .when(staged, |d| d.child(button("hunk-unstage", "Unstage", "Unstage this hunk", Job::UnstageHunk(f.clone(), span), false)))
+            .when(unstaged, |d| {
+                d.child(button("hunk-stage", "Stage", "Stage this hunk", Job::StageHunk(f.clone(), span), false))
+            })
+            .when(staged, |d| {
+                d.child(button(
+                    "hunk-unstage",
+                    "Unstage",
+                    "Unstage this hunk",
+                    Job::UnstageHunk(f.clone(), span),
+                    false,
+                ))
+            })
             .when(staged || unstaged, |d| {
-                d.child(button("hunk-discard", "Discard…", "Put this hunk back to the last commit", Job::DiscardHunk(f.clone(), span), true))
+                d.child(button(
+                    "hunk-discard",
+                    "Discard…",
+                    "Put this hunk back to the last commit",
+                    Job::DiscardHunk(f.clone(), span),
+                    true,
+                ))
             })
     }
 }
@@ -832,11 +885,11 @@ impl DiffView {
         let (ws, ws2) = (self.workspace.clone(), self.workspace.clone());
         segmented()
             .child(
-                segment("diff-unified", "Unified", !split, true)
-                    .tooltip(tip("Unified diff (Ctrl+Shift+D)"))
-                    .on_click(move |_: &ClickEvent, _, cx| {
+                segment("diff-unified", "Unified", !split, true).tooltip(tip("Unified diff (Ctrl+Shift+D)")).on_click(
+                    move |_: &ClickEvent, _, cx| {
                         let _ = ws.update(cx, |w, cx| w.set_diff_mode(DiffMode::Unified, cx));
-                    }),
+                    },
+                ),
             )
             .child(
                 segment("diff-split", "Split", split, !narrow)
@@ -868,11 +921,11 @@ impl DiffView {
                     }),
             )
             .child(
-                segment("diff-word", "Word", !structural, true)
-                    .tooltip(tip("Line diff with changed words"))
-                    .on_click(move |_: &ClickEvent, _, cx| {
+                segment("diff-word", "Word", !structural, true).tooltip(tip("Line diff with changed words")).on_click(
+                    move |_: &ClickEvent, _, cx| {
                         let _ = ws2.update(cx, |w, cx| w.set_diff_engine(DiffEngine::Word, cx));
-                    }),
+                    },
+                ),
             )
     }
 
@@ -1100,8 +1153,11 @@ fn structural_look(l: &DLine, clean: bool) -> Look {
 
 /// All of the line's non-blank text is changed (a new or deleted line): drawn as a whole line, not token-wise.
 fn whole(l: &DLine) -> bool {
-    let changed: usize =
-        l.words.iter().map(|r| l.text[r.start as usize..r.end as usize].chars().filter(|c| !c.is_whitespace()).count()).sum();
+    let changed: usize = l
+        .words
+        .iter()
+        .map(|r| l.text[r.start as usize..r.end as usize].chars().filter(|c| !c.is_whitespace()).count())
+        .sum();
     changed >= l.text.chars().filter(|c| !c.is_whitespace()).count()
 }
 
@@ -1216,11 +1272,18 @@ impl Render for DiffView {
         let body = match (self.shown(), self.failed) {
             (_, true) => ui::note("Couldn't read the diff").text_color(t.state.error).into_any_element(),
             (None, _) => ui::note("Loading…").into_any_element(),
-            (Some(l), _) if l.lines.is_empty() => ui::note("No textual changes (mode change or binary)").into_any_element(),
+            (Some(l), _) if l.lines.is_empty() => {
+                ui::note("No textual changes (mode change or binary)").into_any_element()
+            }
             (Some(l), _) => {
                 let (l, split, style) = (l.clone(), self.split(), self.split_style);
                 let structural = l.engine == Engine::Structural;
-                let actions = HunkActions { hunks: self.hunks.clone(), root: self.root.clone(), file: self.file.clone(), ws: self.workspace.clone() };
+                let actions = HunkActions {
+                    hunks: self.hunks.clone(),
+                    root: self.root.clone(),
+                    file: self.file.clone(),
+                    ws: self.workspace.clone(),
+                };
                 let g = Geom { lh: self.line_height, old: digits(l.max_old), new: digits(l.max_new) };
                 let rows = if split { l.split.len() } else { l.lines.len() };
                 let count = rows + l.truncated as usize;

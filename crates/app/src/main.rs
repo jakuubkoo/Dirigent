@@ -4,10 +4,10 @@ mod blur;
 mod changes;
 mod cli;
 mod commit_box;
-mod git_ops;
 mod diff_syntax;
 mod file_tree;
 mod files_panel;
+mod git_ops;
 mod git_panel;
 mod keys;
 mod layout;
@@ -22,15 +22,16 @@ mod search_panel;
 mod settings;
 mod settings_view;
 mod terminal_element;
+mod terminal_view;
 mod text_area;
 mod theme;
 mod ui;
-mod terminal_view;
 mod window_chrome;
 mod workspace;
 
 use gpui::{
-    App, Bounds, WindowBackgroundAppearance, WindowBounds, WindowDecorations, WindowOptions, point, prelude::*, px, size,
+    App, Bounds, WindowBackgroundAppearance, WindowBounds, WindowDecorations, WindowOptions, point, prelude::*, px,
+    size,
 };
 use workspace::*;
 
@@ -62,7 +63,9 @@ fn main() {
         return;
     }
     // The caller's activation token is for raising our window, once: our sessions must not inherit it.
-    let token = ["XDG_ACTIVATION_TOKEN", "DESKTOP_STARTUP_ID"].iter().find_map(|k| std::env::var(k).ok().filter(|t| !t.is_empty()));
+    let token = ["XDG_ACTIVATION_TOKEN", "DESKTOP_STARTUP_ID"]
+        .iter()
+        .find_map(|k| std::env::var(k).ok().filter(|t| !t.is_empty()));
     // SAFETY: still single-threaded (nothing spawned yet).
     unsafe {
         std::env::remove_var("XDG_ACTIVATION_TOKEN");
@@ -104,7 +107,12 @@ fn main() {
     let settings_path = settings::path();
     let mut loaded = settings::load(&settings_path, &state_path);
     // Dock widths moved from the state file into settings.json: taken over once.
-    if settings::adopt_widths(&mut loaded.parsed.settings, loaded.text.as_deref(), saved.sidebar.width, saved.git_panel.width) {
+    if settings::adopt_widths(
+        &mut loaded.parsed.settings,
+        loaded.text.as_deref(),
+        saved.sidebar.width,
+        saved.git_panel.width,
+    ) {
         let text = loaded.parsed.settings.to_json();
         match settings::save(&settings_path, &text, false) {
             Ok(()) => loaded.text = Some(text),
@@ -148,7 +156,19 @@ fn main() {
                 icon: image::load_from_memory(assets::APP_ICON_PNG).ok().map(|i| std::sync::Arc::new(i.into_rgba8())),
                 ..Default::default()
             },
-            |window, cx| cx.new(|cx| Workspace::new(saved.clone(), state_path.clone(), (settings_path, loaded), translucent, launch, window, cx)),
+            |window, cx| {
+                cx.new(|cx| {
+                    Workspace::new(
+                        saved.clone(),
+                        state_path.clone(),
+                        (settings_path, loaded),
+                        translucent,
+                        launch,
+                        window,
+                        cx,
+                    )
+                })
+            },
         )
         .expect("open window");
         cx.on_window_closed(|cx, _| cx.quit()).detach();
@@ -165,7 +185,8 @@ fn detach(state_path: &std::path::Path) -> ! {
     if std::fs::metadata(&log).is_ok_and(|m| m.len() > 1 << 20) {
         let _ = std::fs::rename(&log, dir.join("dirigent.log.old"));
     }
-    let out = std::fs::create_dir_all(dir).and_then(|_| std::fs::OpenOptions::new().create(true).append(true).open(&log));
+    let out =
+        std::fs::create_dir_all(dir).and_then(|_| std::fs::OpenOptions::new().create(true).append(true).open(&log));
     let started = out.and_then(|out| {
         std::process::Command::new(std::env::current_exe()?)
             .args(std::env::args_os().skip(1))

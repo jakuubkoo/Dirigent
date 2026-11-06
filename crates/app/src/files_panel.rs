@@ -12,9 +12,9 @@ use gpui::{
 };
 
 use crate::file_tree::{Key, Marks, Row};
-use crate::theme::{z, self, MONO_FONT, height, radius, space, text_size};
-use crate::ui::{self, icon, line_counts, tip};
 use crate::scrollbar::{self, scrollbar};
+use crate::theme::{self, MONO_FONT, height, radius, space, text_size, z};
+use crate::ui::{self, icon, line_counts, tip};
 use crate::workspace::Workspace;
 
 const INDENT: f32 = 14.;
@@ -103,7 +103,13 @@ impl FilesPanel {
             Some(k) => theme::git_kind(k),
             None => t.text.primary,
         };
-        let icon_color = if row.ignored { t.text.faint } else if kind.is_some() { color } else { t.text.dim };
+        let icon_color = if row.ignored {
+            t.text.faint
+        } else if kind.is_some() {
+            color
+        } else {
+            t.text.dim
+        };
         let (chevron, file_icon) = match (e.is_dir, row.expanded) {
             (true, true) => (Some(icon::CHEVRON_DOWN), icon::FOLDER_OPEN),
             (true, false) => (Some(icon::CHEVRON_RIGHT), icon::FOLDER),
@@ -158,7 +164,10 @@ impl Render for FilesPanel {
         crate::perf::event("files panel render");
         let d = &self.data;
         let t = theme::get();
-        let root_name = d.root.as_ref().map(|r| r.file_name().map_or(r.display().to_string(), |n| n.to_string_lossy().into_owned()));
+        let root_name = d
+            .root
+            .as_ref()
+            .map(|r| r.file_name().map_or(r.display().to_string(), |n| n.to_string_lossy().into_owned()));
         let ws = self.workspace.clone();
         let header = div()
             .flex()
@@ -180,7 +189,11 @@ impl Render for FilesPanel {
                     .cursor_pointer()
                     .hover(|s| s.bg(t.bg.hover))
                     .child(ui::icon(if d.show_ignored { icon::SHOW } else { icon::HIDE }, 14., t.text.dim))
-                    .tooltip(tip(if d.show_ignored { "Ignored files shown: click to hide" } else { "Ignored files hidden: click to show" }))
+                    .tooltip(tip(if d.show_ignored {
+                        "Ignored files shown: click to hide"
+                    } else {
+                        "Ignored files hidden: click to show"
+                    }))
                     .on_click(move |_: &ClickEvent, _, cx| {
                         let _ = ws.update(cx, |w, cx| w.toggle_show_ignored(cx));
                     }),
@@ -363,7 +376,9 @@ impl FileView {
             Some(c) => {
                 let same = match (&self.content, &c) {
                     (Some(Content::Binary), Content::Binary) => true,
-                    (Some(Content::Lines { lines: a, truncated: ta }), Content::Lines { lines: b, truncated: tb }) => a == b && ta == tb,
+                    (Some(Content::Lines { lines: a, truncated: ta }), Content::Lines { lines: b, truncated: tb }) => {
+                        a == b && ta == tb
+                    }
                     _ => false,
                 };
                 if same && change == self.change && !self.failed {
@@ -381,7 +396,6 @@ impl FileView {
         }
         cx.notify();
     }
-
 }
 
 impl FileView {
@@ -459,7 +473,9 @@ impl Render for FileView {
         let header = ui::overlay_header()
             .child(ui::icon(ui::file_icon(&name), 14., icon_color))
             .child(div().min_w_0().truncate().text_color(t.text.primary).child(rel(&self.path, self.base.as_deref())))
-            .children(self.change.as_ref().map(|c| div().flex_none().text_size(z(text_size::XS)).child(line_counts(c.lines))))
+            .children(
+                self.change.as_ref().map(|c| div().flex_none().text_size(z(text_size::XS)).child(line_counts(c.lines))),
+            )
             .children(show_diff)
             .child(ui::hint("Esc to close"));
         let body = match (&self.content, self.failed) {
@@ -480,7 +496,10 @@ impl Render for FileView {
                         .map(|ix| {
                             let row = div().h(lh).flex().whitespace_nowrap().overflow_hidden();
                             let Some(text) = lines.get(ix) else {
-                                return row.pl(z(space::LG)).text_color(t.state.needs_you).child("… file truncated (too large to show)");
+                                return row
+                                    .pl(z(space::LG))
+                                    .text_color(t.state.needs_you)
+                                    .child("… file truncated (too large to show)");
                             };
                             row.child(
                                 div()
@@ -494,21 +513,34 @@ impl Render for FileView {
                             )
                             .child(div().pr(z(14.)).text_color(t.diff.context).child({
                                 // The marked search hit: the match on a highlight (syntax colors left out on that line).
-                                let marked = mark.as_ref().filter(|(l, _)| *l == ix).and_then(|(_, m)| text.find(m.as_ref()).map(|s| s..s + m.len()));
-                                match colors.as_ref().and_then(|c| c.get(ix)).filter(|s| !s.is_empty() && marked.is_none()) {
+                                let marked = mark
+                                    .as_ref()
+                                    .filter(|(l, _)| *l == ix)
+                                    .and_then(|(_, m)| text.find(m.as_ref()).map(|s| s..s + m.len()));
+                                match colors
+                                    .as_ref()
+                                    .and_then(|c| c.get(ix))
+                                    .filter(|s| !s.is_empty() && marked.is_none())
+                                {
                                     Some(spans) => StyledText::new(text.clone())
                                         .with_highlights(spans.iter().filter_map(|(r, c)| {
                                             let color = t.syntax.color(*c)?;
-                                            Some((r.start as usize..r.end as usize, HighlightStyle { color: Some(color.into()), ..Default::default() }))
+                                            Some((
+                                                r.start as usize..r.end as usize,
+                                                HighlightStyle { color: Some(color.into()), ..Default::default() },
+                                            ))
                                         }))
                                         .into_any_element(),
                                     None => match marked {
                                         Some(r) => StyledText::new(text.clone())
-                                            .with_highlights([(r, HighlightStyle {
-                                                background_color: Some(t.search_match.into()),
-                                                color: Some(t.text.primary.into()),
-                                                ..Default::default()
-                                            })])
+                                            .with_highlights([(
+                                                r,
+                                                HighlightStyle {
+                                                    background_color: Some(t.search_match.into()),
+                                                    color: Some(t.text.primary.into()),
+                                                    ..Default::default()
+                                                },
+                                            )])
                                             .into_any_element(),
                                         None => text.clone().into_any_element(),
                                     },

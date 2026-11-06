@@ -180,7 +180,13 @@ pub static DARK: Theme = Theme {
         scrim: hexa(0x00000080),
     },
     border: Border { subtle: hexa(0xffffff0f), strong: hexa(0xffffff1f) },
-    text: Text { primary: hex(0xececf1), muted: hex(0xa1a1aa), dim: hex(0x6b6b76), faint: hex(0x45454d), on_accent: hex(0xffffff) },
+    text: Text {
+        primary: hex(0xececf1),
+        muted: hex(0xa1a1aa),
+        dim: hex(0x6b6b76),
+        faint: hex(0x45454d),
+        on_accent: hex(0xffffff),
+    },
     accent: hex(0x7c8aff),
     state: States {
         working: hex(0x60a5fa),
@@ -222,10 +228,22 @@ pub static DARK: Theme = Theme {
         cursor: hex(0xececf1),
         selection: hex(0x2b3b63),
         ansi: [
-            hex(0x24242a), hex(0xf0707a), hex(0x8fd18a), hex(0xe9c46a),
-            hex(0x6aa8f7), hex(0xc792ea), hex(0x5ccfe6), hex(0xc8c8ce),
-            hex(0x5a5a66), hex(0xff8a93), hex(0xa8e6a3), hex(0xf5d58a),
-            hex(0x8bbcff), hex(0xd7aaf5), hex(0x7fdcf0), hex(0xf4f4f6),
+            hex(0x24242a),
+            hex(0xf0707a),
+            hex(0x8fd18a),
+            hex(0xe9c46a),
+            hex(0x6aa8f7),
+            hex(0xc792ea),
+            hex(0x5ccfe6),
+            hex(0xc8c8ce),
+            hex(0x5a5a66),
+            hex(0xff8a93),
+            hex(0xa8e6a3),
+            hex(0xf5d58a),
+            hex(0x8bbcff),
+            hex(0xd7aaf5),
+            hex(0x7fdcf0),
+            hex(0xf4f4f6),
         ],
     },
     syntax: Syntax {
@@ -343,9 +361,8 @@ mod tests {
             }
         }
         let call = |line: &str, name: &str| {
-            line.match_indices(&format!("{name}(")).any(|(p, _)| {
-                p == 0 || !line[..p].chars().next_back().is_some_and(|c| c.is_alphanumeric() || c == '_')
-            })
+            line.match_indices(&format!("{name}("))
+                .any(|(p, _)| p == 0 || !line[..p].chars().next_back().is_some_and(|c| c.is_alphanumeric() || c == '_'))
         };
         let mut paths = Vec::new();
         files(&std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src"), &mut paths);

@@ -280,7 +280,12 @@ fn queries_raw(lang: Lang) -> (String, &'static str, &'static str) {
             tree_sitter_typescript::LOCALS_QUERY,
         ),
         Lang::Tsx => (
-            format!("{}\n{}\n{}", js::HIGHLIGHT_QUERY, js::JSX_HIGHLIGHT_QUERY, tree_sitter_typescript::HIGHLIGHTS_QUERY),
+            format!(
+                "{}\n{}\n{}",
+                js::HIGHLIGHT_QUERY,
+                js::JSX_HIGHLIGHT_QUERY,
+                tree_sitter_typescript::HIGHLIGHTS_QUERY
+            ),
             js::INJECTIONS_QUERY,
             tree_sitter_typescript::LOCALS_QUERY,
         ),
@@ -293,7 +298,9 @@ fn queries_raw(lang: Lang) -> (String, &'static str, &'static str) {
         Lang::Yaml => (tree_sitter_yaml::HIGHLIGHTS_QUERY.into(), "", ""),
         Lang::Css => (tree_sitter_css::HIGHLIGHTS_QUERY.into(), "", ""),
         // SCSS's query only adds to CSS's.
-        Lang::Scss => (format!("{}\n{}", tree_sitter_css::HIGHLIGHTS_QUERY, tree_sitter_scss::HIGHLIGHTS_QUERY), "", ""),
+        Lang::Scss => {
+            (format!("{}\n{}", tree_sitter_css::HIGHLIGHTS_QUERY, tree_sitter_scss::HIGHLIGHTS_QUERY), "", "")
+        }
         Lang::Html => (tree_sitter_html::HIGHLIGHTS_QUERY.into(), tree_sitter_html::INJECTIONS_QUERY, ""),
         Lang::Markdown => (markdown_block_highlights(), "", ""),
         Lang::MarkdownInline => {
@@ -301,11 +308,9 @@ fn queries_raw(lang: Lang) -> (String, &'static str, &'static str) {
         }
         Lang::Bash => (tree_sitter_bash::HIGHLIGHT_QUERY.into(), "", ""),
         Lang::Sql => (tree_sitter_sequel::HIGHLIGHTS_QUERY.into(), "", ""),
-        Lang::Dockerfile => (
-            tree_sitter_containerfile::HIGHLIGHTS_QUERY.into(),
-            tree_sitter_containerfile::INJECTIONS_QUERY,
-            "",
-        ),
+        Lang::Dockerfile => {
+            (tree_sitter_containerfile::HIGHLIGHTS_QUERY.into(), tree_sitter_containerfile::INJECTIONS_QUERY, "")
+        }
         // C++'s query only adds to C's.
         Lang::Cpp => (format!("{}\n{}", tree_sitter_c::HIGHLIGHT_QUERY, tree_sitter_cpp::HIGHLIGHT_QUERY), "", ""),
         Lang::Twig => (tree_sitter_twig::HIGHLIGHT_QUERY.into(), TWIG_INJECTION, ""),
@@ -691,7 +696,12 @@ mod tests {
         let h = highlight(lang, &text, &flag).unwrap();
         let all = t.elapsed();
         let spans: usize = h.lines.iter().map(Vec::len).sum();
-        println!("{path}: {} lines, parse {:.1} ms, parse + highlight {:.1} ms, {spans} spans", h.lines.len(), p.as_secs_f64() * 1e3, all.as_secs_f64() * 1e3);
+        println!(
+            "{path}: {} lines, parse {:.1} ms, parse + highlight {:.1} ms, {spans} spans",
+            h.lines.len(),
+            p.as_secs_f64() * 1e3,
+            all.as_secs_f64() * 1e3
+        );
         let t = Instant::now();
         let _ = config(Lang::Php);
         let _ = config(Lang::Rust);

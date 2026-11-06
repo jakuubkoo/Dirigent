@@ -5,12 +5,12 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use gpui::{
-    ClickEvent, Context, DragMoveEvent, FontWeight, IntoElement, MouseButton, MouseDownEvent, Render,
-    SharedString, StyleRefinement, Transformation, Window, canvas, div, percentage,
+    ClickEvent, Context, DragMoveEvent, FontWeight, IntoElement, MouseButton, MouseDownEvent, Render, SharedString,
+    StyleRefinement, Transformation, Window, canvas, div, percentage,
 };
 
 use super::*;
-use crate::theme::{z, self, MONO_FONT, UI_FONT, height, radius, space, text_size};
+use crate::theme::{self, MONO_FONT, UI_FONT, height, radius, space, text_size, z};
 use crate::ui::{self, icon, line_counts, tip};
 
 impl Render for Workspace {
@@ -28,7 +28,9 @@ impl Render for Workspace {
         let main = match (&self.overlay, self.tabs.get(self.active)) {
             (Some(Overlay::Diff(v)), _) => v.clone().cached(StyleRefinement::default().size_full()).into_any_element(),
             (Some(Overlay::File(v)), _) => v.clone().cached(StyleRefinement::default().size_full()).into_any_element(),
-            (Some(Overlay::Settings(v)), _) => v.clone().cached(StyleRefinement::default().size_full()).into_any_element(),
+            (Some(Overlay::Settings(v)), _) => {
+                v.clone().cached(StyleRefinement::default().size_full()).into_any_element()
+            }
             (None, Some(Tab { view: Some(view), .. })) => {
                 view.clone().cached(StyleRefinement::default().size_full()).into_any_element()
             }
@@ -83,11 +85,14 @@ impl Render for Workspace {
             // Capture phase: an open modal gets every key first, wherever focus ended up (a click can focus the diff).
             .capture_key_down(cx.listener(Self::modal_key))
             // A click outside the inline session rename field saves it (like Enter).
-            .on_mouse_down(MouseButton::Left, cx.listener(|w, _, window, cx| {
-                if matches!(w.modal, Some(Modal::Rename { .. })) {
-                    w.commit_rename(window, cx);
-                }
-            }))
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|w, _, window, cx| {
+                    if matches!(w.modal, Some(Modal::Rename { .. })) {
+                        w.commit_rename(window, cx);
+                    }
+                }),
+            )
             .on_action(cx.listener(|w, _: &NewSession, window, cx| w.open_new_session(window, cx)))
             .on_action(cx.listener(|w, _: &NewInProject, window, cx| w.new_in_project(window, cx)))
             .on_action(cx.listener(|w, _: &CloseSession, window, cx| w.close_active(window, cx)))
@@ -320,30 +325,31 @@ impl Workspace {
                     .px(z(reserve))
                     .child(self.cc_box(cx)),
             )
-            .when(csd, |d| d
-            .on_mouse_down(
-                MouseButton::Left,
-                cx.listener(|w, e: &gpui::MouseDownEvent, window, _| {
-                    if e.click_count == 2 {
+            .when(csd, |d| {
+                d.on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(|w, e: &gpui::MouseDownEvent, window, _| {
+                        if e.click_count == 2 {
+                            w.title_pressed = false;
+                            window.zoom_window();
+                        } else {
+                            w.title_pressed = true;
+                        }
+                    }),
+                )
+                .on_mouse_move(cx.listener(|w, e: &gpui::MouseMoveEvent, window, _| {
+                    if w.title_pressed && e.pressed_button == Some(MouseButton::Left) {
                         w.title_pressed = false;
-                        window.zoom_window();
-                    } else {
-                        w.title_pressed = true;
+                        window.start_window_move();
                     }
-                }),
-            )
-            .on_mouse_move(cx.listener(|w, e: &gpui::MouseMoveEvent, window, _| {
-                if w.title_pressed && e.pressed_button == Some(MouseButton::Left) {
-                    w.title_pressed = false;
-                    window.start_window_move();
-                }
-            }))
-            .on_mouse_up(MouseButton::Left, cx.listener(|w, _, _, _| w.title_pressed = false))
-            .on_click(|e, window, _| {
-                if e.is_right_click() {
-                    window.show_window_menu(e.position());
-                }
-            }))
+                }))
+                .on_mouse_up(MouseButton::Left, cx.listener(|w, _, _, _| w.title_pressed = false))
+                .on_click(|e, window, _| {
+                    if e.is_right_click() {
+                        window.show_window_menu(e.position());
+                    }
+                })
+            })
     }
 
     /// The Sessions panel: project groups and their session rows.
@@ -357,14 +363,20 @@ impl Workspace {
             let project = key.as_ref().and_then(|r| self.projects.get(r));
             let pinned = project.is_some_and(|p| p.pinned);
             let name: SharedString = match &key {
-                Some(root) => project.map(|p| p.display()).unwrap_or_else(|| {
-                    root.file_name().map_or(root.display().to_string(), |n| n.to_string_lossy().into_owned())
-                }).into(),
+                Some(root) => project
+                    .map(|p| p.display())
+                    .unwrap_or_else(|| {
+                        root.file_name().map_or(root.display().to_string(), |n| n.to_string_lossy().into_owned())
+                    })
+                    .into(),
                 None => "Other".into(),
             };
             let id = group_id(&key);
             let gname = SharedString::from(format!("gh-{}", id.display()));
-            let menu_here = self.menu.as_ref().is_some_and(|m| !matches!(m.kind, projects_ui::MenuKind::Session(_)) && Some(&m.root) == key.as_ref());
+            let menu_here = self
+                .menu
+                .as_ref()
+                .is_some_and(|m| !matches!(m.kind, projects_ui::MenuKind::Session(_)) && Some(&m.root) == key.as_ref());
             // Hover buttons: + (a session per the project default; Shift: the opposite), ▾ (with/without claude),
             // ⋯ (pin, rename, defaults, remove). Never toggle the group.
             let buttons = key.clone().map(|root| {
@@ -389,18 +401,24 @@ impl Workspace {
                     .flex()
                     .items_center()
                     .when(!menu_here, |d| d.opacity(0.).group_hover(gname.clone(), |s| s.opacity(1.)))
-                    .child(b("g-plus", icon::PLUS, "New session here (Shift: the other claude choice)").on_click(cx.listener(move |w, ev: &ClickEvent, window, cx| {
-                        cx.stop_propagation();
-                        w.group_plus(r1.clone(), ev.modifiers().shift, window, cx);
-                    })))
-                    .child(b("g-new", icon::CHEVRON_DOWN, "New session…").on_click(cx.listener(move |w, ev: &ClickEvent, _, cx| {
-                        cx.stop_propagation();
-                        w.open_menu(r2.clone(), projects_ui::MenuKind::New, ev.position(), cx);
-                    })))
-                    .child(b("g-more", icon::MORE, "Project: pin, rename, defaults").on_click(cx.listener(move |w, ev: &ClickEvent, _, cx| {
-                        cx.stop_propagation();
-                        w.open_menu(r3.clone(), projects_ui::MenuKind::Project, ev.position(), cx);
-                    })))
+                    .child(b("g-plus", icon::PLUS, "New session here (Shift: the other claude choice)").on_click(
+                        cx.listener(move |w, ev: &ClickEvent, window, cx| {
+                            cx.stop_propagation();
+                            w.group_plus(r1.clone(), ev.modifiers().shift, window, cx);
+                        }),
+                    ))
+                    .child(b("g-new", icon::CHEVRON_DOWN, "New session…").on_click(cx.listener(
+                        move |w, ev: &ClickEvent, _, cx| {
+                            cx.stop_propagation();
+                            w.open_menu(r2.clone(), projects_ui::MenuKind::New, ev.position(), cx);
+                        },
+                    )))
+                    .child(b("g-more", icon::MORE, "Project: pin, rename, defaults").on_click(cx.listener(
+                        move |w, ev: &ClickEvent, _, cx| {
+                            cx.stop_propagation();
+                            w.open_menu(r3.clone(), projects_ui::MenuKind::Project, ev.position(), cx);
+                        },
+                    )))
             });
             items.push(
                 div()
@@ -418,9 +436,17 @@ impl Workspace {
                     .text_size(z(text_size::SM))
                     .child(ui::icon(if collapsed { icon::CHEVRON_RIGHT } else { icon::CHEVRON_DOWN }, 12., t.text.dim))
                     .group(gname.clone())
-                    .child(div().min_w_0().truncate().font_weight(FontWeight::MEDIUM).text_color(t.text.muted).child(name))
+                    .child(
+                        div().min_w_0().truncate().font_weight(FontWeight::MEDIUM).text_color(t.text.muted).child(name),
+                    )
                     .when(pinned, |d| d.child(div().flex_none().child(ui::icon(icon::PIN, 10., t.text.dim))))
-                    .child(div().flex_none().text_size(z(text_size::XS)).text_color(t.text.dim).child(members.len().to_string()))
+                    .child(
+                        div()
+                            .flex_none()
+                            .text_size(z(text_size::XS))
+                            .text_color(t.text.dim)
+                            .child(members.len().to_string()),
+                    )
                     .when(needs > 0, |d| {
                         d.child(
                             div()
@@ -451,9 +477,11 @@ impl Workspace {
         let lay = self.settings.layout;
         let shown = self.dock_shown(d);
         let target = move |el: gpui::Stateful<gpui::Div>, cx: &mut Context<Self>| {
-            el.drag_over::<PanelDrag>(move |s, p: &PanelDrag, _, _| {
-                if lay.dock_of(p.0) != d { s.bg(t.bg.hover) } else { s }
-            })
+            el.drag_over::<PanelDrag>(
+                move |s, p: &PanelDrag, _, _| {
+                    if lay.dock_of(p.0) != d { s.bg(t.bg.hover) } else { s }
+                },
+            )
             .on_drop(cx.listener(move |w, p: &PanelDrag, _, cx| w.move_panel(p.0, d, cx)))
         };
         let Some(shown) = shown.filter(|_| self.docks[d.ix()].open) else {
@@ -480,7 +508,9 @@ impl Workspace {
             Panel::Sessions => self.sessions_list(cx).into_any_element(),
             Panel::Changes => self.git_panel.clone().cached(StyleRefinement::default().size_full()).into_any_element(),
             Panel::Files => self.files_panel.clone().cached(StyleRefinement::default().size_full()).into_any_element(),
-            Panel::Search => self.search_panel.clone().cached(StyleRefinement::default().size_full()).into_any_element(),
+            Panel::Search => {
+                self.search_panel.clone().cached(StyleRefinement::default().size_full()).into_any_element()
+            }
         };
         let content = div()
             .id(if d == Dock::Left { "dock-left" } else { "dock-right" })
@@ -494,11 +524,13 @@ impl Workspace {
         let content = target(content, cx);
         let divider = divider(if d == Dock::Left { "divider" } else { "git-divider" }, DockDrag(d));
         let row = div().flex().flex_none().h_full();
-        Some(match d {
-            Dock::Left => row.child(content).child(divider),
-            Dock::Right => row.child(divider).child(content),
-        }
-        .into_any_element())
+        Some(
+            match d {
+                Dock::Left => row.child(content).child(divider),
+                Dock::Right => row.child(divider).child(content),
+            }
+            .into_any_element(),
+        )
     }
 
     fn session_row(&self, i: usize, now: i64, cx: &mut Context<Self>) -> gpui::AnyElement {
@@ -547,21 +579,37 @@ impl Workspace {
                     .with_transformation(Transformation::rotate(percentage(phase)))
                     .into_any_element()
             }
-            agent::State::NeedsYou => {
-                div().flex_none().size(z(14.)).flex().items_center().justify_center().child(
-                    div().size(z(8.)).rounded_full().bg(t.state.needs_you),
-                ).into_any_element()
-            }
+            agent::State::NeedsYou => div()
+                .flex_none()
+                .size(z(14.))
+                .flex()
+                .items_center()
+                .justify_center()
+                .child(div().size(z(8.)).rounded_full().bg(t.state.needs_you))
+                .into_any_element(),
             agent::State::Done => {
-                ui::icon(icon::DONE, 14., if agent.unseen { t.state.done } else { t.state.done_seen }).into_any_element()
+                ui::icon(icon::DONE, 14., if agent.unseen { t.state.done } else { t.state.done_seen })
+                    .into_any_element()
             }
-            agent::State::Ready => div().flex_none().size(z(14.)).flex().items_center().justify_center().child(
-                div().size(z(7.)).rounded_full().border_1().border_color(t.text.dim),
-            ).into_any_element(),
-            agent::State::NoAgent if tab.claude_session.is_some() => ui::icon(icon::RESUMABLE, 13., t.text.dim).into_any_element(),
-            agent::State::NoAgent if unread && !active => div().flex_none().size(z(14.)).flex().items_center().justify_center().child(
-                div().size(z(6.)).rounded_full().bg(t.accent),
-            ).into_any_element(),
+            agent::State::Ready => div()
+                .flex_none()
+                .size(z(14.))
+                .flex()
+                .items_center()
+                .justify_center()
+                .child(div().size(z(7.)).rounded_full().border_1().border_color(t.text.dim))
+                .into_any_element(),
+            agent::State::NoAgent if tab.claude_session.is_some() => {
+                ui::icon(icon::RESUMABLE, 13., t.text.dim).into_any_element()
+            }
+            agent::State::NoAgent if unread && !active => div()
+                .flex_none()
+                .size(z(14.))
+                .flex()
+                .items_center()
+                .justify_center()
+                .child(div().size(z(6.)).rounded_full().bg(t.accent))
+                .into_any_element(),
             agent::State::NoAgent => div().flex_none().size(z(14.)).into_any_element(),
         };
         let ago = agent.last_activity.map(|a| ui::fmt_ago(now - a));
@@ -575,7 +623,11 @@ impl Workspace {
         // A tab whose agent ran shows that agent's files; the repo's totals only where no agent ran.
         let changes = self.tracker.view(tab.id as u32);
         let agent_ran = tab.claude_session.is_some() || !changes.touched.is_empty();
-        let status = if agent_ran { changes.summary.map(|(n, a, d)| (Some(n), a, d)) } else { repo_totals.map(|(_, a, d)| (None, a, d)) };
+        let status = if agent_ran {
+            changes.summary.map(|(n, a, d)| (Some(n), a, d))
+        } else {
+            repo_totals.map(|(_, a, d)| (None, a, d))
+        };
         let second: gpui::AnyElement = if tab.dir_missing {
             div()
                 .flex()
@@ -592,7 +644,9 @@ impl Workspace {
                 .items_center()
                 .gap(z(space::XS))
                 // A linked worktree's branch: accent icon (its own checkout; it groups under the main project).
-                .when(matches!(tab.repo, TabRepo::Repo(_)), |d| d.child(ui::icon(icon::BRANCH, 11., if tab.main_root.is_some() { t.accent } else { t.text.dim })))
+                .when(matches!(tab.repo, TabRepo::Repo(_)), |d| {
+                    d.child(ui::icon(icon::BRANCH, 11., if tab.main_root.is_some() { t.accent } else { t.text.dim }))
+                })
                 .child(div().min_w_0().truncate().child(label))
                 .children(status.map(|(files, add, del)| {
                     let clamp = |v: u64| v.min(u32::MAX as u64) as u32;
@@ -601,12 +655,21 @@ impl Workspace {
                         .flex_none()
                         .flex()
                         .gap(z(space::XS))
-                        .children(files.map(|n| div().child(if n == 1 { "1 file".to_string() } else { format!("{n} files") })))
+                        .children(
+                            files
+                                .map(|n| div().child(if n == 1 { "1 file".to_string() } else { format!("{n} files") })),
+                        )
                         .child(line_counts(Some((clamp(add), clamp(del)))))
                 }))
                 .into_any_element()
         };
-        let bar = if needs_you { Some(t.state.needs_you) } else if active { Some(t.accent) } else { None };
+        let bar = if needs_you {
+            Some(t.state.needs_you)
+        } else if active {
+            Some(t.accent)
+        } else {
+            None
+        };
         let row = SharedString::from(format!("row-{}", tab.id));
         // Hover: an x left of the state icon (over the "ago" text), on the row's own background. Paint-time only.
         let close = div()
@@ -650,12 +713,20 @@ impl Workspace {
             .children(bar.map(|c| div().absolute().left_0().top(z(10.)).bottom(z(10.)).w(z(2.)).rounded_full().bg(c)))
             // Shift+F10 opens the active row's menu just below it: its bottom-left, as painted.
             .when(active, |d| {
-                d.child(canvas(move |b, _, _| anchor.set(Some(b.bottom_left())), |_, _, _, _| {}).absolute().size_full())
+                d.child(
+                    canvas(move |b, _, _| anchor.set(Some(b.bottom_left())), |_, _, _, _| {}).absolute().size_full(),
+                )
             })
-            .on_mouse_down(MouseButton::Right, cx.listener(move |w, e: &MouseDownEvent, window, cx| {
-                w.open_session_menu(i, Some(e.position), window, cx);
-            }))
-            .on_mouse_down(MouseButton::Middle, cx.listener(move |w, _, window, cx| w.close_session(i, false, window, cx)))
+            .on_mouse_down(
+                MouseButton::Right,
+                cx.listener(move |w, e: &MouseDownEvent, window, cx| {
+                    w.open_session_menu(i, Some(e.position), window, cx);
+                }),
+            )
+            .on_mouse_down(
+                MouseButton::Middle,
+                cx.listener(move |w, _, window, cx| w.close_session(i, false, window, cx)),
+            )
             // Reorder within the group: a line where it will land (above when moving up, below when moving down).
             .on_drag(drag, |d: &SessionDrag, _, _, cx| cx.new(|_| RowGhost(d.name.clone())))
             .drag_over::<SessionDrag>(move |s, d, _, _| match () {
@@ -686,7 +757,9 @@ impl Workspace {
                             .text_color(if active || bold { t.text.primary } else { t.text.muted })
                             .child(tab.name.clone()),
                     )
-                    .children(ago.map(|a| div().flex_none().text_size(z(text_size::XS)).text_color(t.text.dim).child(a)))
+                    .children(
+                        ago.map(|a| div().flex_none().text_size(z(text_size::XS)).text_color(t.text.dim).child(a)),
+                    )
                     .child(div().relative().flex_none().child(state_icon).child(close)),
             )
             .child(div().text_size(z(text_size::XS)).text_color(t.text.dim).child(second))
@@ -879,7 +952,11 @@ impl Workspace {
             }))
             .child(div().text_color(t.text.dim).child(format!("{n} session{}", if n == 1 { "" } else { "s" })))
             .when(needs > 0, |d| {
-                d.child(div().text_color(t.state.needs_you).child(format!("{needs} need{} you", if needs == 1 { "s" } else { "" })))
+                d.child(
+                    div()
+                        .text_color(t.state.needs_you)
+                        .child(format!("{needs} need{} you", if needs == 1 { "s" } else { "" })),
+                )
             })
     }
 
@@ -899,7 +976,8 @@ impl Workspace {
                 .border_color(t.border.strong)
         };
         // `occlude`: clicks never reach (and focus) what is under the modal.
-        let scrim = || div().absolute().size_full().occlude().flex().justify_center().items_start().pt(z(120.)).bg(t.bg.scrim);
+        let scrim =
+            || div().absolute().size_full().occlude().flex().justify_center().items_start().pt(z(120.)).bg(t.bg.scrim);
         if let Some(Modal::Confirm { title, body, files, ok, danger, .. }) = &self.modal {
             let (ok, danger) = (*ok, *danger);
             // Commit-confirm list: shared / via-command files stand out (they may hold other work).
@@ -1005,10 +1083,22 @@ impl Workspace {
                 scrim()
                     .child(
                         card()
-                            .child(div().font_weight(FontWeight::SEMIBOLD).child(format!("Rename {}", short_path(root))))
-                            .child(div().text_size(z(text_size::SM)).text_color(t.text.muted).child("Shown in the sidebar and the picker. Empty: the folder name."))
+                            .child(
+                                div().font_weight(FontWeight::SEMIBOLD).child(format!("Rename {}", short_path(root))),
+                            )
+                            .child(
+                                div()
+                                    .text_size(z(text_size::SM))
+                                    .text_color(t.text.muted)
+                                    .child("Shown in the sidebar and the picker. Empty: the folder name."),
+                            )
                             .child(text_field(edit))
-                            .child(div().text_size(z(text_size::XS)).text_color(t.text.dim).child("Enter to save · Esc to cancel")),
+                            .child(
+                                div()
+                                    .text_size(z(text_size::XS))
+                                    .text_color(t.text.dim)
+                                    .child("Enter to save · Esc to cancel"),
+                            ),
                     )
                     .into_any_element(),
             ),

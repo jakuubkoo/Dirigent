@@ -133,8 +133,10 @@ mod tests {
         let file = git::status(&repo).unwrap().files.into_iter().find(|f| f.path == "m.rs").unwrap();
         let diff = git::diff(&repo, &file, || false).unwrap();
         let plain = git::layout::layout(&diff);
-        let colored = super::color_diff(&plain, &repo, &file, &syntax::Cache::default(), &Default::default()).unwrap().0.unwrap();
-        let shown = |t: &str, n: Option<u32>| git::text::display_line(t.lines().nth(n.unwrap() as usize - 1).unwrap(), 0);
+        let colored =
+            super::color_diff(&plain, &repo, &file, &syntax::Cache::default(), &Default::default()).unwrap().0.unwrap();
+        let shown =
+            |t: &str, n: Option<u32>| git::text::display_line(t.lines().nth(n.unwrap() as usize - 1).unwrap(), 0);
         let mut checked = 0;
         for l in colored.lines.iter().filter(|l| l.runs.iter().any(|r| r.class.is_some())) {
             let expect = match l.kind {
@@ -166,7 +168,8 @@ mod tests {
         let _ = std::fs::remove_dir_all(&d);
         let plain = git::layout::layout(&git::parse_diff(&raw));
         let flag = AtomicUsize::new(0);
-        let (colored, sides) = color(&plain, syntax::Lang::Rust, Some(old.into()), Some(new.into()), &syntax::Cache::default(), &flag);
+        let (colored, sides) =
+            color(&plain, syntax::Lang::Rust, Some(old.into()), Some(new.into()), &syntax::Cache::default(), &flag);
         structure(&colored.unwrap(), &sides, &syntax::StructuralCache::default(), &flag).unwrap()
     }
 
@@ -192,9 +195,16 @@ mod tests {
         let hint = |k| l.lines.iter().find(|x| x.kind == k && x.moved.is_some()).and_then(|x| x.moved);
         assert_eq!(hint(LineKind::Del), Some(9), "moved to the new side's line 9");
         assert_eq!(hint(LineKind::Add), Some(1), "moved from line 1");
-        for side in [|r: &git::layout::SplitRow| match *r { git::layout::SplitRow::Pair(a, _) => a, _ => None },
-            |r: &git::layout::SplitRow| match *r { git::layout::SplitRow::Pair(_, b) => b, _ => None }]
-        {
+        for side in [
+            |r: &git::layout::SplitRow| match *r {
+                git::layout::SplitRow::Pair(a, _) => a,
+                _ => None,
+            },
+            |r: &git::layout::SplitRow| match *r {
+                git::layout::SplitRow::Pair(_, b) => b,
+                _ => None,
+            },
+        ] {
             let order: Vec<u32> = l.split.iter().filter_map(side).collect();
             assert!(order.is_sorted(), "each side keeps its line order: {order:?}");
         }
@@ -232,27 +242,115 @@ mod tests {
         moves: Option<bool>,
     }
 
-    const fn fx(zed: bool, sha: &'static str, path: &'static str, case: &'static str, old: Allow, new: Allow, moves: Option<bool>) -> Fx {
+    const fn fx(
+        zed: bool,
+        sha: &'static str,
+        path: &'static str,
+        case: &'static str,
+        old: Allow,
+        new: Allow,
+        moves: Option<bool>,
+    ) -> Fx {
         Fx { zed, sha, path, case, old, new, moves }
     }
 
     const FIXTURES: &[Fx] = &[
         // Renames: only the identifier.
-        fx(true, "7a6fe73440", "crates/text/src/patch.rs", "rename", Allow::Only(&["transform_old"]), Allow::Only(&["old_to_new"]), Some(false)),
-        fx(true, "89e46396f6", "crates/workspace/src/workspace.rs", "rename", Allow::Only(&["visible_panel"]), Allow::Only(&["active_panel"]), Some(false)),
-        fx(true, "eb26fb2d45", "crates/editor/src/editor.rs", "rename", Allow::Only(&["text", "text_len"]), Allow::Only(&["lines", "lines_len"]), Some(false)),
-        fx(true, "7f70325a93", "crates/language_models/src/provider/bedrock.rs", "rename", Allow::Only(&["handler"]), Allow::Only(&["handle"]), Some(false)),
-        fx(true, "719d0f0abf", "crates/editor/src/display_map/tab_map.rs", "rename", Allow::Only(&["skip_leading_tab"]), Allow::Only(&["inside_leading_tab"]), Some(false)),
-        fx(true, "3d737fd268", "crates/gpui/src/geometry.rs", "rename (docs)", Allow::Only(&["upper_left"]), Allow::Only(&["top_left"]), Some(false)),
+        fx(
+            true,
+            "7a6fe73440",
+            "crates/text/src/patch.rs",
+            "rename",
+            Allow::Only(&["transform_old"]),
+            Allow::Only(&["old_to_new"]),
+            Some(false),
+        ),
+        fx(
+            true,
+            "89e46396f6",
+            "crates/workspace/src/workspace.rs",
+            "rename",
+            Allow::Only(&["visible_panel"]),
+            Allow::Only(&["active_panel"]),
+            Some(false),
+        ),
+        fx(
+            true,
+            "eb26fb2d45",
+            "crates/editor/src/editor.rs",
+            "rename",
+            Allow::Only(&["text", "text_len"]),
+            Allow::Only(&["lines", "lines_len"]),
+            Some(false),
+        ),
+        fx(
+            true,
+            "7f70325a93",
+            "crates/language_models/src/provider/bedrock.rs",
+            "rename",
+            Allow::Only(&["handler"]),
+            Allow::Only(&["handle"]),
+            Some(false),
+        ),
+        fx(
+            true,
+            "719d0f0abf",
+            "crates/editor/src/display_map/tab_map.rs",
+            "rename",
+            Allow::Only(&["skip_leading_tab"]),
+            Allow::Only(&["inside_leading_tab"]),
+            Some(false),
+        ),
+        fx(
+            true,
+            "3d737fd268",
+            "crates/gpui/src/geometry.rs",
+            "rename (docs)",
+            Allow::Only(&["upper_left"]),
+            Allow::Only(&["top_left"]),
+            Some(false),
+        ),
         fx(false, "71f51ae", "crates/app/src/terminal_element.rs", "rename + edits", Allow::Any, Allow::Any, None),
         // Moves: shown as moved, nothing changed inside.
         fx(true, "ec6f2a3ad4", "crates/project/src/project.rs", "move (fn, 4500 lines)", NOTHING, NOTHING, Some(true)),
-        fx(true, "7ac055627e", "crates/extensions_ui/src/extensions_ui.rs", "move (impl)", NOTHING, NOTHING, Some(true)),
-        fx(true, "b77fab0fae", "crates/gpui2/src/window_input_handler.rs", "move (trait)", NOTHING, NOTHING, Some(true)),
+        fx(
+            true,
+            "7ac055627e",
+            "crates/extensions_ui/src/extensions_ui.rs",
+            "move (impl)",
+            NOTHING,
+            NOTHING,
+            Some(true),
+        ),
+        fx(
+            true,
+            "b77fab0fae",
+            "crates/gpui2/src/window_input_handler.rs",
+            "move (trait)",
+            NOTHING,
+            NOTHING,
+            Some(true),
+        ),
         fx(true, "bf3a5d0a0d", "zed/src/editor/buffer/mod.rs", "move (structs)", NOTHING, NOTHING, Some(true)),
         fx(true, "348760556a", "crates/gpui2/src/key_dispatch.rs", "move (reorder)", NOTHING, NOTHING, Some(true)),
-        fx(true, "3c0475d182", "crates/debugger_ui/src/debugger_panel.rs", "move (in a chain)", Allow::Any, Allow::Any, Some(true)),
-        fx(true, "6f6e207eb5", "crates/editor/src/mouse_context_menu.rs", "move + edit", Allow::Any, Allow::Any, Some(true)),
+        fx(
+            true,
+            "3c0475d182",
+            "crates/debugger_ui/src/debugger_panel.rs",
+            "move (in a chain)",
+            Allow::Any,
+            Allow::Any,
+            Some(true),
+        ),
+        fx(
+            true,
+            "6f6e207eb5",
+            "crates/editor/src/mouse_context_menu.rs",
+            "move + edit",
+            Allow::Any,
+            Allow::Any,
+            Some(true),
+        ),
         // Reformatting: nothing.
         fx(true, "a829b5be01", "crates/language/src/language.rs", "reformat", NOTHING, NOTHING, Some(false)),
         fx(true, "0ac7a3bc21", "crates/fs/src/fs.rs", "reformat", NOTHING, NOTHING, Some(false)),
@@ -260,17 +358,89 @@ mod tests {
         fx(true, "47380001cc", "crates/remote/src/ssh_session.rs", "reformat", NOTHING, NOTHING, Some(false)),
         fx(true, "e0c192d831", "crates/languages/src/vtsls.rs", "reformat (json!)", NOTHING, NOTHING, Some(false)),
         // Added arguments: only the argument.
-        fx(true, "101ca00a13", "crates/editor/src/input.rs", "added arg", NOTHING, Allow::Only(&[",", "true"]), Some(false)),
-        fx(true, "101ca00a13", "crates/editor/src/navigation.rs", "added arg + rewrap", NOTHING, Allow::Only(&[",", "false"]), Some(false)),
-        fx(true, "93b846b2a6", "crates/file_finder/src/file_finder.rs", "added arg + rewrap", NOTHING, Allow::Only(&[",", "action", ".", "include_ignored", ":", "Option", "<", "bool", ">", "or", "(", ")"]), Some(false)),
-        fx(true, "897ba9adf2", "crates/markdown/src/html/html_rendering.rs", "added arg", NOTHING, Allow::Only(&[",", "cx", ":", "&", "App"]), Some(false)),
-        fx(true, "2d84af91bf", "crates/agent/src/tests/mod.rs", "added arg", Allow::Only(&["_"]), Allow::Only(&[",", "cx"]), Some(false)),
+        fx(
+            true,
+            "101ca00a13",
+            "crates/editor/src/input.rs",
+            "added arg",
+            NOTHING,
+            Allow::Only(&[",", "true"]),
+            Some(false),
+        ),
+        fx(
+            true,
+            "101ca00a13",
+            "crates/editor/src/navigation.rs",
+            "added arg + rewrap",
+            NOTHING,
+            Allow::Only(&[",", "false"]),
+            Some(false),
+        ),
+        fx(
+            true,
+            "93b846b2a6",
+            "crates/file_finder/src/file_finder.rs",
+            "added arg + rewrap",
+            NOTHING,
+            Allow::Only(&[",", "action", ".", "include_ignored", ":", "Option", "<", "bool", ">", "or", "(", ")"]),
+            Some(false),
+        ),
+        fx(
+            true,
+            "897ba9adf2",
+            "crates/markdown/src/html/html_rendering.rs",
+            "added arg",
+            NOTHING,
+            Allow::Only(&[",", "cx", ":", "&", "App"]),
+            Some(false),
+        ),
+        fx(
+            true,
+            "2d84af91bf",
+            "crates/agent/src/tests/mod.rs",
+            "added arg",
+            Allow::Only(&["_"]),
+            Allow::Only(&[",", "cx"]),
+            Some(false),
+        ),
         fx(false, "bd36c18", "crates/app/src/git_panel.rs", "added args + more", Allow::Any, Allow::Any, None),
         // Wrapped expressions: only the wrapper.
-        fx(true, "bc81ada227", "crates/multi_buffer/src/multi_buffer.rs", "wrap Some(..)", Allow::Only(&["panic", "!", "(", ")", "\"invalid excerpt id {id:?}\"", "excerpt_locator_for_id"]), Allow::Any, Some(false)),
-        fx(true, "f369e9a48b", "crates/vim/src/motion.rs", "wrap Some(..)", Allow::Only(&["(", ")", ",", "{", "}", "DisplayPoint", "from"]), Allow::Any, None),
-        fx(true, "954ac0f3ca", "crates/language_models/src/provider/ollama.rs", "wrap in if", NOTHING, Allow::Only(&["if", "settings", ".", "auto_discover", "{", "}"]), Some(false)),
-        fx(true, "1b86dbc78b", "crates/git_ui/src/commit_view.rs", "insert in chain", NOTHING, Allow::Only(&[".", "filter", "(", "|", "_", "self", "stash", "is_none", ")"]), Some(false)),
+        fx(
+            true,
+            "bc81ada227",
+            "crates/multi_buffer/src/multi_buffer.rs",
+            "wrap Some(..)",
+            Allow::Only(&["panic", "!", "(", ")", "\"invalid excerpt id {id:?}\"", "excerpt_locator_for_id"]),
+            Allow::Any,
+            Some(false),
+        ),
+        fx(
+            true,
+            "f369e9a48b",
+            "crates/vim/src/motion.rs",
+            "wrap Some(..)",
+            Allow::Only(&["(", ")", ",", "{", "}", "DisplayPoint", "from"]),
+            Allow::Any,
+            None,
+        ),
+        fx(
+            true,
+            "954ac0f3ca",
+            "crates/language_models/src/provider/ollama.rs",
+            "wrap in if",
+            NOTHING,
+            Allow::Only(&["if", "settings", ".", "auto_discover", "{", "}"]),
+            Some(false),
+        ),
+        fx(
+            true,
+            "1b86dbc78b",
+            "crates/git_ui/src/commit_view.rs",
+            "insert in chain",
+            NOTHING,
+            Allow::Only(&[".", "filter", "(", "|", "_", "self", "stash", "is_none", ")"]),
+            Some(false),
+        ),
         fx(true, "a658e1d3b0", "crates/git_ui/src/git_panel.rs", "wrap in closure", Allow::Any, Allow::Any, None),
         // Big files, mixed.
         fx(true, "9d50bab893", "crates/git_ui/src/git_panel.rs", "big mixed (9k)", Allow::Any, Allow::Any, None),
@@ -321,7 +491,9 @@ mod tests {
     /// counts as allowed when its full text is listed.
     fn violations(texts: &[String], allow: Allow) -> Vec<String> {
         let Allow::Only(ok) = allow else { return Vec::new() };
-        let fine = |t: &str| ok.iter().any(|a| t == *a || (a.chars().all(|c| c.is_alphanumeric() || c == '_') && t.contains(a)));
+        let fine = |t: &str| {
+            ok.iter().any(|a| t == *a || (a.chars().all(|c| c.is_alphanumeric() || c == '_') && t.contains(a)))
+        };
         texts
             .iter()
             .filter(|t| !fine(t.trim()))
@@ -389,7 +561,9 @@ mod tests {
         });
         let ours = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
         let (cache, scache, flag) = (syntax::Cache::default(), syntax::StructuralCache::default(), AtomicUsize::new(0));
-        println!("| fixture | case | word: lines / bytes / ok | structural: lines / bytes / moved / quiet / ok | paired rows w→s | ms | notes |");
+        println!(
+            "| fixture | case | word: lines / bytes / ok | structural: lines / bytes / moved / quiet / ok | paired rows w→s | ms | notes |"
+        );
         println!("|---|---|---|---|---|---|---|");
         let (mut ok_w, mut ok_s) = (0, 0);
         for f in FIXTURES {
@@ -420,7 +594,14 @@ mod tests {
                     ok_s += s.pass as usize;
                     let row = format!(
                         "{} / {} / {} / {} / {} | {} → {} | {ms:.0} | {}",
-                        s.lines, s.bytes, s.moved, s.quiet, if s.pass { "✓" } else { "✗" }, w.paired, s.paired, s.why
+                        s.lines,
+                        s.bytes,
+                        s.moved,
+                        s.quiet,
+                        if s.pass { "✓" } else { "✗" },
+                        w.paired,
+                        s.paired,
+                        s.why
                     );
                     row
                 }
@@ -447,7 +628,8 @@ mod tests {
         let old = std::fs::read_to_string(&path).unwrap();
         let lang = syntax::detect(std::path::Path::new(&path)).unwrap();
         let flag = AtomicUsize::new(0);
-        let candidates: Vec<usize> = old.lines().enumerate().filter(|(_, l)| l.contains("self.")).map(|(i, _)| i).collect();
+        let candidates: Vec<usize> =
+            old.lines().enumerate().filter(|(_, l)| l.contains("self.")).map(|(i, _)| i).collect();
         for edits in [1usize, 50, 500] {
             let step = (candidates.len() / edits).max(1);
             let pick: std::collections::HashSet<usize> = candidates.iter().step_by(step).take(edits).copied().collect();

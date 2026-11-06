@@ -8,7 +8,7 @@ use gpui::{
 
 use super::*;
 use crate::projects;
-use crate::theme::{z, self, MONO_FONT, radius, space, text_size};
+use crate::theme::{self, MONO_FONT, radius, space, text_size, z};
 use crate::ui::{self, icon};
 
 pub(super) struct Picker {
@@ -221,7 +221,11 @@ impl Workspace {
         let next = match p.rows.get(p.sel) {
             Some(PickRow::Project { root, .. }) => format!("{}/", tilde(root)),
             Some(PickRow::Dir { label, .. }) => {
-                let labels: Vec<&str> = p.rows.iter().filter_map(|r| if let PickRow::Dir { label, .. } = r { Some(label.as_str()) } else { None }).collect();
+                let labels: Vec<&str> = p
+                    .rows
+                    .iter()
+                    .filter_map(|r| if let PickRow::Dir { label, .. } = r { Some(label.as_str()) } else { None })
+                    .collect();
                 let common = projects::common_prefix(&labels);
                 if labels.len() > 1 && common.len() > seg.len() {
                     format!("{base}{common}")
@@ -238,7 +242,14 @@ impl Workspace {
     /// Enter / a click: a session in the row's project or directory (`ix` None: the selection). With no rows in
     /// path mode the typed path itself, if it is a directory (checked off-thread).
     /// Plain Enter / click → the setup dialog; Ctrl → open at once; Shift → at once with claude.
-    pub(super) fn picker_open(&mut self, ix: Option<usize>, shift: bool, direct: bool, window: &mut Window, cx: &mut Context<Self>) {
+    pub(super) fn picker_open(
+        &mut self,
+        ix: Option<usize>,
+        shift: bool,
+        direct: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let direct = direct || shift;
         let cwd = self.picker_cwd();
         let Some(Modal::Picker(p)) = &mut self.modal else { return };
@@ -286,7 +297,13 @@ impl Workspace {
     }
 
     /// Tab `i`'s context menu at `at` (right click), or under its row with the first item selected (Shift+F10).
-    pub(super) fn open_session_menu(&mut self, i: usize, at: Option<Point<Pixels>>, window: &mut Window, cx: &mut Context<Self>) {
+    pub(super) fn open_session_menu(
+        &mut self,
+        i: usize,
+        at: Option<Point<Pixels>>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         if matches!(self.modal, Some(Modal::Rename { .. })) {
             self.commit_rename(window, cx);
         }
@@ -334,7 +351,11 @@ impl Workspace {
                     ("worktrees", "Worktrees…", "List, open or clean up this repo's git worktrees"),
                 ];
                 if self.projects.get(&menu.root).is_some() {
-                    v.push(("remove", "Remove from recent projects", "Forget it in the picker; files and open sessions stay"));
+                    v.push((
+                        "remove",
+                        "Remove from recent projects",
+                        "Forget it in the picker; files and open sessions stay",
+                    ));
                 }
                 v
             }
@@ -450,9 +471,10 @@ impl Workspace {
             }
             "rename" => {
                 // Prefilled with what is shown now (fix a typo, or clear it for the folder name).
-                let name = self.projects.get(&root).map(|p| p.display()).unwrap_or_else(|| {
-                    root.file_name().map_or_else(String::new, |n| n.to_string_lossy().into_owned())
-                });
+                let name =
+                    self.projects.get(&root).map(|p| p.display()).unwrap_or_else(|| {
+                        root.file_name().map_or_else(String::new, |n| n.to_string_lossy().into_owned())
+                    });
                 self.modal = Some(Modal::ProjectRename { root, edit: LineEdit::new(name) });
                 window.focus(&self.focus, cx);
             }
@@ -545,7 +567,9 @@ impl Workspace {
                     .text_color(if action == "remove" { t.state.error } else { t.text.primary })
                     .hover(|s| s.bg(t.bg.hover))
                     .child(label)
-                    .when(!hint.is_empty(), |d| d.child(div().text_size(z(text_size::XS)).text_color(t.text.dim).child(hint)))
+                    .when(!hint.is_empty(), |d| {
+                        d.child(div().text_size(z(text_size::XS)).text_color(t.text.dim).child(hint))
+                    })
                     .on_click(cx.listener(move |w, _: &ClickEvent, window, cx| w.menu_action(action, window, cx)))
             }));
         Some(
@@ -553,18 +577,27 @@ impl Workspace {
                 .absolute()
                 .size_full()
                 .occlude()
-                .on_mouse_down(gpui::MouseButton::Left, cx.listener(|w, _, _, cx| {
-                    w.menu = None;
-                    cx.notify();
-                }))
-                .on_mouse_down(gpui::MouseButton::Right, cx.listener(|w, _, _, cx| {
-                    w.menu = None;
-                    cx.notify();
-                }))
-                .on_mouse_down(gpui::MouseButton::Middle, cx.listener(|w, _, _, cx| {
-                    w.menu = None;
-                    cx.notify();
-                }))
+                .on_mouse_down(
+                    gpui::MouseButton::Left,
+                    cx.listener(|w, _, _, cx| {
+                        w.menu = None;
+                        cx.notify();
+                    }),
+                )
+                .on_mouse_down(
+                    gpui::MouseButton::Right,
+                    cx.listener(|w, _, _, cx| {
+                        w.menu = None;
+                        cx.notify();
+                    }),
+                )
+                .on_mouse_down(
+                    gpui::MouseButton::Middle,
+                    cx.listener(|w, _, _, cx| {
+                        w.menu = None;
+                        cx.notify();
+                    }),
+                )
                 .child(deferred(anchored().position(menu.at).snap_to_window().child(card)).with_priority(1))
                 .into_any_element(),
         )
@@ -584,7 +617,14 @@ impl Workspace {
             .cursor_pointer()
             .text_size(z(text_size::XS))
             .text_color(if p.claude { t.text.primary } else { t.text.muted })
-            .child(div().size(z(11.)).rounded(z(3.)).border_1().border_color(if p.claude { t.accent } else { t.border.strong }).when(p.claude, |d| d.bg(t.accent)))
+            .child(
+                div()
+                    .size(z(11.))
+                    .rounded(z(3.))
+                    .border_1()
+                    .border_color(if p.claude { t.accent } else { t.border.strong })
+                    .when(p.claude, |d| d.bg(t.accent)),
+            )
             .child("Start claude")
             .tooltip(ui::tip("Start claude in the new session (Ctrl+Shift+C; Shift+Enter for once)"))
             .on_click(cx.listener(|w, _: &ClickEvent, _, cx| {
@@ -611,9 +651,14 @@ impl Workspace {
                     .min_w_0()
                     .flex()
                     .items_center()
-                    .when(p.edit.text.is_empty(), |d| d.child(div().w(z(1.5)).h(z(16.)).bg(t.accent)).child(div().text_color(t.text.faint).child("Search projects, or type a path (/ ~ .)")))
+                    .when(p.edit.text.is_empty(), |d| {
+                        d.child(div().w(z(1.5)).h(z(16.)).bg(t.accent))
+                            .child(div().text_color(t.text.faint).child("Search projects, or type a path (/ ~ .)"))
+                    })
                     .when(!p.edit.text.is_empty(), |d| {
-                        d.child(p.edit.before_cursor().to_string()).child(div().w(z(1.5)).h(z(16.)).bg(t.accent)).child(p.edit.after_cursor().to_string())
+                        d.child(p.edit.before_cursor().to_string())
+                            .child(div().w(z(1.5)).h(z(16.)).bg(t.accent))
+                            .child(p.edit.after_cursor().to_string())
                     }),
             )
             .child(toggle);
@@ -630,7 +675,11 @@ impl Workspace {
         .flex_1();
         let empty = if n == 0 {
             Some(div().p(z(space::LG)).text_size(z(text_size::SM)).text_color(t.text.dim).child(if path_mode {
-                if p.edit.text.ends_with('/') { "No subdirectories. Enter opens this directory." } else { "No match. Enter opens the typed path if it is a directory." }
+                if p.edit.text.ends_with('/') {
+                    "No subdirectories. Enter opens this directory."
+                } else {
+                    "No match. Enter opens the typed path if it is a directory."
+                }
             } else if self.projects.0.is_empty() {
                 "No projects yet: type a path (/ ~ .) to open one."
             } else {
@@ -653,12 +702,9 @@ impl Workspace {
             .child(search)
             .child(div().flex_1().min_h_0().flex().flex_col().child(list).children(empty))
             .children(p.error.clone().map(|e| div().text_size(z(text_size::SM)).text_color(t.state.error).child(e)))
-            .child(
-                div()
-                    .text_size(z(text_size::XS))
-                    .text_color(t.text.dim)
-                    .child("↑↓ select · Enter set up… · Ctrl+Enter open now · Shift+Enter now with claude · Tab complete · Esc"),
-            )
+            .child(div().text_size(z(text_size::XS)).text_color(t.text.dim).child(
+                "↑↓ select · Enter set up… · Ctrl+Enter open now · Shift+Enter now with claude · Tab complete · Esc",
+            ))
             .into_any_element()
     }
 }
@@ -685,45 +731,89 @@ fn picker_row(p: &Picker, i: usize, now: i64, cx: &mut Context<Workspace>) -> An
                 cx.notify();
             }
         }))
-        .on_click(cx.listener(move |w, ev: &ClickEvent, window, cx| w.picker_open(Some(i), ev.modifiers().shift, ev.modifiers().control, window, cx)));
+        .on_click(cx.listener(move |w, ev: &ClickEvent, window, cx| {
+            w.picker_open(Some(i), ev.modifiers().shift, ev.modifiers().control, window, cx)
+        }));
     match &p.rows[i] {
         PickRow::Project { name, hl, path, branch, last_used, pinned, auto, .. } => {
             // Matched chars bold + accent.
             let hl: Vec<_> = hl
                 .iter()
                 .filter_map(|&c| name.char_indices().nth(c).map(|(b, ch)| b..b + ch.len_utf8()))
-                .map(|r| (r, HighlightStyle { color: Some(t.accent.into()), font_weight: Some(FontWeight::BOLD), ..Default::default() }))
+                .map(|r| {
+                    (
+                        r,
+                        HighlightStyle {
+                            color: Some(t.accent.into()),
+                            font_weight: Some(FontWeight::BOLD),
+                            ..Default::default()
+                        },
+                    )
+                })
                 .collect();
-            row.child(ui::icon(if *pinned { icon::PIN } else { icon::FOLDER }, 14., if *pinned { t.accent } else { t.text.dim }))
-                .child(
-                    div()
-                        .flex_1()
-                        .min_w_0()
-                        .flex()
-                        .flex_col()
-                        .child(div().truncate().text_size(z(text_size::MD)).text_color(t.text.primary).child(StyledText::new(SharedString::from(name.clone())).with_highlights(hl)))
-                        .child(div().truncate().text_size(z(text_size::XS)).text_color(t.text.dim).child(path.clone())),
-                )
-                .when(*auto, |d| d.child(div().flex_none().child(ui::icon(icon::GENERATE, 12., t.text.dim))))
-                .children(branch.clone().map(|b| {
-                    div()
-                        .flex_none()
-                        .max_w(z(180.))
-                        .flex()
-                        .items_center()
-                        .gap(z(space::XS))
-                        .text_size(z(text_size::XS))
-                        .text_color(t.text.muted)
-                        .child(ui::icon(icon::BRANCH, 11., t.text.dim))
-                        .child(div().truncate().font_family(MONO_FONT).child(b))
-                }))
-                .child(div().flex_none().w(z(36.)).text_size(z(text_size::XS)).text_color(t.text.dim).child(if *last_used > 0 { ui::fmt_ago(now - last_used) } else { String::new() }))
-                .into_any_element()
+            row.child(ui::icon(
+                if *pinned { icon::PIN } else { icon::FOLDER },
+                14.,
+                if *pinned { t.accent } else { t.text.dim },
+            ))
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .flex()
+                    .flex_col()
+                    .child(
+                        div()
+                            .truncate()
+                            .text_size(z(text_size::MD))
+                            .text_color(t.text.primary)
+                            .child(StyledText::new(SharedString::from(name.clone())).with_highlights(hl)),
+                    )
+                    .child(div().truncate().text_size(z(text_size::XS)).text_color(t.text.dim).child(path.clone())),
+            )
+            .when(*auto, |d| d.child(div().flex_none().child(ui::icon(icon::GENERATE, 12., t.text.dim))))
+            .children(branch.clone().map(|b| {
+                div()
+                    .flex_none()
+                    .max_w(z(180.))
+                    .flex()
+                    .items_center()
+                    .gap(z(space::XS))
+                    .text_size(z(text_size::XS))
+                    .text_color(t.text.muted)
+                    .child(ui::icon(icon::BRANCH, 11., t.text.dim))
+                    .child(div().truncate().font_family(MONO_FONT).child(b))
+            }))
+            .child(
+                div()
+                    .flex_none()
+                    .w(z(36.))
+                    .text_size(z(text_size::XS))
+                    .text_color(t.text.dim)
+                    .child(if *last_used > 0 { ui::fmt_ago(now - last_used) } else { String::new() }),
+            )
+            .into_any_element()
         }
         PickRow::Dir { label, path } => row
             .child(ui::icon(icon::FOLDER, 14., t.text.dim))
-            .child(div().flex_1().min_w_0().truncate().text_size(z(text_size::MD)).text_color(t.text.primary).child(format!("{label}/")))
-            .child(div().flex_none().max_w(z(300.)).truncate().text_size(z(text_size::XS)).text_color(t.text.dim).child(tilde(path)))
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .truncate()
+                    .text_size(z(text_size::MD))
+                    .text_color(t.text.primary)
+                    .child(format!("{label}/")),
+            )
+            .child(
+                div()
+                    .flex_none()
+                    .max_w(z(300.))
+                    .truncate()
+                    .text_size(z(text_size::XS))
+                    .text_color(t.text.dim)
+                    .child(tilde(path)),
+            )
             .into_any_element(),
     }
 }

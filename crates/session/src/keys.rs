@@ -20,16 +20,33 @@ pub fn encode(key: &str, text: Option<&str>, m: Mods, app_cursor: bool) -> Optio
             format!("\x1b[{c}").into_bytes()
         }
     };
-    let tilde = |n: u8| -> Vec<u8> {
-        if param > 1 { format!("\x1b[{n};{param}~") } else { format!("\x1b[{n}~") }.into_bytes()
-    };
+    let tilde =
+        |n: u8| -> Vec<u8> { if param > 1 { format!("\x1b[{n};{param}~") } else { format!("\x1b[{n}~") }.into_bytes() };
     let alt_prefix = |b: &[u8]| if m.alt { [b"\x1b", b].concat() } else { b.to_vec() };
 
     Some(match key {
         // ESC CR = newline in Claude Code (and Alt+Enter in readline-style apps).
-        "enter" => if m.shift || m.alt { b"\x1b\r".to_vec() } else { b"\r".to_vec() },
-        "tab" => if m.shift { b"\x1b[Z".to_vec() } else { b"\t".to_vec() },
-        "backspace" => if m.ctrl { alt_prefix(b"\x08") } else { alt_prefix(b"\x7f") },
+        "enter" => {
+            if m.shift || m.alt {
+                b"\x1b\r".to_vec()
+            } else {
+                b"\r".to_vec()
+            }
+        }
+        "tab" => {
+            if m.shift {
+                b"\x1b[Z".to_vec()
+            } else {
+                b"\t".to_vec()
+            }
+        }
+        "backspace" => {
+            if m.ctrl {
+                alt_prefix(b"\x08")
+            } else {
+                alt_prefix(b"\x7f")
+            }
+        }
         "escape" => b"\x1b".to_vec(),
         "up" => csi_letter('A', app_cursor),
         "down" => csi_letter('B', app_cursor),

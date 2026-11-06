@@ -96,7 +96,8 @@ impl Index {
             if !seen.insert(rel_dir.to_path_buf()) {
                 continue;
             }
-            let prefix = if rel_dir.as_os_str().is_empty() { String::new() } else { format!("{}/", rel_dir.to_string_lossy()) };
+            let prefix =
+                if rel_dir.as_os_str().is_empty() { String::new() } else { format!("{}/", rel_dir.to_string_lossy()) };
             if !dir.is_dir() {
                 drop_prefix.push(prefix);
                 continue;
@@ -140,7 +141,8 @@ impl Index {
                 None => rel.starts_with(p.as_str()),
             })
         };
-        let mut rels: Vec<String> = self.files.iter().filter(|f| !dropped(&f.rel)).map(|f| f.rel.clone()).chain(add).collect();
+        let mut rels: Vec<String> =
+            self.files.iter().filter(|f| !dropped(&f.rel)).map(|f| f.rel.clone()).chain(add).collect();
         rels.sort_unstable();
         rels.dedup();
         let changed = rels.len() != self.files.len() || rels.iter().zip(self.files.iter()).any(|(a, b)| *a != b.rel);
@@ -209,7 +211,10 @@ mod tests {
         std::fs::rename(d.join("old"), d.join("renamed")).unwrap();
         // What the watcher reports: the parents of the changed entries.
         assert!(ix.refresh(&[d.join("src"), d.clone()]));
-        assert_eq!(rels(&ix), [".gitignore", "fresh/sub/y.rs", "renamed/x.rs", "src/b.rs", "src/deep/c.rs", "src/new.rs"]);
+        assert_eq!(
+            rels(&ix),
+            [".gitignore", "fresh/sub/y.rs", "renamed/x.rs", "src/b.rs", "src/deep/c.rs", "src/new.rs"]
+        );
         // A removed directory reported itself (its parent's listing was not re-read).
         std::fs::remove_dir_all(d.join("src/deep")).unwrap();
         assert!(ix.refresh(&[d.join("src/deep")]));

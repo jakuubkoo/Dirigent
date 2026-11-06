@@ -159,7 +159,8 @@ impl Layout {
             l.words = shown.iter().filter(|(_, m)| !m).map(|(r, _)| r.clone()).collect();
             l.moves = shown.iter().filter(|(_, m)| *m).map(|(r, _)| r.clone()).collect();
             l.same = l.words.is_empty() && l.moves.is_empty();
-            let syntax: Vec<(Range<u32>, u8)> = l.runs.iter().filter_map(|r| r.class.map(|c| (r.range.clone(), c))).collect();
+            let syntax: Vec<(Range<u32>, u8)> =
+                l.runs.iter().filter_map(|r| r.class.map(|c| (r.range.clone(), c))).collect();
             l.runs = merge_runs(&l.words, &l.moves, &syntax);
         }
         // Hints: on each moved block's first shown line (its first line can be context or share a line).
@@ -180,21 +181,25 @@ impl Layout {
         let lines = &out.lines;
         let partner = |d: usize| old.partner.get(lines[d].old? as usize - 1).copied().flatten();
         let moved = |k: usize| !lines[k].moves.is_empty();
-        out.split = split_rows(lines, |dels, adds| {
-            let at: std::collections::HashMap<u32, usize> =
-                adds.iter().enumerate().filter_map(|(j, &k)| Some((lines[k].new? - 1, j))).collect();
-            let mut pairs = Vec::new();
-            for (i, &d) in dels.iter().enumerate() {
-                if let Some(&j) = partner(d).and_then(|p| at.get(&p))
-                    && pairs.last().is_none_or(|&(_, pj)| j > pj)
-                    && !moved(d)
-                    && !moved(adds[j])
-                {
-                    pairs.push((i, j));
+        out.split = split_rows(
+            lines,
+            |dels, adds| {
+                let at: std::collections::HashMap<u32, usize> =
+                    adds.iter().enumerate().filter_map(|(j, &k)| Some((lines[k].new? - 1, j))).collect();
+                let mut pairs = Vec::new();
+                for (i, &d) in dels.iter().enumerate() {
+                    if let Some(&j) = partner(d).and_then(|p| at.get(&p))
+                        && pairs.last().is_none_or(|&(_, pj)| j > pj)
+                        && !moved(d)
+                        && !moved(adds[j])
+                    {
+                        pairs.push((i, j));
+                    }
                 }
-            }
-            pairs
-        }, moved);
+                pairs
+            },
+            moved,
+        );
         Some(out)
     }
 }
@@ -298,7 +303,11 @@ pub fn layout(diff: &Diff) -> Layout {
         };
         out.max_old = out.max_old.max(o.unwrap_or(0));
         out.max_new = out.max_new.max(n.unwrap_or(0));
-        out.lines.push(DLine { kind: l.kind, old: o, new: n, text: text.into(),
+        out.lines.push(DLine {
+            kind: l.kind,
+            old: o,
+            new: n,
+            text: text.into(),
             words: Vec::new(),
             moves: Vec::new(),
             moved: None,
@@ -344,7 +353,15 @@ fn tokens(s: &str) -> Vec<Range<usize>> {
         Space,
         Other,
     }
-    let class = |c: char| if c.is_alphanumeric() || c == '_' { C::Word } else if c.is_whitespace() { C::Space } else { C::Other };
+    let class = |c: char| {
+        if c.is_alphanumeric() || c == '_' {
+            C::Word
+        } else if c.is_whitespace() {
+            C::Space
+        } else {
+            C::Other
+        }
+    };
     let mut out: Vec<Range<usize>> = Vec::new();
     let mut prev = None;
     for (i, ch) in s.char_indices() {
@@ -508,7 +525,8 @@ fn pair_blocks(out: &mut Layout) {
     out.split = split_rows(
         lines,
         |dels, adds| {
-            let sig = |ix: &[usize]| -> Vec<Option<Vec<u64>>> { ix.iter().map(|&k| signature(&lines[k].text)).collect() };
+            let sig =
+                |ix: &[usize]| -> Vec<Option<Vec<u64>>> { ix.iter().map(|&k| signature(&lines[k].text)).collect() };
             let pairs = align(&sig(dels), &sig(adds));
             all.extend(pairs.iter().map(|&(d, a)| (dels[d], adds[a])));
             pairs
@@ -598,7 +616,8 @@ mod tests {
         std::fs::create_dir_all(&d).unwrap();
         std::fs::write(d.join("a"), before).unwrap();
         std::fs::write(d.join("b"), after).unwrap();
-        let out = Command::new("git").args(["diff", "--no-index", "--no-color", "a", "b"]).current_dir(&d).output().unwrap();
+        let out =
+            Command::new("git").args(["diff", "--no-index", "--no-color", "a", "b"]).current_dir(&d).output().unwrap();
         let _ = std::fs::remove_dir_all(&d);
         crate::parse_diff(&out.stdout)
     }
@@ -635,7 +654,10 @@ mod tests {
         };
         let lay = layout(&raw);
         let got: Vec<_> = lay.lines.iter().map(|l| (&*l.text, l.old, l.new)).collect();
-        assert_eq!(got, vec![("⋯ fn main() {", None, None), ("a", Some(1), None), ("⋯", None, None), ("b", None, Some(9))]);
+        assert_eq!(
+            got,
+            vec![("⋯ fn main() {", None, None), ("a", Some(1), None), ("⋯", None, None), ("b", None, Some(9))]
+        );
     }
 
     #[test]
@@ -659,9 +681,15 @@ mod tests {
     #[test]
     fn new_and_deleted_files() {
         let new = real_diff("new", "", "a\nb\n");
-        assert_eq!(new.lines.iter().map(|l| (l.old, l.new)).collect::<Vec<_>>(), vec![(None, None), (None, Some(1)), (None, Some(2))]);
+        assert_eq!(
+            new.lines.iter().map(|l| (l.old, l.new)).collect::<Vec<_>>(),
+            vec![(None, None), (None, Some(1)), (None, Some(2))]
+        );
         let gone = real_diff("gone", "a\nb\n", "");
-        assert_eq!(gone.lines.iter().map(|l| (l.old, l.new)).collect::<Vec<_>>(), vec![(None, None), (Some(1), None), (Some(2), None)]);
+        assert_eq!(
+            gone.lines.iter().map(|l| (l.old, l.new)).collect::<Vec<_>>(),
+            vec![(None, None), (Some(1), None), (Some(2), None)]
+        );
         assert_eq!(gone.split[1..], [SplitRow::Pair(Some(1), None), SplitRow::Pair(Some(2), None)]);
     }
 
@@ -712,7 +740,8 @@ mod tests {
 
     #[test]
     fn block_alignment_with_an_inserted_line() {
-        let before = "fn a() { return first_value; }\nfn b() { return second_value; }\nfn c() { return third_value; }\n";
+        let before =
+            "fn a() { return first_value; }\nfn b() { return second_value; }\nfn c() { return third_value; }\n";
         let after = "fn a() { return first_value + 1; }\nlet unrelated = 42;\nfn b() { return second_value + 1; }\nfn c() { return third_value + 1; }\n";
         let lay = real_diff("align", before, after);
         let ix = |k, t| lay.lines.iter().position(|l| l.kind == k && &*l.text == t).unwrap() as u32;
@@ -728,14 +757,17 @@ mod tests {
             ix(LineKind::Add, "fn c() { return third_value + 1; }"),
         );
         use SplitRow::Pair;
-        assert_eq!(lay.split[1..], [Pair(Some(d0), Some(a0)), Pair(None, Some(ax)), Pair(Some(d1), Some(a1)), Pair(Some(d2), Some(a2))]);
+        assert_eq!(
+            lay.split[1..],
+            [Pair(Some(d0), Some(a0)), Pair(None, Some(ax)), Pair(Some(d1), Some(a1)), Pair(Some(d2), Some(a2))]
+        );
         assert!(lay.lines[ax as usize].words.is_empty(), "unpaired line has no word ranges");
         assert_eq!(words(&lay.lines[a1 as usize]), [" + 1"]);
     }
 
     #[test]
     fn unrelated_lines_are_zipped_but_not_paired() {
-        let lay = real_diff("zip", "alpha beta\ngamma delta\n", "one two\n", );
+        let lay = real_diff("zip", "alpha beta\ngamma delta\n", "one two\n");
         use SplitRow::Pair;
         assert_eq!(lay.split[1..], [Pair(Some(1), Some(3)), Pair(Some(2), None)]);
         assert!(lay.lines.iter().all(|l| l.words.is_empty()));
@@ -801,7 +833,11 @@ mod tests {
             [r(0, 3, Some(1), false), r(4, 6, Some(2), true), r(6, 9, Some(2), false)]
         );
         assert_eq!(merge_runs(std::slice::from_ref(&(2..5)), &[], &[]), [r(2, 5, None, true)]);
-        assert_eq!(merge_runs(&[], &[], &[(1..2, 3), (2..4, 3)]), [r(1, 4, Some(3), false)], "adjacent same class merge");
+        assert_eq!(
+            merge_runs(&[], &[], &[(1..2, 3), (2..4, 3)]),
+            [r(1, 4, Some(3), false)],
+            "adjacent same class merge"
+        );
     }
 
     #[test]
@@ -840,11 +876,23 @@ mod tests {
     #[test]
     #[ignore]
     fn layout_perf() {
-        let base: String = (0..10_000).map(|i| format!("    let value_{i} = compute(old_name, {i}) + offset;\n")).collect();
+        let base: String =
+            (0..10_000).map(|i| format!("    let value_{i} = compute(old_name, {i}) + offset;\n")).collect();
         let cases = [
-            ("10k-line rewrite", base.lines().map(|l| format!("{}\n", l.replace("compute", "other").replace("offset", "zzz"))).collect::<String>()),
+            (
+                "10k-line rewrite",
+                base.lines()
+                    .map(|l| format!("{}\n", l.replace("compute", "other").replace("offset", "zzz")))
+                    .collect::<String>(),
+            ),
             ("rename on every line", base.replace("old_name", "new_name")),
-            ("rename on every 3rd line", base.lines().enumerate().map(|(i, l)| if i % 3 == 0 { l.replace("old_name", "new_name") } else { l.to_string() } + "\n").collect()),
+            (
+                "rename on every 3rd line",
+                base.lines()
+                    .enumerate()
+                    .map(|(i, l)| if i % 3 == 0 { l.replace("old_name", "new_name") } else { l.to_string() } + "\n")
+                    .collect(),
+            ),
         ];
         for (name, after) in cases {
             let diff = raw_diff(&name.replace(' ', "-"), &base, &after);

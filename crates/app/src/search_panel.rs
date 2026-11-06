@@ -232,7 +232,12 @@ impl Render for SearchPanel {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let t = theme::get();
         let focused = self.focus.is_focused(window);
-        let toggle = |id: &'static str, label: &'static str, on: bool, hint: &'static str, which: char, cx: &mut Context<Self>| {
+        let toggle = |id: &'static str,
+                      label: &'static str,
+                      on: bool,
+                      hint: &'static str,
+                      which: char,
+                      cx: &mut Context<Self>| {
             div()
                 .id(id)
                 .flex_none()
@@ -278,7 +283,12 @@ impl Render for SearchPanel {
                     .child(toggle("s-case", "Aa", self.query.case, "Match case  Alt+C", 'c', cx))
                     .child(toggle("s-word", "ab", self.query.word, "Whole word  Alt+W", 'w', cx)),
             )
-            .child(div().text_size(z(text_size::XS)).text_color(if self.error.is_some() { t.state.error } else { t.text.dim }).child(status));
+            .child(
+                div()
+                    .text_size(z(text_size::XS))
+                    .text_color(if self.error.is_some() { t.state.error } else { t.text.dim })
+                    .child(status),
+            );
         let (lh, sel) = (self.line_height.max(z(height::LIST_ROW)), self.sel);
         let list = uniform_list(
             "search-rows",
@@ -308,11 +318,26 @@ impl Render for SearchPanel {
                             }));
                         match hit {
                             None => {
-                                let (dir, name) = file.rel.rsplit_once('/').map_or(("", file.rel.as_str()), |(d, n)| (d, n));
+                                let (dir, name) =
+                                    file.rel.rsplit_once('/').map_or(("", file.rel.as_str()), |(d, n)| (d, n));
                                 row.child(ui::icon(icon::FILE, 12., t.text.dim))
                                     .child(div().flex_none().text_color(t.text.primary).child(name.to_string()))
-                                    .child(div().min_w_0().truncate().text_size(z(text_size::XS)).text_color(t.text.dim).child(dir.to_string()))
-                                    .child(div().ml_auto().flex_none().text_size(z(text_size::XS)).text_color(t.text.dim).child(file.hits.len().to_string()))
+                                    .child(
+                                        div()
+                                            .min_w_0()
+                                            .truncate()
+                                            .text_size(z(text_size::XS))
+                                            .text_color(t.text.dim)
+                                            .child(dir.to_string()),
+                                    )
+                                    .child(
+                                        div()
+                                            .ml_auto()
+                                            .flex_none()
+                                            .text_size(z(text_size::XS))
+                                            .text_color(t.text.dim)
+                                            .child(file.hits.len().to_string()),
+                                    )
                                     .into_any_element()
                             }
                             Some(h) => {
@@ -348,14 +373,11 @@ impl Render for SearchPanel {
             .on_key_down(cx.listener(Self::key))
             .text_size(z(text_size::SM))
             .child(header)
-            .child(
-                div()
-                    .relative()
-                    .flex_1()
-                    .min_h_0()
-                    .child(list.size_full())
-                    .child(scrollbar(self.scroll.clone(), self.drag.clone(), cx.entity_id())),
-            )
+            .child(div().relative().flex_1().min_h_0().child(list.size_full()).child(scrollbar(
+                self.scroll.clone(),
+                self.drag.clone(),
+                cx.entity_id(),
+            )))
     }
 }
 

@@ -219,10 +219,16 @@ pub fn parse(text: &str, fallback: &Settings) -> Parsed {
         layout: {
             let dl = d.layout;
             let mut dock = |key, def: Dock| g.get("layout", key, def, "\"left\" or \"right\"", |_| true);
-            let (sessions, files, changes, search) =
-                (dock("sessions", dl.sessions), dock("files", dl.files), dock("changes", dl.changes), dock("search", dl.search));
+            let (sessions, files, changes, search) = (
+                dock("sessions", dl.sessions),
+                dock("files", dl.files),
+                dock("changes", dl.changes),
+                dock("search", dl.search),
+            );
             let mut width = |key, def| {
-                g.get("layout", key, def, "a whole number 100–2000 (pixels)", |n: &u32| (layout::WIDTH.0..=layout::WIDTH.1).contains(n))
+                g.get("layout", key, def, "a whole number 100–2000 (pixels)", |n: &u32| {
+                    (layout::WIDTH.0..=layout::WIDTH.1).contains(n)
+                })
             };
             let (left_width, right_width) = (width("left_width", dl.left_width), width("right_width", dl.right_width));
             Layout { sessions, files, changes, search, left_width, right_width }
@@ -279,7 +285,12 @@ pub fn path() -> PathBuf {
     path_from(var("DIRIGENT_SETTINGS"), var("DIRIGENT_STATE"), var("XDG_CONFIG_HOME"), var("HOME"))
 }
 
-fn path_from(settings: Option<PathBuf>, state: Option<PathBuf>, config: Option<PathBuf>, home: Option<PathBuf>) -> PathBuf {
+fn path_from(
+    settings: Option<PathBuf>,
+    state: Option<PathBuf>,
+    config: Option<PathBuf>,
+    home: Option<PathBuf>,
+) -> PathBuf {
     if let Some(p) = settings {
         return p;
     }
@@ -304,16 +315,15 @@ pub fn load(path: &Path, state_path: &Path) -> Loaded {
             let (parsed, migrated) = from_state(state_path);
             let text = parsed.settings.to_json();
             match write(path, &text) {
-                Ok(()) if migrated => eprintln!("dirigent: moved the preferences from the state file to {}", path.display()),
+                Ok(()) if migrated => {
+                    eprintln!("dirigent: moved the preferences from the state file to {}", path.display())
+                }
                 Ok(()) => {}
                 Err(e) => eprintln!("dirigent: couldn't write {}: {e}", path.display()),
             }
             Loaded { parsed, text: Some(text) }
         }
-        Err(e) => Loaded {
-            parsed: broken(&Settings::default(), format!("settings.json: {e}")),
-            text: None,
-        },
+        Err(e) => Loaded { parsed: broken(&Settings::default(), format!("settings.json: {e}")), text: None },
     }
 }
 
@@ -436,7 +446,11 @@ mod tests {
         assert_eq!(parse("{}", &s).settings, Settings::default(), "missing keys are defaults, not the fallback");
         assert_eq!(Settings::default().to_json(), "{}\n", "nothing set: an empty object");
         let one = Settings { scrollback: 500, ..Settings::default() }.to_json();
-        assert_eq!(serde_json::from_str::<Value>(&one).unwrap(), json!({ "terminal": { "scrollback": 500 } }), "only what differs");
+        assert_eq!(
+            serde_json::from_str::<Value>(&one).unwrap(),
+            json!({ "terminal": { "scrollback": 500 } }),
+            "only what differs"
+        );
         // A reset (back to the default) drops the key, so a later default change applies again.
         let back = Settings { scrollback: d_scroll(), ..Settings::default() }.to_json();
         assert_eq!(back, "{}\n");
@@ -499,9 +513,13 @@ mod tests {
         assert!(p.settings.notifications.sound && p.settings.notifications.done);
         assert!(!p.broken);
         let joined = p.notes.join("\n");
-        for want in ["terminal.font_size: \"big\" is not a number 8–32, using 13.5", "terminal.scrollback", "diff.engine",
-            "diff.extra: unknown", "themes: unknown section"]
-        {
+        for want in [
+            "terminal.font_size: \"big\" is not a number 8–32, using 13.5",
+            "terminal.scrollback",
+            "diff.engine",
+            "diff.extra: unknown",
+            "themes: unknown section",
+        ] {
             assert!(joined.contains(want), "{want} in {joined}");
         }
         assert_eq!(p.notes.len(), 5);
@@ -536,11 +554,18 @@ mod tests {
     fn first_start_takes_the_preferences_over_from_an_old_state_file() {
         let d = tmp("migrate");
         let (state, file) = (d.join("state.json"), d.join("settings.json"));
-        std::fs::write(&state, r#"{"version":1,"tabs":[],"diff_mode":"split","split_style":"classic",
-            "diff_engine":"auto","notifications":{"done":false,"sound":true}}"#).unwrap();
+        std::fs::write(
+            &state,
+            r#"{"version":1,"tabs":[],"diff_mode":"split","split_style":"classic",
+            "diff_engine":"auto","notifications":{"done":false,"sound":true}}"#,
+        )
+        .unwrap();
         let l = load(&file, &state);
         let s = l.parsed.settings;
-        assert_eq!((s.diff_mode, s.split_style, s.diff_engine), (DiffMode::Split, SplitStyle::Classic, DiffEngine::Auto));
+        assert_eq!(
+            (s.diff_mode, s.split_style, s.diff_engine),
+            (DiffMode::Split, SplitStyle::Classic, DiffEngine::Auto)
+        );
         assert_eq!(s.notifications, Notifications { needs_you: true, done: false, sound: true });
         assert!(l.parsed.notes.is_empty());
         let written = std::fs::read_to_string(&file).unwrap();
@@ -571,8 +596,11 @@ mod tests {
         std::fs::write(&file, "{ half").unwrap();
         save(&file, "{}\n", true).unwrap();
         assert_eq!(std::fs::read_to_string(&file).unwrap(), "{}\n");
-        let bad: Vec<_> = std::fs::read_dir(&d).unwrap().flatten()
-            .filter(|e| e.file_name().to_string_lossy().starts_with("settings.json.bad-")).collect();
+        let bad: Vec<_> = std::fs::read_dir(&d)
+            .unwrap()
+            .flatten()
+            .filter(|e| e.file_name().to_string_lossy().starts_with("settings.json.bad-"))
+            .collect();
         assert_eq!(bad.len(), 1);
         assert_eq!(std::fs::read_to_string(bad[0].path()).unwrap(), "{ half");
         let _ = std::fs::remove_dir_all(&d);

@@ -135,7 +135,10 @@ mod tests {
         assert_eq!(report(Button::Left, Kind::Press, 223, 0, NONE, x10), None);
         // UTF-8 (1005) goes further: 300 + 1 + 32 = 333 = U+014D.
         let utf8 = x10 | TermMode::UTF8_MOUSE;
-        assert_eq!(report(Button::Left, Kind::Press, 300, 0, NONE, utf8).unwrap(), "\x1b[M\u{20}\u{14d}\u{21}".as_bytes());
+        assert_eq!(
+            report(Button::Left, Kind::Press, 300, 0, NONE, utf8).unwrap(),
+            "\x1b[M\u{20}\u{14d}\u{21}".as_bytes()
+        );
     }
 
     #[test]

@@ -9,7 +9,16 @@ use git::{Discovery, Watcher};
 
 fn sh_git(dir: &Path, args: &[&str]) {
     let ok = Command::new("git")
-        .args(["-c", "user.name=t", "-c", "user.email=t@t", "-c", "core.hooksPath=/dev/null", "-c", "commit.gpgsign=false"])
+        .args([
+            "-c",
+            "user.name=t",
+            "-c",
+            "user.email=t@t",
+            "-c",
+            "core.hooksPath=/dev/null",
+            "-c",
+            "commit.gpgsign=false",
+        ])
         .args(args)
         .current_dir(dir)
         .output()

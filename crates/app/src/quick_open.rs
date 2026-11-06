@@ -52,7 +52,9 @@ pub struct Hit {
 }
 
 fn starts(t: &[u8], i: usize) -> bool {
-    i == 0 || matches!(t[i - 1], b'/' | b'-' | b'_' | b'.' | b' ') || (t[i - 1].is_ascii_lowercase() && t[i].is_ascii_uppercase())
+    i == 0
+        || matches!(t[i - 1], b'/' | b'-' | b'_' | b'.' | b' ')
+        || (t[i - 1].is_ascii_lowercase() && t[i].is_ascii_uppercase())
 }
 
 /// One file against the query (lowercase bytes, no spaces): the name counts more than the whole path.
@@ -64,7 +66,8 @@ pub fn score(q: &[u8], e: &Entry) -> Option<(i32, Vec<usize>)> {
     }
     let rel = e.rel.as_bytes();
     let name = &rel[e.name..];
-    let on_name = fuzzy_core(q, &e.lower[e.name..], |i| starts(name, i)).map(|m| (m.score + 10, m.chars.iter().map(|c| c + e.name).collect()));
+    let on_name = fuzzy_core(q, &e.lower[e.name..], |i| starts(name, i))
+        .map(|m| (m.score + 10, m.chars.iter().map(|c| c + e.name).collect()));
     let on_path = fuzzy_core(q, &e.lower, |i| starts(rel, i)).map(|m| (m.score, m.chars));
     match (on_name, on_path) {
         (Some(a), Some(b)) => Some(if a.0 >= b.0 { a } else { b }),
@@ -84,11 +87,18 @@ pub fn filter(query: &str, files: &[Entry], recent: &[String], limit: usize) -> 
             .take(limit)
             .collect();
         let shown: Vec<usize> = out.iter().map(|h| h.ix).collect();
-        out.extend((0..files.len()).filter(|i| !shown.contains(i)).take(limit - out.len()).map(|ix| Hit { ix, score: 0, hl: Vec::new() }));
+        out.extend((0..files.len()).filter(|i| !shown.contains(i)).take(limit - out.len()).map(|ix| Hit {
+            ix,
+            score: 0,
+            hl: Vec::new(),
+        }));
         return out;
     }
-    let mut hits: Vec<Hit> = files.iter().enumerate().filter_map(|(ix, e)| score(&q, e).map(|(score, hl)| Hit { ix, score, hl })).collect();
-    let order = |a: &Hit, b: &Hit| b.score.cmp(&a.score).then(files[a.ix].rel.len().cmp(&files[b.ix].rel.len())).then(a.ix.cmp(&b.ix));
+    let mut hits: Vec<Hit> =
+        files.iter().enumerate().filter_map(|(ix, e)| score(&q, e).map(|(score, hl)| Hit { ix, score, hl })).collect();
+    let order = |a: &Hit, b: &Hit| {
+        b.score.cmp(&a.score).then(files[a.ix].rel.len().cmp(&files[b.ix].rel.len())).then(a.ix.cmp(&b.ix))
+    };
     if hits.len() > limit {
         hits.select_nth_unstable_by(limit, order);
         hits.truncate(limit);
@@ -125,7 +135,12 @@ mod tests {
 
     #[test]
     fn names_beat_paths_and_highlights_point_into_the_path() {
-        let f = files(&["crates/app/src/main.rs", "crates/main_stuff/lib.rs", "docs/maintenance.md", "src/workspace/view.rs"]);
+        let f = files(&[
+            "crates/app/src/main.rs",
+            "crates/main_stuff/lib.rs",
+            "docs/maintenance.md",
+            "src/workspace/view.rs",
+        ]);
         assert_eq!(top("main.rs", &f)[0], "crates/app/src/main.rs");
         assert_eq!(top("wsview", &f)[0], "src/workspace/view.rs");
         // Highlights are byte offsets in the relative path: the name part here.

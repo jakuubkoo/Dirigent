@@ -199,8 +199,7 @@ const KNOWN: u8 = 4;
 
 fn flatten<'a>(text: &'a str, tree: &Tree, changed: &[bool], budget: &mut Budget) -> Result<Arena<'a>, Fail> {
     let bytes = text.as_bytes();
-    let line_starts: Vec<u32> =
-        std::iter::once(0).chain(text.match_indices('\n').map(|(i, _)| i as u32 + 1)).collect();
+    let line_starts: Vec<u32> = std::iter::once(0).chain(text.match_indices('\n').map(|(i, _)| i as u32 + 1)).collect();
     let mut changed_before = Vec::with_capacity(line_starts.len() + 1);
     changed_before.push(0);
     for l in 0..line_starts.len() {
@@ -474,7 +473,10 @@ impl Matcher<'_> {
                 let found = target.and_then(|t| {
                     self.b.at(t).find(|&y| {
                         let m = &self.b.nodes[y as usize];
-                        m.hash == n.hash && m.leaf == n.leaf && self.pb[y as usize] == NONE && self.b.unchanged(m.line0, m.line1)
+                        m.hash == n.hash
+                            && m.leaf == n.leaf
+                            && self.pb[y as usize] == NONE
+                            && self.b.unchanged(m.line0, m.line1)
                     })
                 });
                 if let Some(y) = found {
@@ -604,7 +606,12 @@ impl Matcher<'_> {
 
     /// Free identical candidates for `x`: (under another mapped ancestor, distance, node). Far ones only for
     /// move-sized subtrees.
-    fn candidates(&self, x: u32, index: &HashMap<u64, Vec<u32>>, budget: &mut Budget) -> Result<Vec<(bool, u32, u32)>, Fail> {
+    fn candidates(
+        &self,
+        x: u32,
+        index: &HashMap<u64, Vec<u32>>,
+        budget: &mut Budget,
+    ) -> Result<Vec<(bool, u32, u32)>, Fail> {
         let n = self.a.nodes[x as usize];
         let big = n.leaves >= MOVE_MIN_LEAVES && n.line1 > n.line0;
         let mut out = Vec::new();
@@ -626,11 +633,7 @@ impl Matcher<'_> {
     fn neighbors_agree(&self, x: u32, y: u32) -> u8 {
         let (m, n) = (&self.a.nodes[x as usize], &self.b.nodes[y as usize]);
         let agree = |p: u32, q: u32| p != NONE && q != NONE && self.pa[p as usize] == q;
-        if agree(m.next, n.next) {
-            2
-        } else {
-            agree(m.prev, n.prev) as u8
-        }
+        if agree(m.next, n.next) { 2 } else { agree(m.prev, n.prev) as u8 }
     }
 
     /// The candidate with the best-agreeing neighbors (if any agree), then the nearest.
@@ -713,11 +716,8 @@ impl Matcher<'_> {
                 continue;
             }
             let pos_b: HashMap<u32, usize> = kb.iter().enumerate().map(|(i, &c)| (c, i)).collect();
-            let mapped: Vec<(usize, usize)> = ka
-                .iter()
-                .enumerate()
-                .filter_map(|(i, &c)| pos_b.get(&self.pa[c as usize]).map(|&k| (i, k)))
-                .collect();
+            let mapped: Vec<(usize, usize)> =
+                ka.iter().enumerate().filter_map(|(i, &c)| pos_b.get(&self.pa[c as usize]).map(|&k| (i, k))).collect();
             let keep = lis(&mapped.iter().map(|p| p.1).collect::<Vec<_>>());
             let anchors: Vec<(usize, usize)> = keep.into_iter().map(|i| mapped[i]).collect();
             let (mut i0, mut k0) = (0, 0);
@@ -942,7 +942,8 @@ fn lcs(a: &[u32], b: &[u32], eq: impl Fn(u32, u32) -> bool) -> Vec<(usize, usize
     let mut dp = vec![0u32; (n + 1) * w];
     for i in (0..n).rev() {
         for j in (0..m).rev() {
-            dp[i * w + j] = if eq(a[i], b[j]) { dp[(i + 1) * w + j + 1] + 1 } else { dp[(i + 1) * w + j].max(dp[i * w + j + 1]) };
+            dp[i * w + j] =
+                if eq(a[i], b[j]) { dp[(i + 1) * w + j + 1] + 1 } else { dp[(i + 1) * w + j].max(dp[i * w + j + 1]) };
         }
     }
     let (mut i, mut j, mut out) = (0, 0, Vec::new());
@@ -1112,7 +1113,8 @@ pub fn diff(old: Side, new: Side, cancel: &AtomicUsize, budget: Duration) -> Res
         return Err(Fail::Unsupported);
     }
     // Unchanged lines correspond in order.
-    let keep = |arena: &Arena| (0..arena.line_starts.len() as u32).filter(|&l| !arena.line_changed(l)).collect::<Vec<_>>();
+    let keep =
+        |arena: &Arena| (0..arena.line_starts.len() as u32).filter(|&l| !arena.line_changed(l)).collect::<Vec<_>>();
     let (ka, kb) = (keep(&a), keep(&b));
     if ka.len().abs_diff(kb.len()) > 1 {
         return Err(Fail::Mismatch);
@@ -1130,7 +1132,16 @@ pub fn diff(old: Side, new: Side, cancel: &AtomicUsize, budget: Duration) -> Res
         approx[l] = (last_n + (l as i64 - last_o)).max(0) as u32;
     }
     let (na, nb) = (a.nodes.len(), b.nodes.len());
-    let mut m = Matcher { a, b, pa: vec![NONE; na], pb: vec![NONE; nb], iso: vec![false; na], weak: vec![false; na], line_map, approx };
+    let mut m = Matcher {
+        a,
+        b,
+        pa: vec![NONE; na],
+        pb: vec![NONE; nb],
+        iso: vec![false; na],
+        weak: vec![false; na],
+        line_map,
+        approx,
+    };
     m.anchor_identical(&mut budget)?;
     m.anchor_containers(&mut budget)?;
     m.top_down(&mut budget)?;
@@ -1179,7 +1190,11 @@ pub fn diff(old: Side, new: Side, cancel: &AtomicUsize, budget: Duration) -> Res
     tidy(&mut marks_b, &m.b);
     Ok(Structural {
         old: SideResult { marks: marks_a, partner: partners(la, votes_a), moved: moves.clone() },
-        new: SideResult { marks: marks_b, partner: partners(lb, votes_b), moved: moves.iter().map(|&(o, n)| (n, o)).collect() },
+        new: SideResult {
+            marks: marks_b,
+            partner: partners(lb, votes_b),
+            moved: moves.iter().map(|&(o, n)| (n, o)).collect(),
+        },
     })
 }
 
@@ -1202,9 +1217,17 @@ mod tests {
 
     pub(crate) fn run(lang: Lang, old: &str, new: &str) -> Result<Structural, Fail> {
         let flag = AtomicUsize::new(0);
-        let (ta, tb) = (crate::parse(lang, old, &flag, Instant::now()).unwrap(), crate::parse(lang, new, &flag, Instant::now()).unwrap());
+        let (ta, tb) = (
+            crate::parse(lang, old, &flag, Instant::now()).unwrap(),
+            crate::parse(lang, new, &flag, Instant::now()).unwrap(),
+        );
         let (ca, cb) = changed_lines(old, new);
-        diff(Side { text: old, tree: &ta, changed: &ca }, Side { text: new, tree: &tb, changed: &cb }, &flag, Duration::from_secs(5))
+        diff(
+            Side { text: old, tree: &ta, changed: &ca },
+            Side { text: new, tree: &tb, changed: &cb },
+            &flag,
+            Duration::from_secs(5),
+        )
     }
 
     /// Marked text per side: (changed, moved).

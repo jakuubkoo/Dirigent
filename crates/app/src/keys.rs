@@ -64,8 +64,14 @@ pub const EXTRA: &[(&str, &str)] = &[
     ("Ctrl+1..9", "Jump to session"),
     ("Esc", "Close a diff, preview, Settings, menu or dialog"),
     ("Up / Down, Enter", "Menus: choose an item, run it"),
-    ("Ctrl+Shift+C / Ctrl+Shift+V", "Terminal: copy the selection / paste text (Ctrl+V stays the app's: images in Claude Code)"),
-    ("Drag, double / triple click", "Terminal: select text, a word, a line (Shift+click extends; Shift also while an app takes the mouse)"),
+    (
+        "Ctrl+Shift+C / Ctrl+Shift+V",
+        "Terminal: copy the selection / paste text (Ctrl+V stays the app's: images in Claude Code)",
+    ),
+    (
+        "Drag, double / triple click",
+        "Terminal: select text, a word, a line (Shift+click extends; Shift also while an app takes the mouse)",
+    ),
     ("Middle click", "Terminal: paste the selection (Linux primary selection)"),
     ("Ctrl+click", "Terminal: open a link in the browser, or a file path (src/main.rs:42) in the preview"),
     ("Middle click on a session", "Close it (or its x on hover)"),
@@ -92,7 +98,11 @@ pub fn pretty(keys: &str) -> String {
 
 /// Every listed shortcut: (keys as shown, label).
 pub fn listed() -> impl Iterator<Item = (String, &'static str)> {
-    TABLE.iter().filter(|(_, l)| !l.is_empty()).map(|(k, l)| (pretty(k), *l)).chain(EXTRA.iter().map(|(k, l)| (k.to_string(), *l)))
+    TABLE
+        .iter()
+        .filter(|(_, l)| !l.is_empty())
+        .map(|(k, l)| (pretty(k), *l))
+        .chain(EXTRA.iter().map(|(k, l)| (k.to_string(), *l)))
 }
 
 #[cfg(test)]
@@ -122,8 +132,11 @@ mod tests {
         assert_eq!(pretty("shift-f10"), "Shift+F10");
         // The command list: every labelled entry once, with its action.
         let cmds = commands();
-        let labels: std::collections::HashSet<_> = TABLE.iter().filter(|(_, l)| !l.is_empty()).map(|(_, l)| *l).collect();
+        let labels: std::collections::HashSet<_> =
+            TABLE.iter().filter(|(_, l)| !l.is_empty()).map(|(_, l)| *l).collect();
         assert_eq!(cmds.len(), labels.len());
-        assert!(cmds.iter().any(|(k, l, a)| *k == "ctrl-=" && l.starts_with("Zoom in") && a.name().ends_with("ZoomIn")));
+        assert!(
+            cmds.iter().any(|(k, l, a)| *k == "ctrl-=" && l.starts_with("Zoom in") && a.name().ends_with("ZoomIn"))
+        );
     }
 }

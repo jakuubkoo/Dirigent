@@ -96,18 +96,24 @@ pub fn unstage(repo: &Repo, files: &[FileChange]) -> Result<()> {
 
 /// Moves a file to the desktop trash (`gio trash`); never deletes. Fails if it can't be trashed.
 pub fn trash(path: &Path) -> Result<()> {
-    let out = Command::new("gio").arg("trash").arg("--").arg(path).stdin(Stdio::null()).output().map_err(GitError::Io)?;
+    let out =
+        Command::new("gio").arg("trash").arg("--").arg(path).stdin(Stdio::null()).output().map_err(GitError::Io)?;
     if out.status.success() {
         Ok(())
     } else {
-        Err(GitError::Failed(format!("Couldn't move {} to the trash: {}", path.display(), String::from_utf8_lossy(&out.stderr).trim())))
+        Err(GitError::Failed(format!(
+            "Couldn't move {} to the trash: {}",
+            path.display(),
+            String::from_utf8_lossy(&out.stderr).trim()
+        )))
     }
 }
 
 /// Back to HEAD, index and worktree. Files HEAD doesn't have (untracked, or added in the index) go to the trash.
 pub fn discard(repo: &Repo, f: &FileChange) -> Result<()> {
     let root = &repo.root;
-    let in_head = has_head(root) && run(root, &["cat-file", "-e", &format!("HEAD:{}", f.orig.as_deref().unwrap_or(&f.path))], None).is_ok();
+    let in_head = has_head(root)
+        && run(root, &["cat-file", "-e", &format!("HEAD:{}", f.orig.as_deref().unwrap_or(&f.path))], None).is_ok();
     if f.kind == '?' {
         return trash(&root.join(&f.path));
     }

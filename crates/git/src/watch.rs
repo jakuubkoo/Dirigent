@@ -88,7 +88,12 @@ impl Watcher {
                     created: matches!(ev.kind, EventKind::Create(_) | EventKind::Modify(ModifyKind::Name(_))),
                     listing: changes_listing(&ev.kind),
                 };
-                let paths: Vec<_> = ev.paths.into_iter().filter(|p| counts(p, &git_dir, common.as_deref())).map(|p| (p, change)).collect();
+                let paths: Vec<_> = ev
+                    .paths
+                    .into_iter()
+                    .filter(|p| counts(p, &git_dir, common.as_deref()))
+                    .map(|p| (p, change))
+                    .collect();
                 if !paths.is_empty() {
                     received2.fetch_add(1, Ordering::Relaxed);
                     let _ = tx2.send(Ev::Paths(paths));
@@ -188,7 +193,13 @@ impl Watcher {
                     *latest2.lock().unwrap() = Some(st.clone());
                     last = Some(st);
                 }
-                on_update(Update { refreshed: true, status_changed: changed, dirs, status: last.clone(), settled: consumed });
+                on_update(Update {
+                    refreshed: true,
+                    status_changed: changed,
+                    dirs,
+                    status: last.clone(),
+                    settled: consumed,
+                });
             }
         })?;
         Ok(Self { tx, latest, refreshes, received })
@@ -236,7 +247,10 @@ fn shared(repo: &crate::Repo) -> Option<PathBuf> {
 /// worktree's shared dir only the branches (its own index/HEAD are in `git_dir`, which is inside the shared one).
 fn counts(path: &Path, git_dir: &Path, common: Option<&Path>) -> bool {
     if let Ok(rel) = path.strip_prefix(git_dir) {
-        return rel == Path::new("index") || rel == Path::new("HEAD") || rel == Path::new("packed-refs") || rel.starts_with("refs/heads");
+        return rel == Path::new("index")
+            || rel == Path::new("HEAD")
+            || rel == Path::new("packed-refs")
+            || rel.starts_with("refs/heads");
     }
     match common.map(|c| path.strip_prefix(c)) {
         Some(Ok(rel)) => rel == Path::new("packed-refs") || rel.starts_with("refs/heads"),

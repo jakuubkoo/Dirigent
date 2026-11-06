@@ -34,9 +34,9 @@ impl Workspace {
     }
 
     fn agent_ran(&self) -> bool {
-        self.tabs.get(self.active).is_some_and(|t| {
-            t.claude_session.is_some() || !self.tracker.view(t.id as u32).touched.is_empty()
-        })
+        self.tabs
+            .get(self.active)
+            .is_some_and(|t| t.claude_session.is_some() || !self.tracker.view(t.id as u32).touched.is_empty())
     }
 
     /// The active tab's agent files that are changed in `root` now.
@@ -134,10 +134,15 @@ impl Workspace {
         let files = self.agent_files(&root);
         let Some(t) = self.tabs.get(self.active).filter(|_| !files.is_empty()) else { return };
         let view = self.tracker.view(t.id as u32);
-        let marked = files.iter().map(|f| (f.path.clone(), view.files.get(&f.path).copied().unwrap_or_default())).collect();
+        let marked =
+            files.iter().map(|f| (f.path.clone(), view.files.get(&f.path).copied().unwrap_or_default())).collect();
         let n = files.len();
         self.modal = Some(Modal::Confirm {
-            title: format!("{} {n} file{} of this agent?", if amend { "Amend with" } else { "Commit" }, if n == 1 { "" } else { "s" }),
+            title: format!(
+                "{} {n} file{} of this agent?",
+                if amend { "Amend with" } else { "Commit" },
+                if n == 1 { "" } else { "s" }
+            ),
             body: "Whole file contents are committed, including unstaged parts. Other staged changes stay staged and \
                    out of this commit."
                 .to_string(),
@@ -175,7 +180,9 @@ impl Workspace {
     /// Commit box "Generate": `claude -p` over the staged diff, or (`agent_only`) over what committing the agent's
     /// files would commit, fills the message (never commits).
     pub fn generate_message(&mut self, root: PathBuf, agent_only: bool, cx: &mut Context<Self>) {
-        let (Some(b), Some(repo)) = (self.commit_boxes.get(&root).cloned(), self.repos.repo(&root).cloned()) else { return };
+        let (Some(b), Some(repo)) = (self.commit_boxes.get(&root).cloned(), self.repos.repo(&root).cloned()) else {
+            return;
+        };
         if b.read(cx).generating {
             return;
         }
@@ -188,7 +195,10 @@ impl Workspace {
             cx.notify();
         });
         cx.spawn(async move |this, cx| {
-            let result = cx.background_executor().spawn(async move { crate::git_ops::generate_message(&repo, files.as_deref()) }).await;
+            let result = cx
+                .background_executor()
+                .spawn(async move { crate::git_ops::generate_message(&repo, files.as_deref()) })
+                .await;
             b.update(cx, |b, cx| {
                 b.generating = false;
                 if let Ok(m) = &result {
@@ -224,7 +234,14 @@ impl Workspace {
             ),
             _ => return,
         };
-        self.modal = Some(Modal::Confirm { title, body, files: Vec::new(), ok: "Discard", danger: true, then: Then::Git(root, job) });
+        self.modal = Some(Modal::Confirm {
+            title,
+            body,
+            files: Vec::new(),
+            ok: "Discard",
+            danger: true,
+            then: Then::Git(root, job),
+        });
         window.focus(&self.focus, cx);
         cx.notify();
     }

@@ -17,9 +17,16 @@ pub enum Job {
     StageHunk(FileChange, Span),
     UnstageHunk(FileChange, Span),
     DiscardHunk(FileChange, Span),
-    Commit { message: String, amend: bool },
+    Commit {
+        message: String,
+        amend: bool,
+    },
     /// Exactly these files' worktree content; everything else stays as it is.
-    CommitOnly { message: String, files: Vec<FileChange>, amend: bool },
+    CommitOnly {
+        message: String,
+        files: Vec<FileChange>,
+        amend: bool,
+    },
 }
 
 fn name(f: &FileChange) -> &str {
@@ -45,7 +52,11 @@ impl Job {
             Job::UnstageHunk(f, _) => format!("Unstaging a hunk of {}…", name(f)),
             Job::DiscardHunk(f, _) => format!("Discarding a hunk of {}…", name(f)),
             Job::Commit { amend, .. } | Job::CommitOnly { amend, .. } => {
-                if *amend { "Amending…".into() } else { "Committing…".into() }
+                if *amend {
+                    "Amending…".into()
+                } else {
+                    "Committing…".into()
+                }
             }
         }
     }
@@ -111,7 +122,11 @@ pub fn generate_message(repo: &Repo, files: Option<&[FileChange]>) -> Result<Str
     if diff.trim().is_empty() {
         return Err("Nothing to describe".into());
     }
-    let ask = if cut { "Write the commit message for this diff (cut at 60 KB)." } else { "Write the commit message for this diff." };
+    let ask = if cut {
+        "Write the commit message for this diff (cut at 60 KB)."
+    } else {
+        "Write the commit message for this diff."
+    };
     let mut child = Command::new("claude")
         .args(["-p", "--setting-sources", "", "--model", "haiku", "--tools", "", "--no-session-persistence"])
         .args(["--system-prompt", GENERATE_PROMPT, ask])
@@ -138,7 +153,10 @@ fn clean_message(raw: &str) -> String {
         .lines()
         .filter(|l| {
             let t = l.trim().to_ascii_lowercase();
-            !(t.starts_with("co-authored-by:") || t.contains("generated with") || t.starts_with("```") || t.starts_with("signed-off-by:"))
+            !(t.starts_with("co-authored-by:")
+                || t.contains("generated with")
+                || t.starts_with("```")
+                || t.starts_with("signed-off-by:"))
         })
         .collect();
     lines.join("\n").trim().to_string()

@@ -302,7 +302,11 @@ fn remove_stale_dirs(runtime: &Path) {
     for e in entries.flatten() {
         let name = e.file_name();
         // `agent-ide-` too: dirs left by the app before its rename.
-        let Some(pid) = name.to_str().and_then(|n| n.strip_prefix("dirigent-").or_else(|| n.strip_prefix("agent-ide-"))) else { continue };
+        let Some(pid) =
+            name.to_str().and_then(|n| n.strip_prefix("dirigent-").or_else(|| n.strip_prefix("agent-ide-")))
+        else {
+            continue;
+        };
         if pid.parse::<u32>().is_ok() && !Path::new("/proc").join(pid).exists() {
             let _ = std::fs::remove_dir_all(e.path());
         }
@@ -340,12 +344,8 @@ exit 127
 
 /// zsh startup wrappers: each sources the user's own file, then (rc/login) puts the shim dir first in `path` and
 /// restores ZDOTDIR, so the user's config and child shells behave exactly as without dirigent.
-const ZSH_WRAPPERS: [(&str, &str); 4] = [
-    (".zshenv", ZSHENV),
-    (".zprofile", ZPROFILE),
-    (".zshrc", ZSHRC),
-    (".zlogin", ZLOGIN),
-];
+const ZSH_WRAPPERS: [(&str, &str); 4] =
+    [(".zshenv", ZSHENV), (".zprofile", ZPROFILE), (".zshrc", ZSHRC), (".zlogin", ZLOGIN)];
 
 const ZSHENV: &str = r#"# dirigent wrapper
 ZDOTDIR=$DIRIGENT_ZDOTDIR_ORIG
@@ -447,7 +447,10 @@ mod tests {
     }
 
     fn status(tab: u32, ctx: Option<f32>, five: Option<Limit>) -> Msg {
-        Msg { tab, kind: Kind::Status { model: Some("Opus 5.5".into()), context_pct: ctx, five_hour: five, seven_day: None } }
+        Msg {
+            tab,
+            kind: Kind::Status { model: Some("Opus 5.5".into()), context_pct: ctx, five_hour: five, seven_day: None },
+        }
     }
 
     #[test]
@@ -494,7 +497,8 @@ mod tests {
     #[test]
     fn session_ids_and_failed_resume() {
         let mut b = Board::default();
-        let argv = |args: &[&str]| Msg { tab: 1, kind: Kind::Argv { args: args.iter().map(|s| s.to_string()).collect() } };
+        let argv =
+            |args: &[&str]| Msg { tab: 1, kind: Kind::Argv { args: args.iter().map(|s| s.to_string()).collect() } };
         // /clear: SessionEnd(old) then SessionStart(new) — as observed on claude 2.1.318.
         b.apply(argv(&["--model", "haiku"]));
         b.apply(hook_id(1, "SessionStart", None, "old"));

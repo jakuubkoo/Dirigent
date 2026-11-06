@@ -146,8 +146,10 @@ impl Tracker {
     pub fn saved(&self, tab: u32) -> Option<Saved> {
         let g = self.inner.lock().unwrap();
         let t = g.tabs.get(&tab)?;
-        (t.session.is_some() || !t.files.is_empty())
-            .then(|| Saved { session: t.session.clone(), files: t.files.iter().map(|(p, t)| (p.clone(), *t)).collect() })
+        (t.session.is_some() || !t.files.is_empty()).then(|| Saved {
+            session: t.session.clone(),
+            files: t.files.iter().map(|(p, t)| (p.clone(), *t)).collect(),
+        })
     }
 
     /// Forgets the tab's set (manual "Clear"); the session stays.
@@ -265,10 +267,11 @@ impl Tracker {
 
     /// Recomputes every tab's view; wakes the UI if any changed.
     fn refresh_views(&self, g: &mut Inner) {
-        let owners: HashMap<&Path, usize> = g.tabs.values().flat_map(|t| t.files.keys()).fold(HashMap::new(), |mut m, p| {
-            *m.entry(p.as_path()).or_default() += 1;
-            m
-        });
+        let owners: HashMap<&Path, usize> =
+            g.tabs.values().flat_map(|t| t.files.keys()).fold(HashMap::new(), |mut m, p| {
+                *m.entry(p.as_path()).or_default() += 1;
+                m
+            });
         let mut views = Vec::new();
         for (&id, t) in &g.tabs {
             let status = t.repo.as_ref().and_then(|r| Some((r, g.repos.get(r)?.status.as_ref()?)));

@@ -42,7 +42,11 @@ pub fn at<T>(term: &Term<T>, point: Point, paths: bool) -> Option<Link> {
             text.push(cell.c);
             cells.push(p);
         }
-        p = if p.column.0 + 1 < cols { Point::new(p.line, p.column + 1) } else { Point::new(p.line + 1, Default::default()) };
+        p = if p.column.0 + 1 < cols {
+            Point::new(p.line, p.column + 1)
+        } else {
+            Point::new(p.line + 1, Default::default())
+        };
     }
     // A wide char's spacer belongs to the char before it.
     let k = cells.iter().rposition(|c| *c <= point)?;
@@ -73,9 +77,15 @@ fn trim_end(text: &[char], s: usize, mut e: usize) -> usize {
     while e > s {
         let c = text[e];
         let unbalanced = |open: char, close: char| {
-            c == close && text[s..=e].iter().filter(|&&x| x == open).count() < text[s..=e].iter().filter(|&&x| x == close).count()
+            c == close
+                && text[s..=e].iter().filter(|&&x| x == open).count()
+                    < text[s..=e].iter().filter(|&&x| x == close).count()
         };
-        if matches!(c, '.' | ',' | ';' | ':' | '!' | '?') || unbalanced('(', ')') || unbalanced('[', ']') || unbalanced('{', '}') {
+        if matches!(c, '.' | ',' | ';' | ':' | '!' | '?')
+            || unbalanced('(', ')')
+            || unbalanced('[', ']')
+            || unbalanced('{', '}')
+        {
             e -= 1;
         } else {
             break;
@@ -134,7 +144,10 @@ pub fn find_path(text: &[char], k: usize) -> Option<(usize, usize, Target)> {
     }
     let name = path.rsplit('/').next().unwrap_or(path);
     let ext = name.rsplit_once('.').filter(|(stem, ext)| {
-        !stem.is_empty() && (1..=10).contains(&ext.len()) && ext.chars().all(|c| c.is_ascii_alphanumeric()) && ext.chars().any(|c| c.is_ascii_alphabetic())
+        !stem.is_empty()
+            && (1..=10).contains(&ext.len())
+            && ext.chars().all(|c| c.is_ascii_alphanumeric())
+            && ext.chars().any(|c| c.is_ascii_alphabetic())
     });
     let rooted = ["/", "~/", "./", "../"].iter().any(|p| path.starts_with(p)) && path.len() > 2;
     let slash = path.contains('/') && !path.ends_with('/');
@@ -178,7 +191,10 @@ mod tests {
     fn urls() {
         assert_eq!(url("see https://github.com/a/b/pull/1.", "github").unwrap(), "https://github.com/a/b/pull/1");
         assert_eq!(url("(https://example.com/x)", "example").unwrap(), "https://example.com/x");
-        assert_eq!(url("https://en.wikipedia.org/wiki/Rust_(language), ok", "wiki").unwrap(), "https://en.wikipedia.org/wiki/Rust_(language)");
+        assert_eq!(
+            url("https://en.wikipedia.org/wiki/Rust_(language), ok", "wiki").unwrap(),
+            "https://en.wikipedia.org/wiki/Rust_(language)"
+        );
         assert_eq!(url("\"http://a.b/c?d=1&e=2\"", "a.b").unwrap(), "http://a.b/c?d=1&e=2");
         assert_eq!(url("mail mailto:me@x.org!", "me@").unwrap(), "mailto:me@x.org");
         assert_eq!(url("plain words here", "words"), None);
@@ -214,7 +230,10 @@ mod tests {
         t = term(40, 2, "see src/lib.rs:7 now");
         let at_path = Point::new(Line(0), Column(6));
         assert_eq!(at(&t, at_path, false), None);
-        assert_eq!(at(&t, at_path, true).unwrap().target, Target::Path { path: "src/lib.rs".into(), line: Some(7), col: None });
+        assert_eq!(
+            at(&t, at_path, true).unwrap().target,
+            Target::Path { path: "src/lib.rs".into(), line: Some(7), col: None }
+        );
         // OSC 8: the visible text differs from the target; the whole link run is one link.
         t = term(40, 2, "PR \x1b]8;;https://github.com/o/r/pull/1\x1b\\#1 link\x1b]8;;\x1b\\ end");
         let link = at(&t, Point::new(Line(0), Column(5)), false).unwrap();
