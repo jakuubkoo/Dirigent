@@ -598,7 +598,7 @@ fn act(
     let Some(w) = ws.upgrade() else { return };
     let (s, projects) = {
         let w = w.read(cx);
-        (w.settings, w.projects.0.clone())
+        (w.settings.clone(), w.projects.0.clone())
     };
     let Ok(apply) = view.update(cx, |v, cx| {
         cx.notify();
@@ -624,7 +624,7 @@ impl Render for SettingsView {
         let Some(w) = self.workspace.upgrade() else { return div().into_any_element() };
         let (s, notes, file, projects) = {
             let w = w.read(cx);
-            (w.settings, w.settings_notes.clone(), w.settings_path.clone(), w.projects.0.clone())
+            (w.settings.clone(), w.settings_notes.clone(), w.settings_path.clone(), w.projects.0.clone())
         };
         let (view, ws) = (cx.entity().downgrade(), self.workspace.clone());
         let q = self.query();
@@ -1140,7 +1140,7 @@ mod tests {
     #[test]
     fn every_item_round_trips_and_resets() {
         let d = Settings::default();
-        let mut s = d;
+        let mut s = d.clone();
         for item in ITEMS {
             let v = get(&d, item.key);
             let other = match (v, &item.ctl) {

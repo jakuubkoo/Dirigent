@@ -301,12 +301,20 @@ mod tests {
     }
 
     /// Live: `DIRIGENT_LIVE_REPO=<clone of a GitLab test project>` (credentials from your git setup or
-    /// GIT_CONFIG_* env), `cargo test -p dirigent gitlab_live -- --ignored`. Pushes two branches and opens one MR.
+    /// GIT_CONFIG_* env), optionally `DIRIGENT_LIVE_SETTINGS=<settings.json>` for its `git.hosts`,
+    /// `cargo test -p dirigent gitlab_live -- --ignored`. Pushes a branch and opens one MR.
     #[test]
     #[ignore]
     fn gitlab_live() {
         let Ok(repo) = std::env::var("DIRIGENT_LIVE_REPO") else { return };
         let root = std::path::Path::new(&repo);
+        let mut web = None;
+        if let Ok(path) = std::env::var("DIRIGENT_LIVE_SETTINGS") {
+            let parsed = crate::settings::parse(&std::fs::read_to_string(path).unwrap(), &Default::default());
+            assert!(parsed.notes.is_empty(), "{:?}", parsed.notes);
+            web = parsed.settings.hosts.first().and_then(|r| r.web.clone());
+            remote::set_host_rules(parsed.settings.hosts);
+        }
         let git = |args: &[&str]| {
             let ok = std::process::Command::new("git").args(args).current_dir(root).status().unwrap().success();
             assert!(ok, "git {args:?}");
@@ -319,10 +327,14 @@ mod tests {
         // New commit, no upstream: the push publishes the branch and GitLab creates the MR.
         let (url, note) = create(root, &Cancel::default()).unwrap();
         assert!(url.contains("/-/merge_requests/") && !url.contains("/new?"), "{url}");
+        eprintln!("live: created {url}");
         assert_eq!(note, "Merge request created");
         // Nothing new to push: push options would be dropped, so the new-MR form opens instead.
         let (url, _) = create(root, &Cancel::default()).unwrap();
         assert!(url.contains("/-/merge_requests/new?"), "{url}");
+        if let Some(w) = &web {
+            assert!(url.starts_with(w.as_str()), "{url} isn't on {w}");
+        }
         let v = lookup(root, &branch, true);
         assert_eq!(v.forge, Forge::GitLab);
         assert!(v.pushed);

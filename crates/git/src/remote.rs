@@ -227,20 +227,47 @@ pub enum Forge {
     Other,
 }
 
+/// A user rule for a remote host the name doesn't give away (`git.hosts` in settings.json): an SSH host like
+/// `ssh.example.com` whose web UI is `https://gitlab.example.com`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct HostRule {
+    /// The host as it appears in remote URLs (lowercase, no port).
+    pub host: String,
+    pub forge: Forge,
+    /// The web UI's base URL (`https://gitlab.example.com`, no trailing slash); None: `https://<host>`.
+    pub web: Option<String>,
+}
+
+/// The rules in effect (set from settings; read by `Host::parse` on any thread).
+static RULES: std::sync::RwLock<Vec<HostRule>> = std::sync::RwLock::new(Vec::new());
+
+/// Replaces the host rules (settings load / change).
+pub fn set_host_rules(rules: Vec<HostRule>) {
+    *RULES.write().unwrap_or_else(|e| e.into_inner()) = rules;
+}
+
 /// A remote's web location, from its URL.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Host {
     pub forge: Forge,
-    /// `github.com`, `gitlab.jakuubkoo.me` (no port, no user).
+    /// The web host gh/glab log in to: `github.com`, `gitlab.jakuubkoo.me` (no port, no user).
     pub host: String,
     /// `owner/repo`, `group/sub/project` (no `.git`).
     pub path: String,
+    /// The web UI's base URL (`https://gitlab.jakuubkoo.me`).
+    pub web: String,
 }
 
 impl Host {
-    /// `git@host:owner/repo.git`, `ssh://git@host:2222/owner/repo.git`, `https://user@host/group/sub/repo(.git)`.
-    /// None for local paths and anything without a host and a path.
+    /// `parse_with` and the rules from settings.
     pub fn parse(url: &str) -> Option<Host> {
+        Host::parse_with(url, &RULES.read().unwrap_or_else(|e| e.into_inner()))
+    }
+
+    /// `git@host:owner/repo.git`, `ssh://git@host:2222/owner/repo.git`, `https://user@host/group/sub/repo(.git)`.
+    /// None for local paths and anything without a host and a path. A rule for the URL's host decides the forge
+    /// and the web base; else github.com → GitHub, a host containing "gitlab" → GitLab, anything else Other.
+    pub fn parse_with(url: &str, rules: &[HostRule]) -> Option<Host> {
         let url = url.trim();
         let (host, path) = if let Some((scheme, rest)) = url.split_once("://") {
             if !matches!(scheme, "ssh" | "git+ssh" | "https" | "http" | "git") {
@@ -263,6 +290,11 @@ impl Host {
             return None;
         }
         let host = host.to_ascii_lowercase();
+        if let Some(r) = rules.iter().find(|r| r.host == host) {
+            let web = r.web.clone().unwrap_or_else(|| format!("https://{host}"));
+            let web_host = web.split("://").nth(1).and_then(|h| h.split(['/', ':']).next()).unwrap_or(&host);
+            return Some(Host { forge: r.forge, host: web_host.to_string(), path: path.to_string(), web });
+        }
         let forge = if host == "github.com" {
             Forge::GitHub
         } else if host.contains("gitlab") {
@@ -270,11 +302,11 @@ impl Host {
         } else {
             Forge::Other
         };
-        Some(Host { forge, host, path: path.to_string() })
+        Some(Host { forge, web: format!("https://{host}"), host, path: path.to_string() })
     }
 
     fn base(&self) -> String {
-        format!("https://{}/{}", self.host, self.path)
+        format!("{}/{}", self.web, self.path)
     }
 
     /// GitHub: the compare page with the "Create pull request" form open.
@@ -377,6 +409,40 @@ mod tests {
         for local in ["/srv/repo.git", "../repo", "./x:y", "file:///srv/r.git", "C:\\repo", "host:repo"] {
             assert_eq!(gh(local), None, "{local}");
         }
+    }
+
+    #[test]
+    fn host_rules() {
+        let rules = [
+            HostRule {
+                host: "ssh.jakuubkoo.me".into(),
+                forge: Forge::GitLab,
+                web: Some("https://gitlab.jakuubkoo.me".into()),
+            },
+            HostRule { host: "git.corp".into(), forge: Forge::GitHub, web: None },
+        ];
+        let h = Host::parse_with("git@ssh.jakuubkoo.me:jakuubkoo/testingprojectlol.git", &rules).unwrap();
+        assert_eq!(
+            (h.forge, h.host.as_str(), h.path.as_str()),
+            (Forge::GitLab, "gitlab.jakuubkoo.me", "jakuubkoo/testingprojectlol")
+        );
+        assert_eq!(
+            h.requests_url("feat/x"),
+            "https://gitlab.jakuubkoo.me/jakuubkoo/testingprojectlol/-/merge_requests?scope=all&state=all&source_branch=feat%2Fx"
+        );
+        assert!(
+            h.new_mr_url("b", "main")
+                .starts_with("https://gitlab.jakuubkoo.me/jakuubkoo/testingprojectlol/-/merge_requests/new?")
+        );
+        let s = Host::parse_with("ssh://git@SSH.jakuubkoo.me:2222/g/p.git", &rules).unwrap();
+        assert_eq!((s.forge, s.web.as_str()), (Forge::GitLab, "https://gitlab.jakuubkoo.me"));
+        let c = Host::parse_with("git@git.corp:o/r.git", &rules).unwrap();
+        assert_eq!(
+            (c.forge, c.compare_url("main", "x").as_str()),
+            (Forge::GitHub, "https://git.corp/o/r/compare/main...x?expand=1")
+        );
+        // Without a rule the name decides: this host has no "gitlab" in it.
+        assert_eq!(Host::parse_with("git@ssh.jakuubkoo.me:g/p.git", &[]).unwrap().forge, Forge::Other);
     }
 
     #[test]

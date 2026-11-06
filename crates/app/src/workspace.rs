@@ -621,6 +621,7 @@ impl Workspace {
         this.applied = this.grid_size(window);
         this.watch_settings(window, cx);
         this.restart_fetch_timer(cx);
+        git::remote::set_host_rules(this.settings.hosts.clone());
 
         if let Ok(script) = std::env::var("DIRIGENT_RUN") {
             // Perf harness: one (eagerly spawned) session per line, the line typed into it; saved tabs are ignored.
@@ -2243,7 +2244,7 @@ impl Workspace {
 
     /// A change from the Settings page or a diff header switch: applied now, written to settings.json.
     pub fn change_settings(&mut self, f: impl FnOnce(&mut Settings), cx: &mut Context<Self>) {
-        let mut new = self.settings;
+        let mut new = self.settings.clone();
         f(&mut new);
         if new != self.settings {
             self.apply_settings(new, cx);
@@ -2323,7 +2324,7 @@ impl Workspace {
 
     /// Makes `new` the live settings, touching only what changed.
     fn apply_settings(&mut self, new: Settings, cx: &mut Context<Self>) {
-        let old = std::mem::replace(&mut self.settings, new);
+        let old = std::mem::replace(&mut self.settings, new.clone());
         if old.font_size != new.font_size || old.ui_zoom != new.ui_zoom {
             self.metrics_stale = true; // rebuilt in render (needs the window)
         }
@@ -2341,6 +2342,12 @@ impl Workspace {
         }
         if old.fetch_minutes != new.fetch_minutes {
             self.restart_fetch_timer(cx);
+        }
+        if old.hosts != new.hosts {
+            // Forge detection and every browser URL follow the rules: look the strips up again.
+            git::remote::set_host_rules(new.hosts.clone());
+            self.prs.clear();
+            self.sync_panel(cx);
         }
         if old.layout != new.layout {
             for d in [Dock::Left, Dock::Right] {

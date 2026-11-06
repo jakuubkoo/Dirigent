@@ -68,7 +68,7 @@ impl Default for Notifications {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct Settings {
     /// Answer claude's "trust this folder?" dialog with Yes in sessions we start claude in.
     pub trust_auto_accept: bool,
@@ -84,6 +84,8 @@ pub struct Settings {
     pub layout: Layout,
     /// Fetch every watched repo in the background every N minutes; 0 = never (the default: no timers unless asked).
     pub fetch_minutes: u32,
+    /// `git.hosts`: remote hosts whose forge / web UI the name doesn't give away (sorted by host). Hand-edited.
+    pub hosts: Vec<git::remote::HostRule>,
 }
 
 pub const FONT_SIZE: (f32, f32) = (8., 32.);
@@ -95,7 +97,7 @@ pub const ZOOM_STEP: u32 = 10;
 
 impl Settings {
     /// Ctrl+= (Some(1)), Ctrl+- (Some(-1)), Ctrl+0 (None): the next UI zoom.
-    pub fn zoom_step(self, dir: Option<i32>) -> u32 {
+    pub fn zoom_step(&self, dir: Option<i32>) -> u32 {
         match dir {
             None => Settings::default().ui_zoom,
             Some(d) => {
@@ -123,6 +125,7 @@ impl Default for Settings {
             diff_engine: DiffEngine::Auto,
             layout: Layout::default(),
             fetch_minutes: 0,
+            hosts: Vec::new(),
         }
     }
 }
@@ -134,14 +137,14 @@ const KEYS: &[(&str, &[&str])] = &[
     ("notifications", &["needs_you", "done", "sound"]),
     ("diff", &["mode", "split_style", "engine"]),
     ("layout", &["sessions", "files", "changes", "search", "left_width", "right_width"]),
-    ("git", &["fetch_minutes"]),
+    ("git", &["fetch_minutes", "hosts"]),
 ];
 
 impl Settings {
     /// Only the values that differ from the defaults (a later default change reaches everyone who never set it;
     /// a reset removes the key). Nothing set: `{}`.
-    pub fn to_json(self) -> String {
-        let all = |s: Settings| {
+    pub fn to_json(&self) -> String {
+        let all = |s: &Settings| {
             json!({
                 "general": { "trust_auto_accept": s.trust_auto_accept, "plus_opens": s.plus_opens, "ui_zoom": s.ui_zoom },
                 "terminal": { "font_size": s.font_size, "scrollback": s.scrollback },
@@ -159,10 +162,10 @@ impl Settings {
                     "left_width": s.layout.left_width,
                     "right_width": s.layout.right_width,
                 },
-                "git": { "fetch_minutes": s.fetch_minutes },
+                "git": { "fetch_minutes": s.fetch_minutes, "hosts": hosts_json(&s.hosts) },
             })
         };
-        let (mine, defaults) = (all(self), all(Settings::default()));
+        let (mine, defaults) = (all(self), all(&Settings::default()));
         let mut out = serde_json::Map::new();
         for (sec, keys) in mine.as_object().into_iter().flatten() {
             let changed: serde_json::Map<_, _> = keys
@@ -239,6 +242,7 @@ pub fn parse(text: &str, fallback: &Settings) -> Parsed {
             let (left_width, right_width) = (width("left_width", dl.left_width), width("right_width", dl.right_width));
             Layout { sessions, files, changes, search, left_width, right_width }
         },
+        hosts: parse_hosts(&v["git"]["hosts"], g.notes),
         fetch_minutes: g.get(
             "git",
             "fetch_minutes",
@@ -261,8 +265,74 @@ pub fn parse(text: &str, fallback: &Settings) -> Parsed {
     Parsed { settings: s, notes, broken: false }
 }
 
+/// `{"ssh.example.com": {"kind": "gitlab", "web": "https://gitlab.example.com"}}` → rules; a bad entry is skipped
+/// with a note.
+fn parse_hosts(v: &Value, notes: &mut Vec<String>) -> Vec<git::remote::HostRule> {
+    use git::remote::{Forge, HostRule};
+    let Some(map) = v.as_object() else {
+        if !v.is_null() {
+            notes.push(
+                "git.hosts: needs an object like {\"ssh.example.com\": {\"kind\": \"gitlab\", \"web\": \"https://…\"}}"
+                    .into(),
+            );
+        }
+        return Vec::new();
+    };
+    let mut rules: Vec<HostRule> = map
+        .iter()
+        .filter_map(|(host, e)| {
+            let forge = match e["kind"].as_str() {
+                Some("github") => Forge::GitHub,
+                Some("gitlab") => Forge::GitLab,
+                Some("other") => Forge::Other,
+                _ => {
+                    notes.push(format!(
+                        "git.hosts.{host}: kind needs to be \"github\", \"gitlab\" or \"other\"; ignored"
+                    ));
+                    return None;
+                }
+            };
+            let web = match &e["web"] {
+                Value::Null => None,
+                Value::String(w) if w.starts_with("https://") || w.starts_with("http://") => {
+                    Some(w.trim_end_matches('/').to_string())
+                }
+                _ => {
+                    notes.push(format!(
+                        "git.hosts.{host}: web needs to be a URL like \"https://gitlab.example.com\"; ignored"
+                    ));
+                    return None;
+                }
+            };
+            Some(HostRule { host: host.trim().to_ascii_lowercase(), forge, web })
+        })
+        .collect();
+    rules.sort_by(|a, b| a.host.cmp(&b.host));
+    rules
+}
+
+fn hosts_json(rules: &[git::remote::HostRule]) -> Value {
+    use git::remote::Forge;
+    let map: serde_json::Map<String, Value> = rules
+        .iter()
+        .map(|r| {
+            let kind = match r.forge {
+                Forge::GitHub => "github",
+                Forge::GitLab => "gitlab",
+                Forge::Other => "other",
+            };
+            let mut e = json!({ "kind": kind });
+            if let Some(w) = &r.web {
+                e["web"] = json!(w);
+            }
+            (r.host.clone(), e)
+        })
+        .collect();
+    Value::Object(map)
+}
+
 fn broken(fallback: &Settings, note: String) -> Parsed {
-    Parsed { settings: *fallback, notes: vec![note], broken: true }
+    Parsed { settings: fallback.clone(), notes: vec![note], broken: true }
 }
 
 struct Get<'a> {
@@ -454,12 +524,25 @@ mod tests {
                 right_width: 400,
             },
             fetch_minutes: 15,
+            hosts: vec![git::remote::HostRule {
+                host: "ssh.jakuubkoo.me".into(),
+                forge: git::remote::Forge::GitLab,
+                web: Some("https://gitlab.jakuubkoo.me".into()),
+            }],
         };
         let p = parse(&s.to_json(), &Settings::default());
         assert!(s.to_json().contains("\"fetch_minutes\": 15"));
         let bad = parse(r#"{"git": {"fetch_minutes": 500}}"#, &Settings::default());
         assert_eq!((bad.settings.fetch_minutes, bad.notes.len()), (0, 1), "out of range: off, with a note");
-        assert_eq!(p, Parsed { settings: s, notes: vec![], broken: false });
+        let hosts = parse(
+            r#"{"git": {"hosts": {"SSH.x.io": {"kind": "gitlab", "web": "https://gl.x.io/"}, "y": {"kind": "bitbucket"}, "z": {"kind": "github", "web": "gl.x.io"}}}}"#,
+            &Settings::default(),
+        );
+        assert_eq!(hosts.settings.hosts.len(), 1, "bad entries skipped");
+        assert_eq!(hosts.settings.hosts[0].web.as_deref(), Some("https://gl.x.io"));
+        assert_eq!(hosts.settings.hosts[0].host, "ssh.x.io");
+        assert_eq!(hosts.notes.len(), 2, "{:?}", hosts.notes);
+        assert_eq!(p, Parsed { settings: s.clone(), notes: vec![], broken: false });
         assert_eq!(parse("{}", &s).settings, Settings::default(), "missing keys are defaults, not the fallback");
         assert_eq!(Settings::default().to_json(), "{}\n", "nothing set: an empty object");
         let one = Settings { scrollback: 500, ..Settings::default() }.to_json();
