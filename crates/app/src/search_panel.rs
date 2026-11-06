@@ -194,24 +194,12 @@ impl SearchPanel {
                 });
             }
             "r" | "c" | "w" if m.alt && !m.control => self.toggle(ks.key.chars().next().unwrap_or('w'), cx),
-            _ => {
-                let result = if m.control && ks.key == "v" {
-                    match cx.read_from_clipboard().and_then(|c| c.text()) {
-                        Some(text) => {
-                            self.edit.insert(text.lines().next().unwrap_or(""));
-                            Edit::Changed
-                        }
-                        None => Edit::Ignored,
-                    }
-                } else {
-                    self.edit.key(&ks.key, ks.key_char.as_deref(), m.control)
-                };
-                match result {
-                    Edit::Changed => self.restart(cx),
-                    Edit::Submit => self.open(self.sel, window, cx),
-                    Edit::Ignored | Edit::Cancel => return,
-                }
-            }
+            _ => match self.edit.key(ks, cx) {
+                Edit::Changed => self.restart(cx),
+                Edit::Moved => cx.notify(),
+                Edit::Submit => self.open(self.sel, window, cx),
+                Edit::Ignored | Edit::Cancel => return,
+            },
         }
         cx.stop_propagation();
     }

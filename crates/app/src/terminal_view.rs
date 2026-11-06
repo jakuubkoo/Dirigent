@@ -743,20 +743,9 @@ impl TerminalView {
             "c" | "r" if m.alt && !m.control => self.toggle_find(ks.key.chars().next().unwrap_or('r'), cx),
             _ => {
                 let before = f.edit.text.clone();
-                let result = if m.control && !m.alt && ks.key == "v" {
-                    match cx.read_from_clipboard().and_then(|c| c.text()) {
-                        Some(text) => {
-                            f.edit.insert(text.lines().next().unwrap_or(""));
-                            Edit::Changed
-                        }
-                        None => Edit::Ignored,
-                    }
-                } else {
-                    f.edit.key(&ks.key, ks.key_char.as_deref(), m.control)
-                };
-                match result {
+                match f.edit.key(ks, cx) {
                     Edit::Changed if f.edit.text != before => self.requery(cx),
-                    Edit::Changed => cx.notify(), // the caret moved
+                    Edit::Changed | Edit::Moved => cx.notify(), // the caret moved
                     // Unhandled keys stay in the bar (bound shortcuts were matched before this handler).
                     Edit::Ignored | Edit::Cancel | Edit::Submit => {}
                 }

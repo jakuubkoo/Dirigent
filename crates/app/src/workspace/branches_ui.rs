@@ -109,14 +109,8 @@ impl Workspace {
                 let sel = b.sel;
                 return self.branch_pick(sel, window, cx);
             }
-            "v" if ks.modifiers.control => {
-                if let Some(text) = cx.read_from_clipboard().and_then(|c| c.text()) {
-                    b.edit.insert(text.trim());
-                    self.branches_refilter(cx);
-                }
-            }
-            key => {
-                if b.edit.key(key, ks.key_char.as_deref(), ks.modifiers.control) == Edit::Changed {
+            _ => {
+                if b.edit.key(ks, cx) == Edit::Changed {
                     self.branches_refilter(cx);
                 }
             }
@@ -199,22 +193,7 @@ impl Workspace {
             .border_color(t.accent)
             .text_size(z(text_size::MD))
             .child(ui::icon(icon::BRANCH, 14., t.text.dim))
-            .child(
-                div()
-                    .flex_1()
-                    .min_w_0()
-                    .flex()
-                    .items_center()
-                    .when(b.edit.text.is_empty(), |d| {
-                        d.child(div().w(z(1.5)).h(z(16.)).bg(t.accent))
-                            .child(div().text_color(t.text.faint).child("Switch to a branch, or type a new name"))
-                    })
-                    .when(!b.edit.text.is_empty(), |d| {
-                        d.child(b.edit.before_cursor().to_string())
-                            .child(div().w(z(1.5)).h(z(16.)).bg(t.accent))
-                            .child(b.edit.after_cursor().to_string())
-                    }),
-            );
+            .child(ui::line_text(&b.edit, true, "Switch to a branch, or type a new name"));
         let n = b.rows.len();
         let list = uniform_list(
             "branch-rows",

@@ -199,14 +199,8 @@ impl Workspace {
             "enter" => return self.picker_open(None, m.shift, m.control, window, cx),
             "tab" => self.picker_complete(cx),
             "c" if m.control && m.shift => p.claude = !p.claude,
-            "v" if m.control => {
-                if let Some(text) = cx.read_from_clipboard().and_then(|c| c.text()) {
-                    p.edit.insert(text.trim());
-                    self.refilter(cx);
-                }
-            }
-            key => {
-                if p.edit.key(key, ks.key_char.as_deref(), m.control || m.platform) == Edit::Changed {
+            _ => {
+                if p.edit.key(ks, cx) == Edit::Changed {
                     self.refilter(cx);
                 }
             }
@@ -668,22 +662,7 @@ impl Workspace {
             .border_color(t.accent)
             .text_size(z(text_size::MD))
             .child(ui::icon(if path_mode { icon::FOLDER } else { icon::PLUS }, 14., t.text.dim))
-            .child(
-                div()
-                    .flex_1()
-                    .min_w_0()
-                    .flex()
-                    .items_center()
-                    .when(p.edit.text.is_empty(), |d| {
-                        d.child(div().w(z(1.5)).h(z(16.)).bg(t.accent))
-                            .child(div().text_color(t.text.faint).child("Search projects, or type a path (/ ~ .)"))
-                    })
-                    .when(!p.edit.text.is_empty(), |d| {
-                        d.child(p.edit.before_cursor().to_string())
-                            .child(div().w(z(1.5)).h(z(16.)).bg(t.accent))
-                            .child(p.edit.after_cursor().to_string())
-                    }),
-            )
+            .child(ui::line_text(&p.edit, true, "Search projects, or type a path (/ ~ .)"))
             .child(toggle);
         let n = p.rows.len();
         let list = uniform_list(

@@ -1645,17 +1645,9 @@ impl Workspace {
                 return;
             }
         };
-        let result = if ks.modifiers.control && ks.key == "v" {
-            if let Some(text) = cx.read_from_clipboard().and_then(|c| c.text()) {
-                edit.insert(text.trim());
-            }
-            Edit::Changed
-        } else {
-            edit.key(&ks.key, ks.key_char.as_deref(), ks.modifiers.control || ks.modifiers.platform)
-        };
-        match result {
+        match edit.key(ks, cx) {
             Edit::Ignored => return,
-            Edit::Changed => {}
+            Edit::Changed | Edit::Moved => {}
             Edit::Cancel => self.close_modal(window, cx),
             Edit::Submit => match self.modal.take() {
                 rename @ Some(Modal::Rename { .. }) => {

@@ -506,16 +506,10 @@ impl SettingsView {
             }
             return Some(Apply::Close);
         }
-        let paste = (m.control && key == "v").then(|| cx.read_from_clipboard().and_then(|c| c.text())).flatten();
         // Text: the search field or an edited value.
         let target = if self.form.field == Field::Search { Some(&mut self.search) } else { self.form.edit.as_mut() };
         if let Some(edit) = target {
-            if let Some(text) = paste {
-                edit.insert(text.trim());
-                self.form.error = None;
-                return None;
-            }
-            return match edit.key(key, ks.key_char.as_deref(), m.control || m.platform) {
+            return match edit.key(ks, cx) {
                 Edit::Submit if self.form.field != Field::Search => self.form.submit(s, projects),
                 Edit::Changed => {
                     self.form.error = None;
@@ -587,7 +581,7 @@ impl Form {
                 let p = projects.iter().find(|p| p.root == root)?;
                 let old = Defaults::of(p);
                 let mut d = old.clone();
-                *d.field(i) = edit.text;
+                *d.field(i) = edit.text.clone();
                 (d.field(i) != old.clone().field(i)).then_some(Apply::Project(root, d))
             }
             Field::Search => None,

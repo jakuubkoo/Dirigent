@@ -81,6 +81,12 @@ impl TextArea {
         self.goal_col = None;
     }
 
+    /// Mouse: select `anchor..cursor` (clamped to the text; offsets on char boundaries).
+    pub fn select(&mut self, anchor: usize, cursor: usize) {
+        self.anchor = anchor.min(self.text.len());
+        self.click(cursor, true);
+    }
+
     fn snapshot(&mut self) {
         self.undo.push(Snapshot { text: self.text.clone(), cursor: self.cursor });
         if self.undo.len() > MAX_UNDO {
@@ -272,9 +278,31 @@ impl TextArea {
     }
 }
 
+fn is_word(c: char) -> bool {
+    c.is_alphanumeric() || c == '_'
+}
+
+/// Double click: the word around byte offset `at` (on a char boundary), else the one char there.
+pub fn word_at(text: &str, at: usize) -> std::ops::Range<usize> {
+    let at = at.min(text.len());
+    let (before, after) = text.split_at(at);
+    let start = before.trim_end_matches(is_word).len();
+    let end = at + after.len() - after.trim_start_matches(is_word).len();
+    if start < end { start..end } else { at..after.chars().next().map_or(at, |c| at + c.len_utf8()) }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn word_at_double_click() {
+        assert_eq!(word_at("fix login_bug!", 6), 4..13);
+        assert_eq!(word_at("fix login", 3), 0..3, "right after a word: that word");
+        assert_eq!(word_at("a  b", 2), 2..3, "between spaces: one char");
+        assert_eq!(word_at("čeština", 2), 0.."čeština".len());
+        assert_eq!(word_at("", 0), 0..0);
+    }
 
     fn typed(s: &str) -> TextArea {
         let mut t = TextArea::default();

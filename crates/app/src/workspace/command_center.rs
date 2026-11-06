@@ -189,19 +189,9 @@ impl Workspace {
             }
             _ => {}
         }
-        let result = if ks.modifiers.control && ks.key == "v" {
-            match cx.read_from_clipboard().and_then(|c| c.text()) {
-                Some(text) => {
-                    cc.edit.insert(text.lines().next().unwrap_or("").trim());
-                    Edit::Changed
-                }
-                None => Edit::Ignored,
-            }
-        } else {
-            cc.edit.key(&ks.key, ks.key_char.as_deref(), ks.modifiers.control)
-        };
-        match result {
+        match cc.edit.key(ks, cx) {
             Edit::Changed => self.cc_changed(cx),
+            Edit::Moved => cx.notify(),
             Edit::Cancel => self.close_modal(window, cx),
             Edit::Submit => self.cc_run(None, ks.modifiers.control, window, cx),
             Edit::Ignored => {}
@@ -314,25 +304,7 @@ impl Workspace {
             .border_b_1()
             .border_color(t.border.subtle)
             .child(ui::icon(icon::SEARCH, 13., t.text.dim))
-            .child(
-                div()
-                    .flex_1()
-                    .min_w_0()
-                    .flex()
-                    .items_center()
-                    .whitespace_nowrap()
-                    .overflow_hidden()
-                    .child(cc.edit.before_cursor().to_string())
-                    .child(div().flex_none().w(z(1.5)).h(z(15.)).bg(t.accent))
-                    .child(cc.edit.after_cursor().to_string())
-                    .when(cc.edit.text.is_empty(), |d| {
-                        d.child(
-                            div()
-                                .text_color(t.text.faint)
-                                .child("Go to file  ·  > command  ·  # search in files  ·  : line"),
-                        )
-                    }),
-            );
+            .child(ui::line_text(&cc.edit, true, "Go to file  ·  > command  ·  # search in files  ·  : line"));
         let note = |s: String| {
             div().px(z(space::MD)).py(z(space::MD)).text_size(z(text_size::SM)).text_color(t.text.dim).child(s)
         };

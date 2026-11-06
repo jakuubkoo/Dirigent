@@ -190,7 +190,7 @@ impl Workspace {
                 }
             }
             ("space", Field::Claude) => s.claude = !s.claude,
-            (key, field) => {
+            (_, field) => {
                 let edit = match field {
                     Field::Name => &mut s.name,
                     Field::Branch => &mut s.branch,
@@ -199,15 +199,7 @@ impl Workspace {
                     Field::Prompt => &mut s.prompt,
                     Field::Mode | Field::Claude => return,
                 };
-                let changed = if m.control && key == "v" {
-                    if let Some(text) = cx.read_from_clipboard().and_then(|c| c.text()) {
-                        edit.insert(text.trim());
-                    }
-                    true
-                } else {
-                    edit.key(key, ks.key_char.as_deref(), m.control || m.platform) == Edit::Changed
-                };
-                if changed {
+                if edit.key(ks, cx) == Edit::Changed {
                     match field {
                         Field::Branch => s.branch_edited = true,
                         Field::Location => s.location_edited = true,
