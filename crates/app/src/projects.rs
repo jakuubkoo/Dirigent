@@ -31,6 +31,9 @@ pub struct Project {
     /// Where new worktrees go (None: `<repo parent>/<repo>-worktrees`).
     #[serde(default)]
     pub worktrees_dir: Option<PathBuf>,
+    /// The branch prefix last picked in the New session dialog (`""`: none; None: never picked → `feat/`).
+    #[serde(default)]
+    pub branch_prefix: Option<String>,
     /// Run in a new worktree before claude starts (e.g. `pnpm install`).
     #[serde(default)]
     pub setup_cmd: Option<String>,
@@ -124,17 +127,51 @@ impl Projects {
 pub fn slug(name: &str) -> String {
     let mut out = String::new();
     for c in name.trim().chars().flat_map(char::to_lowercase) {
-        if c.is_ascii_alphanumeric() || c == '/' || c == '.' || c == '_' {
+        if c.is_ascii_alphanumeric() || c == '.' || c == '_' {
             out.push(c);
         } else if !out.is_empty() && !out.ends_with('-') {
             out.push('-');
         }
     }
-    let mut s: String = out.trim_matches(|c| c == '-' || c == '/' || c == '.').chars().take(60).collect();
-    while s.ends_with(['-', '/', '.']) {
+    let mut s: String = out.trim_matches(|c| c == '-' || c == '.').chars().take(60).collect();
+    while s.ends_with(['-', '.']) {
         s.pop();
     }
     s
+}
+
+/// The New session dialog's branch prefixes; `""` is "none".
+pub const PREFIXES: [&str; 5] = ["feat/", "fix/", "chore/", "docs/", ""];
+
+/// The remembered prefix's index (never picked: `feat/`; an unknown one: none).
+pub fn prefix_index(saved: Option<&str>) -> usize {
+    let p = saved.unwrap_or(PREFIXES[0]);
+    PREFIXES.iter().position(|x| *x == p).unwrap_or(PREFIXES.len() - 1)
+}
+
+/// An explicit `Branch: x` line in a prompt: x as written (first word, without quotes/backticks or a trailing
+/// `.`/`,`), split into a known prefix's index and the rest; an unknown prefix stays in the rest (prefix none).
+pub fn branch_line(prompt: &str) -> Option<(usize, String)> {
+    let line = prompt.lines().find_map(|l| {
+        let l = l.trim_start().trim_start_matches(['-', '*', ' ']);
+        l.get(..7).filter(|h| h.eq_ignore_ascii_case("branch:")).map(|_| &l[7..])
+    })?;
+    let word = line.split_whitespace().next()?.trim_matches(['`', '"', '\'', '.', ',', ';']);
+    if word.is_empty() {
+        return None;
+    }
+    let none = PREFIXES.len() - 1;
+    Some(match PREFIXES[..none].iter().position(|p| word.starts_with(p) && word.len() > p.len()) {
+        Some(i) => (i, word[PREFIXES[i].len()..].to_string()),
+        None => (none, word.to_string()),
+    })
+}
+
+/// A session name without claude: the first words of the prompt's first line that isn't `Branch: x`.
+pub fn fallback_name(prompt: &str) -> String {
+    let line = prompt.lines().map(str::trim).find(|l| !l.is_empty() && branch_line(l).is_none()).unwrap_or("");
+    let words: Vec<&str> = line.split_whitespace().take(5).collect();
+    words.join(" ").trim_end_matches(|c: char| !c.is_alphanumeric()).to_string()
 }
 
 /// Default directory for a new worktree: `<worktrees_dir or <parent>/<repo>-worktrees>/<branch with / → ->`.
@@ -151,17 +188,19 @@ pub fn inside_repo(repo_root: &Path, path: &Path) -> bool {
     path.starts_with(repo_root)
 }
 
-/// What a new session types: `<setup> && claude <flags> [prompt]` (each part optional; None: nothing). Flags and
-/// the prompt are shell-quoted, newlines in the prompt become spaces (Enter would submit early); the setup command is
-/// typed as you wrote it.
-pub fn start_line(setup: Option<&str>, claude: bool, args: &[String], prompt: Option<&str>) -> Option<String> {
+/// What a new session types: `<setup> && claude [--dirigent-prompt-file <file>] <flags>` (each part optional;
+/// None: nothing). The first prompt never goes through your shell: it waits in `prompt_file` and our `claude` shim
+/// passes it on as one argument, newlines and quotes intact (`agent::SHIM`). Flags are shell-quoted; the setup
+/// command is typed as you wrote it.
+pub fn start_line(setup: Option<&str>, claude: bool, args: &[String], prompt_file: Option<&Path>) -> Option<String> {
     let claude = claude.then(|| {
         let mut words = vec!["claude".to_string()];
-        words.extend(args.iter().map(|a| crate::workspace::sh_word(a)));
-        if let Some(p) = prompt.map(|p| p.split_whitespace().collect::<Vec<_>>().join(" ")).filter(|p| !p.is_empty()) {
-            words.push("--".into()); // a prompt starting with `-` is still the prompt
-            words.push(crate::workspace::sh_word(&p));
+        if let Some(f) = prompt_file {
+            // First: the shim only looks there.
+            words.push(crate::agent::PROMPT_FLAG.into());
+            words.push(crate::workspace::sh_word(&f.to_string_lossy()));
         }
+        words.extend(args.iter().map(|a| crate::workspace::sh_word(a)));
         words.join(" ")
     });
     match (setup.map(str::trim).filter(|s| !s.is_empty()), claude) {
@@ -353,20 +392,26 @@ mod tests {
     #[test]
     fn start_lines() {
         let args = vec!["--model".to_string(), "opus".to_string()];
-        assert_eq!(start_line(None, false, &args, Some("x")), None);
+        let file = Path::new("/run/user/1/dirigent-9/prompt-3-1.txt");
+        assert_eq!(start_line(None, false, &args, Some(file)), None);
         assert_eq!(start_line(None, true, &args, None).unwrap(), "claude --model opus");
         assert_eq!(
-            start_line(Some(" pnpm install "), true, &[], Some("Fix the\n'login' $bug")).unwrap(),
-            "pnpm install && claude -- 'Fix the '\\''login'\\'' $bug'"
+            start_line(Some(" pnpm install "), true, &args, Some(file)).unwrap(),
+            "pnpm install && claude --dirigent-prompt-file /run/user/1/dirigent-9/prompt-3-1.txt --model opus"
+        );
+        assert_eq!(
+            start_line(None, true, &[], Some(Path::new("/tmp/it's here/p.txt"))).unwrap(),
+            "claude --dirigent-prompt-file '/tmp/it'\\''s here/p.txt'"
         );
         assert_eq!(start_line(Some("cargo fetch"), false, &[], None).unwrap(), "cargo fetch");
-        assert_eq!(start_line(Some("  "), true, &[], Some("  ")).unwrap(), "claude");
+        assert_eq!(start_line(Some("  "), true, &[], None).unwrap(), "claude");
     }
 
     #[test]
     fn slugs_and_worktree_paths() {
         assert_eq!(slug("Fix login bug!"), "fix-login-bug");
-        assert_eq!(slug("  feat/Login: OAuth 2.0  "), "feat/login-oauth-2.0");
+        assert_eq!(slug("  feat/Login: OAuth 2.0  "), "feat-login-oauth-2.0", "a / from the name never nests");
+        assert_eq!(slug("Esc/Ctrl-C"), "esc-ctrl-c");
         assert_eq!(slug("Příliš žluťoučký"), "p-li-lu-ou-k");
         assert_eq!(slug("---"), "");
         assert_eq!(slug(&"a".repeat(80)).len(), 60);
@@ -374,6 +419,28 @@ mod tests {
         assert_eq!(worktree_path(root, None, "feat/x"), Path::new("/c/app-worktrees/feat-x"));
         assert_eq!(worktree_path(root, Some(Path::new("/w")), "b"), Path::new("/w/b"));
         assert!(inside_repo(root, Path::new("/c/app/wt/b")) && !inside_repo(root, Path::new("/c/app-worktrees/b")));
+    }
+
+    #[test]
+    fn prefixes_branch_lines_and_fallback_names() {
+        assert_eq!(prefix_index(None), 0, "never picked: feat/");
+        assert_eq!(PREFIXES[prefix_index(Some(""))], "", "none is remembered");
+        assert_eq!(PREFIXES[prefix_index(Some("docs/"))], "docs/");
+        assert_eq!(PREFIXES[prefix_index(Some("wip/"))], "", "unknown: none");
+        let p = "Branch: feat/branch-prefix from main. Small change, no plan mode needed.\nAdd a prefix.";
+        assert_eq!(branch_line(p), Some((0, "branch-prefix".into())));
+        assert_eq!(branch_line("x\n- branch: `fix/esc-key`."), Some((1, "esc-key".into())));
+        assert_eq!(branch_line("Branch: jakub/try-this"), Some((4, "jakub/try-this".into())), "unknown prefix kept");
+        assert_eq!(branch_line("Branch: feat/"), Some((4, "feat/".into())));
+        assert_eq!(branch_line("Branch:"), None);
+        assert_eq!(branch_line("The branch: is wrong"), None, "only at a line start");
+        assert_eq!(fallback_name(p), "Add a prefix");
+        assert_eq!(
+            fallback_name("\n  Fix the Esc/Ctrl+C interrupt in the terminal now"),
+            "Fix the Esc/Ctrl+C interrupt in"
+        );
+        assert_eq!(fallback_name("Why?"), "Why");
+        assert_eq!(fallback_name(""), "");
     }
 
     #[test]

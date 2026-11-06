@@ -1182,7 +1182,7 @@ impl Workspace {
                         .into_any_element(),
                 )
             }
-            Some(Modal::Setup(s)) => Some(scrim().child(self.setup_view(s, cx)).into_any_element()),
+            Some(Modal::Setup(s)) => Some(scrim().child(self.setup_view(s, window, cx)).into_any_element()),
             Some(Modal::CloseWorktree(c)) => Some(scrim().child(self.close_wt_view(c, cx)).into_any_element()),
             Some(Modal::Worktrees(l)) => Some(scrim().child(self.worktrees_view(l, cx)).into_any_element()),
             Some(Modal::Branches(b)) => Some(scrim().child(self.branches_view(b, window, cx)).into_any_element()),

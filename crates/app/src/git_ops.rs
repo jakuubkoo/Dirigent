@@ -312,9 +312,15 @@ pub fn generate_message(repo: &Repo, files: Option<&[FileChange]>) -> Result<Str
     } else {
         "Write the commit message for this diff."
     };
+    claude_p(GENERATE_PROMPT, ask, &diff).map(|out| clean_message(&out))
+}
+
+/// `claude -p` on Haiku with no tools, no saved session, none of your settings or hooks (your login): `system`
+/// as the system prompt, `ask` as the prompt, `input` on stdin. Blocking.
+fn claude_p(system: &str, ask: &str, input: &str) -> Result<String, String> {
     let mut child = Command::new("claude")
         .args(["-p", "--setting-sources", "", "--model", "haiku", "--tools", "", "--no-session-persistence"])
-        .args(["--system-prompt", GENERATE_PROMPT, ask])
+        .args(["--system-prompt", system, ask])
         .current_dir(std::env::temp_dir())
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -322,14 +328,40 @@ pub fn generate_message(repo: &Repo, files: Option<&[FileChange]>) -> Result<Str
         .spawn()
         .map_err(|e| format!("Couldn't run claude: {e}"))?;
     if let Some(mut stdin) = child.stdin.take() {
-        let _ = stdin.write_all(diff.as_bytes());
+        let _ = stdin.write_all(input.as_bytes());
     }
     let out = child.wait_with_output().map_err(|e| e.to_string())?;
     if !out.status.success() {
         let msg = String::from_utf8_lossy(&out.stdout).trim().to_string() + String::from_utf8_lossy(&out.stderr).trim();
         return Err(format!("claude failed: {msg}"));
     }
-    Ok(clean_message(&String::from_utf8_lossy(&out.stdout)))
+    Ok(String::from_utf8_lossy(&out.stdout).into_owned())
+}
+
+const NAME_PROMPT: &str = "You name coding sessions from the task a developer is about to give an agent. Reply with \
+exactly two lines and nothing else:\nname: <a session name of 2 to 5 words, sentence case, no quotes>\nbranch: <a git \
+branch slug of 2 to 5 lowercase words joined by hyphens, without a type prefix such as feat/ or fix/>";
+
+/// A session name and a branch slug for a first prompt (`claude -p`, Haiku; see `claude_p`). Blocking.
+pub fn name_session(prompt: &str) -> Result<(String, String), String> {
+    let input: String = prompt.chars().take(4000).collect();
+    let out = claude_p(NAME_PROMPT, "Name the session for this task.", &input)?;
+    parse_name(&out).ok_or_else(|| format!("Unexpected reply: {}", out.trim()))
+}
+
+/// `name: …` / `branch: …` lines → (name, slug); the slug goes through `projects::slug` (never a `/`).
+fn parse_name(out: &str) -> Option<(String, String)> {
+    let field = |key: &str| {
+        out.lines().find_map(|l| {
+            let l = l.trim().trim_start_matches(['-', '*', ' ']);
+            let v = l.get(..key.len()).filter(|h| h.eq_ignore_ascii_case(key)).map(|_| &l[key.len()..])?;
+            Some(v.trim_matches(|c: char| c.is_whitespace() || matches!(c, '"' | '`' | '\'' | '*')).to_string())
+                .filter(|v| !v.is_empty())
+        })
+    };
+    let name: String = field("name:")?.chars().take(60).collect();
+    let slug = crate::projects::slug(&field("branch:").unwrap_or_else(|| name.clone()));
+    (!slug.is_empty()).then_some((name, slug))
 }
 
 /// Drops attribution lines and code fences a model may add anyway.
@@ -350,6 +382,20 @@ fn clean_message(raw: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn parses_generated_names() {
+        let out = "name: Branch prefix dropdown\nbranch: feat/branch-prefix-dropdown\n";
+        assert_eq!(parse_name(out), Some(("Branch prefix dropdown".into(), "feat-branch-prefix-dropdown".into())));
+        let out = "Sure!\n- **Name:** \"Esc interrupt\"\n- Branch: `esc-interrupt`";
+        assert_eq!(parse_name(out), Some(("Esc interrupt".into(), "esc-interrupt".into())));
+        assert_eq!(
+            parse_name("name: Fix login"),
+            Some(("Fix login".into(), "fix-login".into())),
+            "no branch: from name"
+        );
+        assert_eq!(parse_name("I can't help with that."), None);
+    }
 
     #[test]
     fn sequences_retry_the_rest() {

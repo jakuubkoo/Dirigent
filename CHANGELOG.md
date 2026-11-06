@@ -8,6 +8,10 @@ All notable changes to Dirigent are recorded here. The format follows
 
 ### Changed
 
+- New session dialog: the first prompt is multi-line and wraps (3 to 10 lines, then it scrolls). Enter adds a line there,
+  Ctrl+Enter creates the session. The prompt reaches claude as written (new lines and quotes intact, whatever your
+  shell): it goes through a file in the runtime folder that the `claude` shim reads and deletes, never through the
+  typed command.
 - Every single-line field (dialogs, search, find, settings): a click places the cursor, drag or Shift+click selects,
   a double click selects a word, the field scrolls to keep the cursor visible, and Ctrl+C / X / V / A, Ctrl+Z / Y
   (undo, redo) and Ctrl+←/→ (word moves) work.
@@ -17,6 +21,12 @@ All notable changes to Dirigent are recorded here. The format follows
 
 ### Added
 
+- New session dialog: a branch prefix dropdown (`feat/`, `fix/`, `chore/`, `docs/`, none) next to the branch field,
+  `feat/` by default and remembered per project. The slug made from the session name never takes a `/` from it
+  (`esc-ctrl-c`, not `esc/ctrl-c`).
+- New session dialog: while Name is empty, the first prompt names the session and its branch as you type (its first
+  words at once, then `claude -p` on Haiku off the UI thread: no tools, no saved session). A name you type stays;
+  a `Branch: x` line in the prompt gives the branch as written.
 - **Find in the terminal** (Ctrl+Alt+F): searches the screen and the whole scrollback (also in full-screen apps),
   highlights every match, Enter / Shift+Enter step to the next / previous one, match case and regex toggles, Esc
   closes. Not Ctrl+F: the shell, Claude Code and less/vim use it.
