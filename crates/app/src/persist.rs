@@ -88,6 +88,7 @@ pub enum PanelTab {
     #[default]
     Changes,
     Files,
+    Search,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq)]

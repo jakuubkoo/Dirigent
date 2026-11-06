@@ -37,7 +37,13 @@ struct Entry {
     repo: git::Repo,
     watcher: git::Watcher,
     tabs: usize,
+    /// The repo's file list (quick open, content search): built on first use, then patched on the watcher thread
+    /// from each update's changed directories.
+    index: IndexSlot,
 }
+
+/// None until first used.
+pub type IndexSlot = Arc<Mutex<Option<git::index::Index>>>;
 
 impl Repos {
     pub fn new(tracker: Arc<crate::changes::Tracker>) -> (Self, Receiver<()>) {
@@ -52,8 +58,15 @@ impl Repos {
         }
         let report = self.reporter();
         let (tracker, root) = (self.tracker.clone(), repo.root.clone());
+        let index: IndexSlot = Default::default();
+        let ix = index.clone();
         let on_update = move |u: git::Update| {
             tracker.status(&root, u.status, u.settled);
+            if !u.dirs.is_empty()
+                && let Some(ix) = ix.lock().unwrap().as_mut()
+            {
+                ix.refresh(&u.dirs);
+            }
             // Batches of only ignored paths are reported for the tracker; the UI has nothing to do then.
             if u.refreshed || !u.dirs.is_empty() {
                 report(u.dirs);
@@ -62,7 +75,7 @@ impl Repos {
         match git::Watcher::start(repo.clone(), on_update) {
             Ok(watcher) => {
                 self.tracker.add_repo(&repo.root, watcher.received());
-                self.map.insert(repo.root.clone(), Entry { repo, watcher, tabs: 1 });
+                self.map.insert(repo.root.clone(), Entry { repo, watcher, tabs: 1, index });
             }
             Err(e) => eprintln!("dirigent: can't watch {}: {e}", repo.root.display()),
         }
@@ -95,6 +108,11 @@ impl Repos {
 
     pub fn status(&self, root: &Path) -> Option<Arc<Status>> {
         self.map.get(root)?.watcher.latest()
+    }
+
+    /// The repo's file index slot (None: no watcher for that root).
+    pub fn index(&self, root: &Path) -> Option<IndexSlot> {
+        self.map.get(root).map(|e| e.index.clone())
     }
 
     pub fn repo(&self, root: &Path) -> Option<&git::Repo> {
