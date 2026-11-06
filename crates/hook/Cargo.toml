@@ -1,8 +1,9 @@
 [package]
 name = "hook"
-version = "0.1.0"
+version.workspace = true
 edition.workspace = true
 license.workspace = true
+publish.workspace = true
 
 [[bin]]
 name = "dirigent-hook"

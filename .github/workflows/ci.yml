@@ -1,0 +1,76 @@
+# Checks every PR and every push to main. `fmt`, `clippy-test` and `deny` are the ruleset's required status checks:
+# keep their names. `advisories` (RustSec) is informational: it also runs weekly, so new advisories show up without
+# blocking merges.
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  schedule:
+    - cron: "17 6 * * 1" # Mondays 06:17 UTC: advisories only
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  fmt:
+    if: github.event_name != 'schedule'
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - run: rustup toolchain install # the version in rust-toolchain.toml
+      - run: cargo fmt --all --check
+
+  clippy-test:
+    if: github.event_name != 'schedule'
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Build packages (the list install.sh checks)
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -yq --no-install-recommends $(scripts/install.sh --print-deps)
+      - run: rustup toolchain install
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+      - run: cargo clippy --all-targets --locked -- -D warnings
+      # Tests that open a window are #[ignore]d.
+      - run: cargo test --locked
+
+  deny:
+    if: github.event_name != 'schedule'
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - run: rustup toolchain install
+      - uses: taiki-e/install-action@c509219cf42fba86913069efd0ade2458c59337b # v2.90.1
+        with:
+          tool: cargo-deny
+      # Licenses (no GPL/AGPL), allowed sources, bans: deny.toml.
+      - run: cargo deny --locked check licenses sources bans
+
+  advisories:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - run: rustup toolchain install
+      - uses: taiki-e/install-action@c509219cf42fba86913069efd0ade2458c59337b # v2.90.1
+        with:
+          tool: cargo-deny
+      # RustSec: not a required check, so a new advisory never blocks a merge; ignores with reasons in deny.toml.
+      - run: cargo deny --locked check advisories

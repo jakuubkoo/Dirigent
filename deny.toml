@@ -1,0 +1,60 @@
+# cargo deny check: licenses, RustSec advisories, where crates come from. Runs in CI (`deny` job).
+
+[graph]
+# What we ship: Linux x86_64 (other targets' crates don't reach the binary).
+targets = ["x86_64-unknown-linux-gnu"]
+all-features = false
+
+[licenses]
+# What THIRD-PARTY-NOTICES.md lists. No GPL/AGPL: a crate offering only those fails the check (self_cell is
+# "Apache-2.0 OR GPL-2.0-only" and passes under Apache).
+allow = [
+    "MIT",
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "Unicode-3.0",
+    "Unlicense",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    "Zlib",
+    "CC0-1.0",
+    "BSL-1.0",
+    "0BSD",
+]
+confidence-threshold = 0.9
+exceptions = [
+    # Through gpui's font-kit (dirs → option-ext), used unmodified: MPL-2.0 is file-level copyleft.
+    { allow = ["MPL-2.0"], crate = "option-ext" },
+]
+
+[licenses.private]
+# Our own workspace crates (MIT, not published).
+ignore = true
+
+[advisories]
+# RustSec: known vulnerabilities fail; unmaintained/unsound notices fail too unless listed below with a reason.
+# Each entry: unmaintained (no vulnerability), reached only through dependencies we don't control, no maintained
+# release to move to yet. Revisit when bumping gpui or zbus.
+ignore = [
+    { id = "RUSTSEC-2024-0436", reason = "paste: gpui's macros use it; no maintained replacement in gpui yet" },
+    { id = "RUSTSEC-2026-0206", reason = "rustybuzz: gpui's text shaping; follows gpui" },
+    { id = "RUSTSEC-2026-0192", reason = "ttf-parser: gpui/cosmic-text font parsing; follows gpui" },
+    { id = "RUSTSEC-2026-0371", reason = "zbus_names: folded into zbus upstream; we and gpui use zbus 5" },
+    { id = "RUSTSEC-2026-0370", reason = "zvariant: folded into zbus upstream; we and gpui use zbus 5" },
+    { id = "RUSTSEC-2026-0372", reason = "zvariant_derive: folded into zbus upstream; we and gpui use zbus 5" },
+]
+
+[bans]
+# gpui's graph carries several versions of many crates; that's not ours to fix.
+multiple-versions = "allow"
+wildcards = "deny"
+allow-wildcard-paths = true
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
+# gpui and the forks its graph pins (Zed's patches, wgpu); the Twig grammar (no crates.io release).
+allow-org = { github = ["zed-industries"] }
+allow-git = ["https://github.com/gfx-rs/wgpu", "https://github.com/gbprod/tree-sitter-twig"]
