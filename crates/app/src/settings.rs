@@ -410,10 +410,13 @@ impl Get<'_> {
 }
 
 /// `DIRIGENT_SETTINGS`; with `DIRIGENT_STATE` (test runs) `settings.json` next to that state file, so a test never
-/// touches the real config; else `$XDG_CONFIG_HOME/dirigent/settings.json`, else `~/.config/…`.
+/// touches the real config; else `$XDG_CONFIG_HOME/dirigent/settings.json`, else `~/.config/…`. Never a file in a
+/// Dirigent runtime dir: those hold the app's own files (claude's per-tab hook settings). Older builds exported that
+/// file to sessions as `DIRIGENT_SETTINGS`, so a Dirigent started in such a session took it for its settings.json.
 pub fn path() -> PathBuf {
     let var = |k| std::env::var_os(k).filter(|v| !v.is_empty()).map(PathBuf::from);
-    path_from(var("DIRIGENT_SETTINGS"), var("DIRIGENT_STATE"), var("XDG_CONFIG_HOME"), var("HOME"))
+    let runtime = crate::agent::runtime_parent();
+    path_from(var("DIRIGENT_SETTINGS"), var("DIRIGENT_STATE"), var("XDG_CONFIG_HOME"), var("HOME"), &runtime)
 }
 
 fn path_from(
@@ -421,14 +424,24 @@ fn path_from(
     state: Option<PathBuf>,
     config: Option<PathBuf>,
     home: Option<PathBuf>,
+    runtime: &Path,
 ) -> PathBuf {
-    if let Some(p) = settings {
+    let allowed = |p: &PathBuf| !in_runtime_dir(p, runtime);
+    if let Some(p) = settings.filter(allowed) {
         return p;
     }
-    if let Some(s) = state {
-        return s.with_file_name("settings.json");
+    if let Some(p) = state.map(|s| s.with_file_name("settings.json")).filter(allowed) {
+        return p;
     }
     config.unwrap_or_else(|| home.unwrap_or_default().join(".config")).join("dirigent/settings.json")
+}
+
+/// Inside any instance's runtime dir (`<runtime parent>/dirigent-<pid>/…`).
+fn in_runtime_dir(p: &Path, runtime: &Path) -> bool {
+    p.strip_prefix(runtime)
+        .ok()
+        .and_then(|rest| rest.components().next())
+        .is_some_and(|c| c.as_os_str().to_string_lossy().starts_with("dirigent-"))
 }
 
 /// What `load` found: the values, notes, and the text as read (to tell our own writes from hand edits).
@@ -749,12 +762,23 @@ mod tests {
     #[test]
     fn path_never_leaves_a_test_run_and_follows_xdg() {
         let p = |s: Option<&str>, st: Option<&str>, c: Option<&str>| {
-            path_from(s.map(Into::into), st.map(Into::into), c.map(Into::into), Some("/home/u".into()))
+            let run = Path::new("/run/user/1000");
+            path_from(s.map(Into::into), st.map(Into::into), c.map(Into::into), Some("/home/u".into()), run)
         };
         assert_eq!(p(Some("/x/s.json"), Some("/t/state.json"), None), PathBuf::from("/x/s.json"));
         assert_eq!(p(None, Some("/t/state.json"), Some("/c")), PathBuf::from("/t/settings.json"));
         assert_eq!(p(None, None, Some("/c")), PathBuf::from("/c/dirigent/settings.json"));
         assert_eq!(p(None, None, None), PathBuf::from("/home/u/.config/dirigent/settings.json"));
+        // A session's claude hook settings (any instance's runtime dir) is never taken as settings.json.
+        let hook = Some("/run/user/1000/dirigent-282823/tab-4.json");
+        assert_eq!(p(hook, None, Some("/c")), PathBuf::from("/c/dirigent/settings.json"));
+        assert_eq!(p(hook, Some("/t/state.json"), None), PathBuf::from("/t/settings.json"));
+        assert_eq!(
+            p(None, Some("/run/user/1000/dirigent-1/state.json"), Some("/c")),
+            PathBuf::from("/c/dirigent/settings.json")
+        );
+        // Elsewhere in the runtime parent is fine (only `dirigent-*` dirs are ours).
+        assert_eq!(p(Some("/run/user/1000/mine/s.json"), None, None), PathBuf::from("/run/user/1000/mine/s.json"));
     }
 
     #[test]
