@@ -539,6 +539,8 @@ impl Workspace {
             .into_any_element(),
         );
         let is_repo = s.is_repo();
+        // No ring around the row: keyboard focus only tints the other pill's border (Space switches to it).
+        let mode_focused = s.focus == Field::Mode;
         let pill = |id: &'static str, text: &'static str, on: bool, enabled: bool| {
             div()
                 .id(id)
@@ -548,11 +550,9 @@ impl Workspace {
                 .text_size(z(text_size::SM))
                 .when(on, |d| d.bg(t.accent).text_color(t.text.on_accent))
                 .when(!on, |d| {
-                    d.border_1().border_color(t.border.strong).text_color(if enabled {
-                        t.text.primary
-                    } else {
-                        t.text.faint
-                    })
+                    d.border_1()
+                        .border_color(if mode_focused && enabled { t.accent } else { t.border.strong })
+                        .text_color(if enabled { t.text.primary } else { t.text.faint })
                 })
                 .when(enabled, |d| d.cursor_pointer())
                 .child(text)
@@ -561,9 +561,6 @@ impl Workspace {
             .flex()
             .items_center()
             .gap(z(space::SM))
-            .p(z(2.))
-            .rounded(z(radius::MD))
-            .when(s.focus == Field::Mode, |d| d.border_1().border_color(t.accent))
             .child(pill("mode-shared", "Shared directory", !s.worktree, true).on_click(cx.listener(
                 |w, _: &ClickEvent, _, cx| {
                     if let Some(Modal::Setup(s)) = &mut w.modal {

@@ -554,14 +554,14 @@ impl Workspace {
         }
     }
 
-    /// The group header's `+`: a session in that project per its default; Shift: the opposite.
+    /// The group header's `+`: the setup dialog (Shift: a session right away per the project's default), or a
+    /// session per the setting (Shift: the other claude choice).
     pub(super) fn group_plus(&mut self, root: PathBuf, shift: bool, window: &mut Window, cx: &mut Context<Self>) {
-        let auto = match self.settings.plus_opens {
-            crate::settings::PlusOpens::Project => self.projects.get(&root).is_some_and(|p| p.auto_claude),
-            crate::settings::PlusOpens::Shell => false,
-            crate::settings::PlusOpens::Claude => true,
+        let project_default = self.projects.get(&root).is_some_and(|p| p.auto_claude);
+        let Some(claude) = self.settings.plus_opens.claude(project_default, shift) else {
+            return self.open_setup(root, window, cx);
         };
-        self.new_session(root, Some(auto != shift), window, cx);
+        self.new_session(root, Some(claude), window, cx);
     }
 
     /// The dropdown (deferred: drawn above everything) and, below it, a full-window layer that closes it on any

@@ -6,6 +6,12 @@ All notable changes to Dirigent are recorded here. The format follows
 
 ## [Unreleased]
 
+### Changed
+
+- The `+` on a project group header opens the New session setup dialog (name, git worktree, first prompt) for that
+  project; Shift+click starts a session right away. The old instant behavior stays available as "Plain + opens" in
+  Settings (Project default, Shell, Claude).
+
 ## [0.2.0] - 2026-11-06
 
 A redesigned git workflow (branches, sync, push and pull, pull and merge requests) and sessions that name
