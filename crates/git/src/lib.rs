@@ -4,6 +4,7 @@
 mod fs;
 pub mod index;
 pub mod layout;
+pub mod remote;
 pub mod search;
 pub mod text;
 mod watch;
