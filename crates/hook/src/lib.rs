@@ -32,8 +32,15 @@ pub enum Kind {
         path: Option<String>,
     },
     /// The arguments `claude` was started with in this tab (sent by the shim before it execs claude).
-    Argv { args: Vec<String> },
-    Status { model: Option<String>, context_pct: Option<f32>, five_hour: Option<Limit>, seven_day: Option<Limit> },
+    Argv {
+        args: Vec<String>,
+    },
+    Status {
+        model: Option<String>,
+        context_pct: Option<f32>,
+        five_hour: Option<Limit>,
+        seven_day: Option<Limit>,
+    },
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq)]
@@ -59,13 +66,21 @@ pub fn parse(mode: &str, json: &str) -> Option<Kind> {
                 _ => None,
             };
             let tool = s(&v["tool_name"]).filter(|_| event.ends_with("ToolUse"));
-            let path = tool.as_deref().filter(|t| event == "PostToolUse" && !READ_ONLY_TOOLS.contains(t)).and_then(|_| {
-                let input = &v["tool_input"];
-                let p = ["file_path", "notebook_path", "path"].iter().find_map(|k| input[*k].as_str()).filter(|p| !p.is_empty())?;
-                let p = std::path::Path::new(p);
-                let abs = if p.is_absolute() { p.to_path_buf() } else { std::path::Path::new(v["cwd"].as_str()?).join(p) };
-                abs.to_str().map(str::to_owned)
-            });
+            let path =
+                tool.as_deref().filter(|t| event == "PostToolUse" && !READ_ONLY_TOOLS.contains(t)).and_then(|_| {
+                    let input = &v["tool_input"];
+                    let p = ["file_path", "notebook_path", "path"]
+                        .iter()
+                        .find_map(|k| input[*k].as_str())
+                        .filter(|p| !p.is_empty())?;
+                    let p = std::path::Path::new(p);
+                    let abs = if p.is_absolute() {
+                        p.to_path_buf()
+                    } else {
+                        std::path::Path::new(v["cwd"].as_str()?).join(p)
+                    };
+                    abs.to_str().map(str::to_owned)
+                });
             Some(Kind::Hook {
                 event,
                 notification_type: s(&v["notification_type"]),
@@ -205,10 +220,15 @@ mod tests {
 
     #[test]
     fn split_words_like_a_shell() {
-        assert_eq!(split_words("  --model opus --add-dir '/a b' \"c\"d\\ e ''"), ["--model", "opus", "--add-dir", "/a b", "cd e", ""]);
+        assert_eq!(
+            split_words("  --model opus --add-dir '/a b' \"c\"d\\ e ''"),
+            ["--model", "opus", "--add-dir", "/a b", "cd e", ""]
+        );
         assert!(split_words("   ").is_empty());
         // Typed defaults go through the resume allowlist: bypasses never survive.
-        let words = split_words("--model opus --dangerously-skip-permissions --permission-mode bypassPermissions --permission-mode=bypassPermissions --foo x --effort high");
+        let words = split_words(
+            "--model opus --dangerously-skip-permissions --permission-mode bypassPermissions --permission-mode=bypassPermissions --foo x --effort high",
+        );
         assert_eq!(resume_args(&words), ["--model", "opus", "--effort", "high"]);
     }
 
@@ -237,7 +257,10 @@ mod tests {
         // The prompt goes, the model stays.
         assert_eq!(resume_args(&v(&["--model", "haiku", "fix it"])), v(&["--model", "haiku"]));
         // A value that looks like a prompt after a value flag is that flag's value.
-        assert_eq!(resume_args(&v(&["-n", "my session", "--effort", "high"])), v(&["-n", "my session", "--effort", "high"]));
+        assert_eq!(
+            resume_args(&v(&["-n", "my session", "--effort", "high"])),
+            v(&["-n", "my session", "--effort", "high"])
+        );
         // Session-starting flags are dropped, with their values.
         assert_eq!(
             resume_args(&v(&["-c", "-r", "abc", "--resume=def", "--session-id", "x", "--fork-session", "--verbose"])),
@@ -252,7 +275,16 @@ mod tests {
         );
         // Not allowlisted: permission grants, settings, hook-disabling and debug flags.
         assert_eq!(
-            resume_args(&v(&["--allowed-tools", "Bash", "--settings", "x.json", "--bare", "--safe-mode", "-d", "hooks"])),
+            resume_args(&v(&[
+                "--allowed-tools",
+                "Bash",
+                "--settings",
+                "x.json",
+                "--bare",
+                "--safe-mode",
+                "-d",
+                "hooks"
+            ])),
             v(&[])
         );
         // A value flag at the very end without its value is not replayed half.
@@ -317,7 +349,9 @@ mod tests {
     /// and its input; the Notification that follows ~6 s later only has a generic message.
     #[test]
     fn permission_hooks_from_real_claude() {
-        let Some(Kind::Hook { event, message, .. }) = parse("hook", &fixture("hook_PermissionRequest")) else { panic!() };
+        let Some(Kind::Hook { event, message, .. }) = parse("hook", &fixture("hook_PermissionRequest")) else {
+            panic!()
+        };
         assert_eq!(event, "PermissionRequest");
         assert_eq!(message.as_deref(), Some("Wants to run a command"), "the command itself is never shown");
         let want = Kind::Hook {
@@ -338,7 +372,9 @@ mod tests {
     #[test]
     fn tool_hooks_from_real_claude() {
         let get = |name: &str| match parse("hook", &fixture(name)) {
-            Some(Kind::Hook { event, session_id, tool, tool_use_id, path, .. }) => (event, session_id, tool, tool_use_id, path),
+            Some(Kind::Hook { event, session_id, tool, tool_use_id, path, .. }) => {
+                (event, session_id, tool, tool_use_id, path)
+            }
             other => panic!("{name}: {other:?}"),
         };
         let repo = "/tmp/scratch/capture2/repo";
@@ -350,7 +386,11 @@ mod tests {
         ] {
             let (event, session, _, id, path) = get(name);
             assert_eq!(event, "PostToolUse");
-            assert_eq!(session.as_deref(), Some("00000000-0000-4000-8000-000000000002"), "{name}: one session, subagents too");
+            assert_eq!(
+                session.as_deref(),
+                Some("00000000-0000-4000-8000-000000000002"),
+                "{name}: one session, subagents too"
+            );
             assert!(id.is_some());
             assert_eq!(path, Some(format!("{repo}/{file}")), "{name}");
         }

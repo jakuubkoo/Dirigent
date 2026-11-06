@@ -1,13 +1,12 @@
 //! Small shared UI pieces built from theme tokens: icons, tooltips, pills, meters, time formatting.
 
 use gpui::{
-    prelude::FluentBuilder as _,
-    AnyElement, AnyView, App, AppContext, Context, Div, IntoElement, ParentElement, Render, Rgba, SharedString, Styled, Svg, Window,
-    div, svg,
+    AnyElement, AnyView, App, AppContext, Context, Div, IntoElement, ParentElement, Render, Rgba, SharedString, Styled,
+    Svg, Window, div, prelude::FluentBuilder as _, svg,
 };
 
 use crate::line_edit::LineEdit;
-use crate::theme::{z, self, radius, space, text_size};
+use crate::theme::{self, radius, space, text_size, z};
 
 pub mod icon {
     pub const CHEVRON_RIGHT: &str = "icons/chevron-right.svg";
@@ -56,12 +55,46 @@ pub mod icon {
 
 #[cfg(test)]
 pub const ALL_ICONS: &[&str] = &[
-    icon::CHEVRON_RIGHT, icon::CHEVRON_DOWN, icon::PLUS, icon::CLOSE, icon::MINIMIZE, icon::MAXIMIZE, icon::RESTORE,
-    icon::SIDEBAR_CLOSE, icon::DOCK_RIGHT_CLOSE, icon::SESSIONS, icon::FILES, icon::CHANGES, icon::DONE, icon::SPINNER,
-    icon::RESUMABLE, icon::WARNING, icon::BRANCH, icon::REFRESH, icon::RESTART, icon::SHOW, icon::HIDE, icon::FOLDER,
-    icon::FOLDER_OPEN, icon::FILE, icon::FILE_CODE, icon::FILE_TEXT, icon::FILE_JSON, icon::FILE_CONFIG,
-    icon::FILE_LOCK, icon::FILE_IMAGE, icon::FILE_SHELL, icon::FILE_ARCHIVE, icon::TERMINAL,
-    icon::SHARED, icon::VIA_COMMAND, icon::GENERATE, icon::PIN, icon::MORE, icon::SETTINGS, icon::SEARCH,
+    icon::CHEVRON_RIGHT,
+    icon::CHEVRON_DOWN,
+    icon::PLUS,
+    icon::CLOSE,
+    icon::MINIMIZE,
+    icon::MAXIMIZE,
+    icon::RESTORE,
+    icon::SIDEBAR_CLOSE,
+    icon::DOCK_RIGHT_CLOSE,
+    icon::SESSIONS,
+    icon::FILES,
+    icon::CHANGES,
+    icon::DONE,
+    icon::SPINNER,
+    icon::RESUMABLE,
+    icon::WARNING,
+    icon::BRANCH,
+    icon::REFRESH,
+    icon::RESTART,
+    icon::SHOW,
+    icon::HIDE,
+    icon::FOLDER,
+    icon::FOLDER_OPEN,
+    icon::FILE,
+    icon::FILE_CODE,
+    icon::FILE_TEXT,
+    icon::FILE_JSON,
+    icon::FILE_CONFIG,
+    icon::FILE_LOCK,
+    icon::FILE_IMAGE,
+    icon::FILE_SHELL,
+    icon::FILE_ARCHIVE,
+    icon::TERMINAL,
+    icon::SHARED,
+    icon::VIA_COMMAND,
+    icon::GENERATE,
+    icon::PIN,
+    icon::MORE,
+    icon::SETTINGS,
+    icon::SEARCH,
 ];
 
 /// An icon at `size` px in `color` (rasterized once per path/size, recolored for free).
@@ -75,8 +108,10 @@ pub fn file_icon(name: &str) -> &'static str {
     let ext = lower.rsplit_once('.').map_or("", |(_, e)| e);
     match ext {
         _ if lower.ends_with(".lock") || lower == "package-lock.json" => icon::FILE_LOCK,
-        "rs" | "c" | "h" | "cc" | "cpp" | "hpp" | "go" | "py" | "js" | "jsx" | "ts" | "tsx" | "java" | "kt" | "swift"
-        | "rb" | "php" | "cs" | "zig" | "lua" | "html" | "css" | "scss" | "vue" | "svelte" | "sql" => icon::FILE_CODE,
+        "rs" | "c" | "h" | "cc" | "cpp" | "hpp" | "go" | "py" | "js" | "jsx" | "ts" | "tsx" | "java" | "kt"
+        | "swift" | "rb" | "php" | "cs" | "zig" | "lua" | "html" | "css" | "scss" | "vue" | "svelte" | "sql" => {
+            icon::FILE_CODE
+        }
         "md" | "txt" | "rst" | "adoc" | "log" => icon::FILE_TEXT,
         "json" | "jsonc" | "json5" => icon::FILE_JSON,
         "toml" | "yaml" | "yml" | "ini" | "conf" | "cfg" | "env" | "xml" => icon::FILE_CONFIG,
@@ -123,7 +158,9 @@ pub fn text_input(edit: &LineEdit, focused: bool, placeholder: &'static str) -> 
         .border_1()
         .border_color(if focused { t.accent } else { t.border.subtle })
         .text_size(z(text_size::SM))
-        .when(edit.text.is_empty(), |d| d.when(focused, |d| d.child(caret())).child(div().text_color(t.text.faint).child(placeholder)))
+        .when(edit.text.is_empty(), |d| {
+            d.when(focused, |d| d.child(caret())).child(div().text_color(t.text.faint).child(placeholder))
+        })
         .when(!edit.text.is_empty(), |d| {
             d.child(div().flex_none().whitespace_nowrap().child(edit.before_cursor().to_string()))
                 .when(focused, |d| d.child(caret()))
@@ -161,7 +198,13 @@ pub fn fmt_ago(secs: i64) -> String {
 /// A thin horizontal meter (limits).
 pub fn meter(pct: f32, width: f32) -> impl IntoElement {
     let m = &theme::get().meter;
-    let color = if pct >= 90. { m.crit } else if pct >= 70. { m.warn } else { m.ok };
+    let color = if pct >= 90. {
+        m.crit
+    } else if pct >= 70. {
+        m.warn
+    } else {
+        m.ok
+    };
     div()
         .flex_none()
         .w(z(width))

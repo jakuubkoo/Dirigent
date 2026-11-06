@@ -113,9 +113,13 @@ impl Workspace {
             Mode::Files => {
                 let (name, _) = quick_open::split_line(rest);
                 let (name, files, run) = (name.to_string(), cc.files.clone(), cc.run);
-                let recent = cc.root.as_ref().and_then(|r| self.projects.get(r)).map(|p| p.recent.clone()).unwrap_or_default();
+                let recent =
+                    cc.root.as_ref().and_then(|r| self.projects.get(r)).map(|p| p.recent.clone()).unwrap_or_default();
                 cx.spawn(async move |this, cx| {
-                    let hits = cx.background_executor().spawn(async move { quick_open::filter(&name, &files, &recent, LIMIT) }).await;
+                    let hits = cx
+                        .background_executor()
+                        .spawn(async move { quick_open::filter(&name, &files, &recent, LIMIT) })
+                        .await;
                     let _ = this.update(cx, |w, cx| {
                         if let Some(Modal::CommandCenter(cc)) = &mut w.modal
                             && cc.run == run
@@ -134,7 +138,9 @@ impl Workspace {
                     .commands
                     .iter()
                     .enumerate()
-                    .filter_map(|(i, (_, label, _))| crate::projects::fuzzy(rest, label).map(|m| (m.score, Row::Command(i, m.chars))))
+                    .filter_map(|(i, (_, label, _))| {
+                        crate::projects::fuzzy(rest, label).map(|m| (m.score, Row::Command(i, m.chars)))
+                    })
                     .collect();
                 if !rest.is_empty() {
                     rows.sort_by_key(|r| std::cmp::Reverse(r.0));
@@ -319,9 +325,17 @@ impl Workspace {
                     .child(cc.edit.before_cursor().to_string())
                     .child(div().flex_none().w(z(1.5)).h(z(15.)).bg(t.accent))
                     .child(cc.edit.after_cursor().to_string())
-                    .when(cc.edit.text.is_empty(), |d| d.child(div().text_color(t.text.faint).child("Go to file  ·  > command  ·  # search in files  ·  : line"))),
+                    .when(cc.edit.text.is_empty(), |d| {
+                        d.child(
+                            div()
+                                .text_color(t.text.faint)
+                                .child("Go to file  ·  > command  ·  # search in files  ·  : line"),
+                        )
+                    }),
             );
-        let note = |s: String| div().px(z(space::MD)).py(z(space::MD)).text_size(z(text_size::SM)).text_color(t.text.dim).child(s);
+        let note = |s: String| {
+            div().px(z(space::MD)).py(z(space::MD)).text_size(z(text_size::SM)).text_color(t.text.dim).child(s)
+        };
         let body: AnyElement = match mode {
             Mode::Files | Mode::Commands if !cc.rows.is_empty() => {
                 let h = z(ROW) * (cc.rows.len() as f32).min(ROWS);
@@ -367,7 +381,9 @@ impl Workspace {
                 .text_color(t.text.faint)
                 .child("Enter open · Ctrl+Enter diff · name:42 line")
                 .child(div().flex_1())
-                .when(cc.capped, |d| d.child(div().text_color(t.state.needs_you).child("Too many files: not all indexed")))
+                .when(cc.capped, |d| {
+                    d.child(div().text_color(t.state.needs_you).child("Too many files: not all indexed"))
+                })
                 .child(
                     div()
                         .id("cc-ignored")
@@ -413,7 +429,12 @@ impl Workspace {
 }
 
 /// Matched byte offsets → highlight ranges (whole chars) within `text`, starting at byte `from`.
-fn ranges(text: &str, hl: &[usize], from: usize, style: HighlightStyle) -> Vec<(std::ops::Range<usize>, HighlightStyle)> {
+fn ranges(
+    text: &str,
+    hl: &[usize],
+    from: usize,
+    style: HighlightStyle,
+) -> Vec<(std::ops::Range<usize>, HighlightStyle)> {
     hl.iter()
         .filter(|&&b| b >= from && b < from + text.len() && text.is_char_boundary(b - from))
         .map(|&b| {
@@ -426,7 +447,11 @@ fn ranges(text: &str, hl: &[usize], from: usize, style: HighlightStyle) -> Vec<(
 
 fn cc_row(cc: &Cc, i: usize, cx: &mut Context<Workspace>) -> AnyElement {
     let t = theme::get();
-    let style = HighlightStyle { color: Some(t.accent.into()), font_weight: Some(gpui::FontWeight::BOLD), ..Default::default() };
+    let style = HighlightStyle {
+        color: Some(t.accent.into()),
+        font_weight: Some(gpui::FontWeight::BOLD),
+        ..Default::default()
+    };
     let row = div()
         .id(("cc", i))
         .w_full()
@@ -440,29 +465,49 @@ fn cc_row(cc: &Cc, i: usize, cx: &mut Context<Workspace>) -> AnyElement {
         .cursor_pointer()
         .when(i == cc.sel, |d| d.bg(t.bg.selected))
         .hover(|s| s.bg(t.bg.hover))
-        .on_click(cx.listener(move |w, e: &ClickEvent, window, cx| w.cc_run(Some(i), e.modifiers().control, window, cx)));
+        .on_click(
+            cx.listener(move |w, e: &ClickEvent, window, cx| w.cc_run(Some(i), e.modifiers().control, window, cx)),
+        );
     match &cc.rows[i] {
         Row::File(hit) => {
             let Some(e) = cc.files.get(hit.ix) else { return row.into_any_element() };
             let (dir, name) = (&e.rel[..e.name], &e.rel[e.name..]);
             row.child(ui::icon(icon::FILE, 13., t.text.dim))
-                .child(div().flex_none().child(StyledText::new(SharedString::from(name.to_string())).with_highlights(ranges(name, &hit.hl, e.name, style))))
                 .child(
-                    div()
-                        .min_w_0()
-                        .truncate()
-                        .text_size(z(text_size::XS))
-                        .text_color(t.text.dim)
-                        .child(StyledText::new(SharedString::from(dir.trim_end_matches('/').to_string())).with_highlights(ranges(dir.trim_end_matches('/'), &hit.hl, 0, style))),
+                    div().flex_none().child(
+                        StyledText::new(SharedString::from(name.to_string()))
+                            .with_highlights(ranges(name, &hit.hl, e.name, style)),
+                    ),
                 )
+                .child(div().min_w_0().truncate().text_size(z(text_size::XS)).text_color(t.text.dim).child(
+                    StyledText::new(SharedString::from(dir.trim_end_matches('/').to_string())).with_highlights(ranges(
+                        dir.trim_end_matches('/'),
+                        &hit.hl,
+                        0,
+                        style,
+                    )),
+                ))
                 .into_any_element()
         }
         Row::Command(c, hl) => {
             let (keys, label, _) = &cc.commands[*c];
             // `fuzzy` gives char indices: the labels are ASCII.
-            row.child(div().flex_1().min_w_0().truncate().child(StyledText::new(SharedString::from(*label)).with_highlights(ranges(label, hl, 0, style))))
-                .child(div().flex_none().font_family(MONO_FONT).text_size(z(text_size::XS)).text_color(t.text.dim).child(crate::keys::pretty(keys)))
-                .into_any_element()
+            row.child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .truncate()
+                    .child(StyledText::new(SharedString::from(*label)).with_highlights(ranges(label, hl, 0, style))),
+            )
+            .child(
+                div()
+                    .flex_none()
+                    .font_family(MONO_FONT)
+                    .text_size(z(text_size::XS))
+                    .text_color(t.text.dim)
+                    .child(crate::keys::pretty(keys)),
+            )
+            .into_any_element()
         }
     }
 }

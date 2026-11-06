@@ -15,7 +15,7 @@ use session::mouse::{self, Button, Kind};
 use session::{Session, Size, select};
 
 use crate::terminal_element::{Metrics, TerminalElement};
-use crate::theme::{z, self, MONO_FONT, radius, space, text_size};
+use crate::theme::{self, MONO_FONT, radius, space, text_size, z};
 use crate::ui::{self, icon};
 use crate::workspace::Workspace;
 
@@ -251,7 +251,13 @@ impl TerminalView {
         let y = f32::from(pos.y - b.origin.y) / f32::from(self.metrics.line_height);
         let col = (x as usize).min(cols - 1);
         let side = if x as usize >= cols || x.fract() >= 0.5 { Side::Right } else { Side::Left };
-        let edge = if y < 0. { -1 } else if y >= rows as f32 { 1 } else { 0 };
+        let edge = if y < 0. {
+            -1
+        } else if y >= rows as f32 {
+            1
+        } else {
+            0
+        };
         (col, (y.max(0.) as usize).min(rows - 1), side, edge)
     }
 
@@ -319,7 +325,9 @@ impl TerminalView {
             Target::Url(url) => match url.strip_prefix("file://") {
                 // file://host/path: the path starts at the first '/'.
                 Some(rest) => (rest.find('/').map(|i| rest[i..].to_string()).unwrap_or_default(), None),
-                None if ["http://", "https://", "mailto:"].iter().any(|s| url.starts_with(s)) => return cx.open_url(&url),
+                None if ["http://", "https://", "mailto:"].iter().any(|s| url.starts_with(s)) => {
+                    return cx.open_url(&url);
+                }
                 None => return,
             },
             Target::Path { path, line, .. } => (path, line),
@@ -339,7 +347,8 @@ impl TerminalView {
         let (col, row, side, _) = self.cell_at(ev.position);
         let m = ev.modifiers;
         // Ctrl+click on a link is always ours, also while the app takes the mouse.
-        if m.control && ev.button == MouseButton::Left
+        if m.control
+            && ev.button == MouseButton::Left
             && let Some(link) = self.link_at(ev.position, true)
         {
             return self.open_link(link.target, window, cx);
@@ -443,7 +452,8 @@ impl TerminalView {
         }
         let b = self.grid_bounds.get();
         let lh = f32::from(self.metrics.line_height);
-        let out = if edge < 0 { f32::from(b.origin.y - self.drag_at.y) } else { f32::from(self.drag_at.y - b.bottom()) };
+        let out =
+            if edge < 0 { f32::from(b.origin.y - self.drag_at.y) } else { f32::from(self.drag_at.y - b.bottom()) };
         let lines = 1 + ((out / lh) as i32).min(2);
         self.session.scroll(if edge < 0 { lines } else { -lines });
         {
@@ -542,7 +552,9 @@ impl Render for TerminalView {
         let t = theme::get();
         let banner = self.banner.as_ref().map(|b| {
             let (glyph, label, cmd, hint) = match b {
-                Banner::Resume(cmd) => (icon::RESUMABLE, "Resume Claude session?", Some(cmd.clone()), "Enter resume · Esc plain shell"),
+                Banner::Resume(cmd) => {
+                    (icon::RESUMABLE, "Resume Claude session?", Some(cmd.clone()), "Enter resume · Esc plain shell")
+                }
                 Banner::Gone => (icon::WARNING, "That Claude session no longer exists.", None, "Esc to dismiss"),
             };
             div()

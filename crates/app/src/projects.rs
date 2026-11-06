@@ -87,7 +87,13 @@ impl Projects {
             None => {
                 self.0.push(Project { root: root.to_path_buf(), last_used: now, ..Default::default() });
                 if self.0.len() > MAX_PROJECTS
-                    && let Some(oldest) = self.0.iter().enumerate().filter(|(_, p)| !p.pinned).min_by_key(|(_, p)| p.last_used).map(|(i, _)| i)
+                    && let Some(oldest) = self
+                        .0
+                        .iter()
+                        .enumerate()
+                        .filter(|(_, p)| !p.pinned)
+                        .min_by_key(|(_, p)| p.last_used)
+                        .map(|(i, _)| i)
                 {
                     self.0.remove(oldest);
                 }
@@ -182,7 +188,9 @@ pub fn fuzzy(query: &str, text: &str) -> Option<Match> {
     let t: Vec<char> = text.chars().collect();
     let lower: Vec<char> = t.iter().map(|c| c.to_lowercase().next().unwrap_or(*c)).collect();
     let q: Vec<char> = query.chars().flat_map(char::to_lowercase).collect();
-    let starts = |i: usize| i == 0 || matches!(t[i - 1], '/' | '-' | '_' | '.' | ' ') || (t[i - 1].is_lowercase() && t[i].is_uppercase());
+    let starts = |i: usize| {
+        i == 0 || matches!(t[i - 1], '/' | '-' | '_' | '.' | ' ') || (t[i - 1].is_lowercase() && t[i].is_uppercase())
+    };
     fuzzy_core(&q, &lower, starts)
 }
 
@@ -291,7 +299,12 @@ mod tests {
     #[test]
     fn typed_defaults_keep_only_safe_flags_and_resolve_dirs() {
         let mut p = Project { root: "/r/app".into(), ..Default::default() };
-        let t = Typed { auto: true, flags: "--model opus --dangerously-skip-permissions --permission-mode bypassPermissions hi", setup: "  ", wt_dir: "~/wt" };
+        let t = Typed {
+            auto: true,
+            flags: "--model opus --dangerously-skip-permissions --permission-mode bypassPermissions hi",
+            setup: "  ",
+            wt_dir: "~/wt",
+        };
         p.apply_defaults(&t, Path::new("/home/u"));
         assert!(p.auto_claude);
         assert_eq!(p.claude_args, vec!["--model", "opus"], "bypasses and the prompt never stored");
@@ -342,7 +355,10 @@ mod tests {
         let args = vec!["--model".to_string(), "opus".to_string()];
         assert_eq!(start_line(None, false, &args, Some("x")), None);
         assert_eq!(start_line(None, true, &args, None).unwrap(), "claude --model opus");
-        assert_eq!(start_line(Some(" pnpm install "), true, &[], Some("Fix the\n'login' $bug")).unwrap(), "pnpm install && claude -- 'Fix the '\\''login'\\'' $bug'");
+        assert_eq!(
+            start_line(Some(" pnpm install "), true, &[], Some("Fix the\n'login' $bug")).unwrap(),
+            "pnpm install && claude -- 'Fix the '\\''login'\\'' $bug'"
+        );
         assert_eq!(start_line(Some("cargo fetch"), false, &[], None).unwrap(), "cargo fetch");
         assert_eq!(start_line(Some("  "), true, &[], Some("  ")).unwrap(), "claude");
     }

@@ -246,11 +246,27 @@ mod wayland {
     struct Act;
 
     impl Dispatch<WlRegistry, GlobalListContents> for Act {
-        fn event(_: &mut Self, _: &WlRegistry, _: wl_registry::Event, _: &GlobalListContents, _: &Connection, _: &QueueHandle<Self>) {}
+        fn event(
+            _: &mut Self,
+            _: &WlRegistry,
+            _: wl_registry::Event,
+            _: &GlobalListContents,
+            _: &Connection,
+            _: &QueueHandle<Self>,
+        ) {
+        }
     }
 
     impl Dispatch<XdgActivationV1, ()> for Act {
-        fn event(_: &mut Self, _: &XdgActivationV1, _: xdg_activation_v1::Event, _: &(), _: &Connection, _: &QueueHandle<Self>) {}
+        fn event(
+            _: &mut Self,
+            _: &XdgActivationV1,
+            _: xdg_activation_v1::Event,
+            _: &(),
+            _: &Connection,
+            _: &QueueHandle<Self>,
+        ) {
+        }
     }
 
     thread_local! {
@@ -261,7 +277,9 @@ mod wayland {
     /// `xdg_activation_v1.activate(token, <the window's surface>)`; None when not on Wayland or on any error.
     pub fn activate(window: &gpui::Window, token: &str) -> Option<()> {
         let RawDisplayHandle::Wayland(display) = window.display_handle().ok()?.as_raw() else { return None };
-        let RawWindowHandle::Wayland(surface) = HasWindowHandle::window_handle(window).ok()?.as_raw() else { return None };
+        let RawWindowHandle::Wayland(surface) = HasWindowHandle::window_handle(window).ok()?.as_raw() else {
+            return None;
+        };
         BOUND.with_borrow_mut(|bound| {
             if bound.is_none() {
                 // Safety: gpui's wl_display lives as long as the app (and so as this thread-local's users).

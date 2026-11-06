@@ -47,8 +47,12 @@ fn main() {
 fn statusline(input: &str) {
     if std::env::var_os(NESTED).is_none()
         && let Some(cmd) = user_statusline()
-        && let Ok(mut child) =
-            Command::new("sh").args(["-c", &cmd]).env(NESTED, "1").stdin(Stdio::piped()).stdout(Stdio::inherit()).spawn()
+        && let Ok(mut child) = Command::new("sh")
+            .args(["-c", &cmd])
+            .env(NESTED, "1")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::inherit())
+            .spawn()
     {
         if let Some(mut stdin) = child.stdin.take() {
             let _ = stdin.write_all(input.as_bytes());

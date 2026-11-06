@@ -5,21 +5,21 @@ use std::cell::Cell;
 use std::rc::Rc;
 use std::time::Instant;
 
+use gpui::DispatchPhase;
 use gpui::{
     App, Bounds, Element, ElementId, Font, FontStyle, FontWeight, GlobalElementId, Hsla, InspectorElementId,
     IntoElement, LayoutId, MouseMoveEvent, MouseUpEvent, Pixels, ShapedLine, SharedString, StrikethroughStyle, Style,
     TextAlign, TextRun, UnderlineStyle, WeakEntity, Window, fill, font, point, relative, size,
 };
-use gpui::DispatchPhase;
-use session::alacritty_terminal::index::Point as GridPoint;
+use session::Session;
 use session::alacritty_terminal::grid::Dimensions;
+use session::alacritty_terminal::index::Point as GridPoint;
 use session::alacritty_terminal::term::cell::Flags;
 use session::alacritty_terminal::term::color::Colors;
 use session::alacritty_terminal::vte::ansi::{Color, CursorShape, NamedColor};
-use session::Session;
 
 use crate::terminal_view::TerminalView;
-use crate::theme::{z, self, MONO_FONT};
+use crate::theme::{self, MONO_FONT, z};
 
 #[derive(Clone)]
 pub struct Metrics {
@@ -219,7 +219,11 @@ impl Element for TerminalElement {
                         _ => rects.push((row, col, width, bg)),
                     }
                 }
-                if cell.c == ' ' && cell.zerowidth().is_none() && !linked && !flags.intersects(Flags::ALL_UNDERLINES | Flags::STRIKEOUT) {
+                if cell.c == ' '
+                    && cell.zerowidth().is_none()
+                    && !linked
+                    && !flags.intersects(Flags::ALL_UNDERLINES | Flags::STRIKEOUT)
+                {
                     continue; // blanks are not shaped; a segment ends at the gap
                 }
 
@@ -252,8 +256,22 @@ impl Element for TerminalElement {
                 seg.cells += width;
                 let len = seg.text.len() - start;
                 match seg.runs.last_mut() {
-                    Some(r) if r.color == fg && r.font == run_font && r.underline == underline && r.strikethrough == strikethrough => r.len += len,
-                    _ => seg.runs.push(TextRun { len, font: run_font, color: fg, background_color: None, underline, strikethrough }),
+                    Some(r)
+                        if r.color == fg
+                            && r.font == run_font
+                            && r.underline == underline
+                            && r.strikethrough == strikethrough =>
+                    {
+                        r.len += len
+                    }
+                    _ => seg.runs.push(TextRun {
+                        len,
+                        font: run_font,
+                        color: fg,
+                        background_color: None,
+                        underline,
+                        strikethrough,
+                    }),
                 }
             }
 

@@ -3,8 +3,8 @@
 
 mod fs;
 pub mod index;
-pub mod search;
 pub mod layout;
+pub mod search;
 pub mod text;
 mod watch;
 pub mod write;
@@ -34,7 +34,9 @@ pub struct Repo {
 impl Repo {
     /// A linked worktree's main checkout (where its shared `.git` lives); None for the main checkout itself.
     pub fn main_root(&self) -> Option<&Path> {
-        (self.common_dir != self.git_dir && self.common_dir.file_name().is_some_and(|n| n == ".git")).then(|| self.common_dir.parent()).flatten()
+        (self.common_dir != self.git_dir && self.common_dir.file_name().is_some_and(|n| n == ".git"))
+            .then(|| self.common_dir.parent())
+            .flatten()
     }
 }
 
@@ -215,7 +217,8 @@ fn parse_status(out: &[u8]) -> (Status, bool) {
                 let mut parts = rest.splitn(n + 1, ' ');
                 let xy: Vec<char> = parts.next().unwrap_or("..").chars().collect();
                 let path = parts.nth(n - 1).unwrap_or("").to_string();
-                let orig = (kind == "2").then(|| fields.next().map(|o| String::from_utf8_lossy(o).into_owned())).flatten();
+                let orig =
+                    (kind == "2").then(|| fields.next().map(|o| String::from_utf8_lossy(o).into_owned())).flatten();
                 let (x, y) = (xy.first().copied().unwrap_or('.'), xy.get(1).copied().unwrap_or('.'));
                 let letter = if kind == "u" {
                     'U'
@@ -405,7 +408,8 @@ mod tests {
         let (st, unborn) = parse_status(out);
         assert!(!unborn);
         assert_eq!(st.branch, "main");
-        let got: Vec<_> = st.files.iter().map(|f| (f.path.as_str(), f.orig.as_deref(), f.kind, f.staged, f.unstaged)).collect();
+        let got: Vec<_> =
+            st.files.iter().map(|f| (f.path.as_str(), f.orig.as_deref(), f.kind, f.staged, f.unstaged)).collect();
         assert_eq!(
             got,
             vec![

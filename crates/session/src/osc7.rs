@@ -103,10 +103,7 @@ fn decode(b: &[u8]) -> Vec<u8> {
     let mut i = 0;
     while i < b.len() {
         if b[i] == b'%'
-            && let (Some(h), Some(l)) = (
-                b.get(i + 1).and_then(|&c| hex(c)),
-                b.get(i + 2).and_then(|&c| hex(c)),
-            )
+            && let (Some(h), Some(l)) = (b.get(i + 1).and_then(|&c| hex(c)), b.get(i + 2).and_then(|&c| hex(c)))
         {
             out.push(h << 4 | l);
             i += 3;
@@ -120,9 +117,7 @@ fn decode(b: &[u8]) -> Vec<u8> {
 
 /// This machine's hostname (what zsh's `$HOST` holds).
 pub fn hostname() -> String {
-    std::fs::read_to_string("/proc/sys/kernel/hostname")
-        .map(|s| s.trim().to_string())
-        .unwrap_or_default()
+    std::fs::read_to_string("/proc/sys/kernel/hostname").map(|s| s.trim().to_string()).unwrap_or_default()
 }
 
 #[cfg(test)]
@@ -136,19 +131,10 @@ mod tests {
 
     #[test]
     fn finds_bel_and_st_terminated() {
-        assert_eq!(
-            scan_all(&[b"ab\x1b]7;file://h/x\x07cd"]),
-            vec![b"file://h/x".to_vec()]
-        );
-        assert_eq!(
-            scan_all(&[b"\x1b[0m\x1b]7;file://h/y\x1b\\$ "]),
-            vec![b"file://h/y".to_vec()]
-        );
+        assert_eq!(scan_all(&[b"ab\x1b]7;file://h/x\x07cd"]), vec![b"file://h/x".to_vec()]);
+        assert_eq!(scan_all(&[b"\x1b[0m\x1b]7;file://h/y\x1b\\$ "]), vec![b"file://h/y".to_vec()]);
         // Several in one chunk: the last one wins.
-        assert_eq!(
-            scan_all(&[b"\x1b]7;file:///a\x07\x1b]7;file:///b\x07"]),
-            vec![b"file:///b".to_vec()]
-        );
+        assert_eq!(scan_all(&[b"\x1b]7;file:///a\x07\x1b]7;file:///b\x07"]), vec![b"file:///b".to_vec()]);
         // Other OSCs are not ours.
         assert!(scan_all(&[b"\x1b]0;title\x07\x1b]8;;http://x\x07"]).is_empty());
     }
@@ -159,10 +145,7 @@ mod tests {
             scan_all(&[b"x\x1b]7;file://h/ho", b"me/j", b"ak\x1b", b"\\rest"]),
             vec![b"file://h/home/jak".to_vec()]
         );
-        assert_eq!(
-            scan_all(&[b"\x1b]7;", b"file:///t\x07"]),
-            vec![b"file:///t".to_vec()]
-        );
+        assert_eq!(scan_all(&[b"\x1b]7;", b"file:///t\x07"]), vec![b"file:///t".to_vec()]);
         // An unterminated, endless one is dropped instead of growing forever.
         let big = vec![b'a'; MAX + 10];
         assert!(scan_all(&[b"\x1b]7;", &big, b"\x07"]).is_empty());
@@ -170,21 +153,11 @@ mod tests {
 
     #[test]
     fn parses_local_paths_only() {
-        assert_eq!(
-            parse(b"file://box/home/j/my%20dir", "box"),
-            Some("/home/j/my dir".into())
-        );
+        assert_eq!(parse(b"file://box/home/j/my%20dir", "box"), Some("/home/j/my dir".into()));
         assert_eq!(parse(b"file:///tmp", "box"), Some("/tmp".into()));
-        assert_eq!(
-            parse(b"file://localhost/tmp/100%25", "box"),
-            Some("/tmp/100%".into())
-        );
+        assert_eq!(parse(b"file://localhost/tmp/100%25", "box"), Some("/tmp/100%".into()));
         assert_eq!(parse(b"file://other/etc", "box"), None, "remote shell");
         assert_eq!(parse(b"http://box/etc", "box"), None);
-        assert_eq!(
-            parse(b"file://box/a%zzb", "box"),
-            Some("/a%zzb".into()),
-            "bad escape kept as-is"
-        );
+        assert_eq!(parse(b"file://box/a%zzb", "box"), Some("/a%zzb".into()), "bad escape kept as-is");
     }
 }

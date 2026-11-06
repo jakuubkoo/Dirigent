@@ -78,14 +78,10 @@ pub fn resize_handles(tiling: Tiling) -> Vec<AnyElement> {
     use ResizeEdge::*;
     let (t, b, l, r) = (!tiling.top, !tiling.bottom, !tiling.left, !tiling.right);
     let handle = |id: &'static str, edge: ResizeEdge, cursor: CursorStyle| {
-        div()
-            .id(id)
-            .absolute()
-            .cursor(cursor)
-            .on_mouse_down(MouseButton::Left, move |_, window, cx| {
-                window.start_window_resize(edge);
-                cx.stop_propagation();
-            })
+        div().id(id).absolute().cursor(cursor).on_mouse_down(MouseButton::Left, move |_, window, cx| {
+            window.start_window_resize(edge);
+            cx.stop_propagation();
+        })
     };
     let (e, c) = (z(EDGE), z(CORNER));
     let mut out = Vec::new();

@@ -212,8 +212,20 @@ impl TextArea {
                 self.delete(sel);
                 Key::Copy(cut)
             }
-            ("z", true) if !shift => if self.restore(true) { Key::Changed } else { Key::Ignored },
-            ("z", true) | ("y", true) => if self.restore(false) { Key::Changed } else { Key::Ignored },
+            ("z", true) if !shift => {
+                if self.restore(true) {
+                    Key::Changed
+                } else {
+                    Key::Ignored
+                }
+            }
+            ("z", true) | ("y", true) => {
+                if self.restore(false) {
+                    Key::Changed
+                } else {
+                    Key::Ignored
+                }
+            }
             ("backspace", _) => {
                 let r = if !sel.is_empty() {
                     sel
@@ -222,7 +234,9 @@ impl TextArea {
                 } else {
                     self.prev_char(self.cursor)..self.cursor
                 };
-                if r.is_empty() { Key::Ignored } else {
+                if r.is_empty() {
+                    Key::Ignored
+                } else {
                     self.delete(r);
                     Key::Changed
                 }
@@ -235,7 +249,9 @@ impl TextArea {
                 } else {
                     self.cursor..self.next_char(self.cursor)
                 };
-                if r.is_empty() { Key::Ignored } else {
+                if r.is_empty() {
+                    Key::Ignored
+                } else {
                     self.delete(r);
                     Key::Changed
                 }

@@ -22,7 +22,12 @@ impl Query {
     pub fn compile(&self) -> Result<Regex, String> {
         let pat = if self.regex { self.text.clone() } else { regex::escape(&self.text) };
         let pat = if self.word { format!(r"\b(?:{pat})\b") } else { pat };
-        RegexBuilder::new(&pat).case_insensitive(!self.case).multi_line(true).size_limit(1 << 22).build().map_err(|e| e.to_string())
+        RegexBuilder::new(&pat)
+            .case_insensitive(!self.case)
+            .multi_line(true)
+            .size_limit(1 << 22)
+            .build()
+            .map_err(|e| e.to_string())
     }
 }
 
@@ -176,8 +181,10 @@ mod tests {
         );
         // Plain text, case-insensitive by default; one row per line; a `.` is literal.
         let r = run(&d, &files, q("foo"));
-        assert_eq!(r.iter().map(|f| (f.rel.as_str(), f.hits.iter().map(|h| h.line).collect::<Vec<_>>())).collect::<Vec<_>>(),
-            [("a.rs", vec![2, 4]), ("b/c.rs", vec![2])]);
+        assert_eq!(
+            r.iter().map(|f| (f.rel.as_str(), f.hits.iter().map(|h| h.line).collect::<Vec<_>>())).collect::<Vec<_>>(),
+            [("a.rs", vec![2, 4]), ("b/c.rs", vec![2])]
+        );
         let h = &r[0].hits[0];
         assert_eq!((h.text.as_str(), &h.text[h.range.clone()]), ("    let foo = 1; // Foo", "foo"));
         assert_eq!(run(&d, &files, q("o.b")).len(), 1, "plain: the dot is literal");
@@ -197,7 +204,10 @@ mod tests {
     fn skips_binary_and_big_files_and_cuts_long_lines() {
         let big = vec![b'x'; MAX_FILE as usize + 1];
         let long = format!("{}needle{}\n", "a".repeat(1000), "b".repeat(1000));
-        let (d, files) = tmp("skip", &[("bin", b"needle\0\x01"), ("big", &big), ("long.txt", long.as_bytes()), ("crlf.txt", b"x\r\nneedle\r\n")]);
+        let (d, files) = tmp(
+            "skip",
+            &[("bin", b"needle\0\x01"), ("big", &big), ("long.txt", long.as_bytes()), ("crlf.txt", b"x\r\nneedle\r\n")],
+        );
         let r = run(&d, &files, q("needle"));
         assert_eq!(r.iter().map(|f| f.rel.as_str()).collect::<Vec<_>>(), ["crlf.txt", "long.txt"]);
         assert_eq!((r[0].hits[0].line, r[0].hits[0].text.as_str()), (2, "needle"));

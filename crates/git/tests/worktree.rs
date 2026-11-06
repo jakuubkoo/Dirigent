@@ -12,7 +12,16 @@ use git::{Discovery, Watcher};
 
 fn sh(dir: &Path, args: &[&str]) -> String {
     let out = Command::new("git")
-        .args(["-c", "user.name=t", "-c", "user.email=t@t", "-c", "commit.gpgsign=false", "-c", "core.hooksPath=/dev/null"])
+        .args([
+            "-c",
+            "user.name=t",
+            "-c",
+            "user.email=t@t",
+            "-c",
+            "commit.gpgsign=false",
+            "-c",
+            "core.hooksPath=/dev/null",
+        ])
         .args(args)
         .current_dir(dir)
         .output()
@@ -42,7 +51,11 @@ fn add_discover_list_and_errors() {
     let (current, branches) = write::branches(&main).unwrap();
     assert_eq!((current.as_str(), branches), ("main", vec!["main".to_string()]));
     assert!(write::valid_branch(&main, "feat/login-fix"));
-    assert!(!write::valid_branch(&main, "bad..name") && !write::valid_branch(&main, "-x") && !write::valid_branch(&main, ""));
+    assert!(
+        !write::valid_branch(&main, "bad..name")
+            && !write::valid_branch(&main, "-x")
+            && !write::valid_branch(&main, "")
+    );
 
     let feat = wt.join("feat");
     write::worktree_add(&main, "feat", &feat, "main").unwrap();
@@ -66,7 +79,14 @@ fn add_discover_list_and_errors() {
     let list = write::worktree_list(&main).unwrap();
     let paths: Vec<_> = list.iter().map(|w| (w.path.clone(), w.branch.clone(), w.main)).collect();
     // Main first, the rest as git sorts them.
-    assert_eq!(paths, vec![(main.clone(), Some("main".into()), true), (wt.join("ext"), None, false), (feat.clone(), Some("feat".into()), false)]);
+    assert_eq!(
+        paths,
+        vec![
+            (main.clone(), Some("main".into()), true),
+            (wt.join("ext"), None, false),
+            (feat.clone(), Some("feat".into()), false)
+        ]
+    );
 
     // Its directory deleted by hand: prunable, then pruned.
     std::fs::remove_dir_all(wt.join("ext")).unwrap();

@@ -235,11 +235,18 @@ mod tests {
 
     #[test]
     fn projects_missing_in_old_files_and_round_trip() {
-        let old = r#"{"version":1,"tabs":[],"active":0,"sidebar":{"width":220.0,"open":true},"window":null,"last_dir":null}"#;
+        let old =
+            r#"{"version":1,"tabs":[],"active":0,"sidebar":{"width":220.0,"open":true},"window":null,"last_dir":null}"#;
         let st: State = serde_json::from_str(old).unwrap();
         assert_eq!(st.projects, None, "None = seed from the tabs on first load");
         let mut st = st;
-        st.projects = Some(vec![crate::projects::Project { root: "/p".into(), pinned: true, auto_claude: true, claude_args: vec!["--model".into(), "opus".into()], ..Default::default() }]);
+        st.projects = Some(vec![crate::projects::Project {
+            root: "/p".into(),
+            pinned: true,
+            auto_claude: true,
+            claude_args: vec!["--model".into(), "opus".into()],
+            ..Default::default()
+        }]);
         let back: State = serde_json::from_str(&serde_json::to_string(&st).unwrap()).unwrap();
         assert_eq!(back, st);
     }
@@ -280,31 +287,42 @@ mod tests {
         assert!(!p.with_extension("json.tmp").exists(), "temp file renamed away");
         assert_eq!(load(&p), sample());
         // Old files without the optional tab fields still load.
-        std::fs::write(&p, r#"{"version":1,"tabs":[{"name":"a","cwd":"/"}],"active":0,
-            "sidebar":{"width":200,"open":false},"window":null,"last_dir":null}"#).unwrap();
+        std::fs::write(
+            &p,
+            r#"{"version":1,"tabs":[{"name":"a","cwd":"/"}],"active":0,
+            "sidebar":{"width":200,"open":false},"window":null,"last_dir":null}"#,
+        )
+        .unwrap();
         let old = load(&p);
         assert_eq!(old.tabs[0].claude_session, None);
         assert_eq!(old.git_panel, PanelState::default(), "files from before the git panel load with its defaults");
         assert!(old.tabs[0].expanded.is_empty());
         assert_eq!(old.sidebar.tab, PanelTab::Sessions, "files from before the docks: the left dock shows Sessions");
         // Preferences an older file still holds (now in settings.json) are ignored, and the next save drops them.
-        std::fs::write(&p, r#"{"version":1,"tabs":[],"active":0,"sidebar":{"width":200,"open":false},"window":null,
-            "last_dir":null,"diff_mode":"split","notifications":{"done":false}}"#).unwrap();
+        std::fs::write(
+            &p,
+            r#"{"version":1,"tabs":[],"active":0,"sidebar":{"width":200,"open":false},"window":null,
+            "last_dir":null,"diff_mode":"split","notifications":{"done":false}}"#,
+        )
+        .unwrap();
         let st = load(&p);
         save(&p, &st).unwrap();
         let text = std::fs::read_to_string(&p).unwrap();
         assert!(!text.contains("diff_mode") && !text.contains("notifications"), "{text}");
         // A git panel saved before the file tree existed keeps its width/open.
-        std::fs::write(&p, r#"{"version":1,"tabs":[],"active":0,"sidebar":{"width":200,"open":false},"window":null,
-            "last_dir":null,"git_panel":{"width":280,"open":false}}"#).unwrap();
+        std::fs::write(
+            &p,
+            r#"{"version":1,"tabs":[],"active":0,"sidebar":{"width":200,"open":false},"window":null,
+            "last_dir":null,"git_panel":{"width":280,"open":false}}"#,
+        )
+        .unwrap();
         assert_eq!(load(&p).git_panel, PanelState { width: 280., open: false, ..PanelState::default() });
     }
 
     #[test]
     fn corrupted_or_unknown_version_is_backed_up() {
-        for (i, bad) in ["not json", r#"{"version":1,"tabs":"#, r#"{"version":99,"tabs":[]}"#, r#"{"tabs":[]}"#]
-            .iter()
-            .enumerate()
+        for (i, bad) in
+            ["not json", r#"{"version":1,"tabs":"#, r#"{"version":99,"tabs":[]}"#, r#"{"tabs":[]}"#].iter().enumerate()
         {
             let p = tmp(&format!("bad{i}"));
             std::fs::write(&p, bad).unwrap();

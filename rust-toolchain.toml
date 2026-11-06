@@ -1,0 +1,5 @@
+[toolchain]
+# Local builds and CI use the same compiler (rustup picks this up).
+channel = "1.99.1"
+components = ["rustfmt", "clippy"]
+profile = "minimal"

@@ -18,20 +18,47 @@ use crate::diff_syntax::{self, syntax_off};
 use crate::file_tree::{self, Marks, Row};
 use crate::files_panel::{Content, FileView, FilesPanel, TreeData};
 use crate::git_panel::{self, DiffView, GitPanel, PanelView, Repos};
+use crate::layout::{self, Dock, Panel};
 use crate::line_edit::{Edit, LineEdit};
 use crate::notify;
-use crate::layout::{self, Dock, Panel};
 use crate::persist::{self, State as Saved, TabState, WindowMode, WindowState};
 use crate::settings::{self, Settings};
-use crate::window_chrome::{self, Chrome};
 use crate::terminal_element::Metrics;
 use crate::terminal_view::{Banner, PADDING, TerminalView};
+use crate::window_chrome::{self, Chrome};
 
 actions!(
     dirigent,
     [
-        NewSession, NewInProject, CloseSession, NextSession, PrevSession, Rename, ToggleSidebar, NextNeedsYou, ResumeAll, ShowChanges, ShowFiles, ToggleDiffMode, OpenSettings, ZoomIn, ZoomOut, ZoomReset, SessionMenu, QuickOpen, CommandPalette, FindInFiles,
-        Activate1, Activate2, Activate3, Activate4, Activate5, Activate6, Activate7, Activate8, Activate9
+        NewSession,
+        NewInProject,
+        CloseSession,
+        NextSession,
+        PrevSession,
+        Rename,
+        ToggleSidebar,
+        NextNeedsYou,
+        ResumeAll,
+        ShowChanges,
+        ShowFiles,
+        ToggleDiffMode,
+        OpenSettings,
+        ZoomIn,
+        ZoomOut,
+        ZoomReset,
+        SessionMenu,
+        QuickOpen,
+        CommandPalette,
+        FindInFiles,
+        Activate1,
+        Activate2,
+        Activate3,
+        Activate4,
+        Activate5,
+        Activate6,
+        Activate7,
+        Activate8,
+        Activate9
     ]
 );
 
@@ -118,8 +145,14 @@ enum TabRepo {
 enum Modal {
     /// New session: the project picker (Ctrl+Shift+T, the title-bar `+`).
     Picker(Box<projects_ui::Picker>),
-    Rename { tab: usize, edit: LineEdit },
-    ProjectRename { root: PathBuf, edit: LineEdit },
+    Rename {
+        tab: usize,
+        edit: LineEdit,
+    },
+    ProjectRename {
+        root: PathBuf,
+        edit: LineEdit,
+    },
     /// Per-project defaults: start claude in new sessions, its flags (typed; filtered on save).
     ProjectDefaults(Box<Defaults>),
     /// New session setup: name, shared directory or a new worktree, claude + first prompt.
@@ -356,12 +389,8 @@ impl Workspace {
         crate::theme::set_zoom(loaded.parsed.settings.ui_zoom as f32 / 100.);
         window.set_rem_size(gpui::px(16. * crate::theme::zoom())); // unscaled: this is the scaling
         let metrics = Metrics::new(window, loaded.parsed.settings.font_size);
-        let last_dir = saved
-            .last_dir
-            .clone()
-            .filter(|d| d.is_dir())
-            .or_else(|| std::env::current_dir().ok())
-            .unwrap_or_else(home);
+        let last_dir =
+            saved.last_dir.clone().filter(|d| d.is_dir()).or_else(|| std::env::current_dir().ok()).unwrap_or_else(home);
         let (tracker, tracker_wake) = crate::changes::Tracker::new();
         let (repos, repo_pings) = Repos::new(tracker.clone());
         let repos_task = cx.spawn(async move |this, cx| {
@@ -619,7 +648,11 @@ impl Workspace {
                         })
                         .unwrap_or(0);
                     if rows > 0 || started.elapsed() > Duration::from_secs(10) {
-                        eprintln!("[perf] diff open → rows ready {:.0} ms ({} rows)", started.elapsed().as_secs_f64() * 1e3, rows);
+                        eprintln!(
+                            "[perf] diff open → rows ready {:.0} ms ({} rows)",
+                            started.elapsed().as_secs_f64() * 1e3,
+                            rows
+                        );
                         break;
                     }
                 }
@@ -636,9 +669,10 @@ impl Workspace {
                     }
                     while started.elapsed() < Duration::from_secs(5) {
                         let done = this
-                            .update(cx, |w, cx| {
-                                matches!(&w.overlay, Some(Overlay::Diff(d)) if d.read(cx).structure_settled())
-                            })
+                            .update(
+                                cx,
+                                |w, cx| matches!(&w.overlay, Some(Overlay::Diff(d)) if d.read(cx).structure_settled()),
+                            )
                             .unwrap_or(false);
                         if done {
                             eprintln!("[perf] diff structural settled {:.0} ms", started.elapsed().as_secs_f64() * 1e3);
@@ -677,7 +711,9 @@ impl Workspace {
             cx.spawn_in(window, async move |this, cx| {
                 cx.background_executor().timer(Duration::from_secs(1)).await;
                 let _ = this.update_in(cx, |w, _, cx| {
-                    let Some((group, slots)) = w.groups().into_iter().find(|(_, m)| m.contains(&w.active)) else { return };
+                    let Some((group, slots)) = w.groups().into_iter().find(|(_, m)| m.contains(&w.active)) else {
+                        return;
+                    };
                     let (Some(&first), Some(&last)) = (slots.first(), slots.last()) else { return };
                     let drag = SessionDrag { id: w.tabs[last].id, group, pos: last, name: SharedString::default() };
                     w.drop_session(&drag, first, cx);
@@ -835,8 +871,11 @@ impl Workspace {
                         }
                         if started.is_none() {
                             w.show_panel(Panel::Files, cx);
-                            let dirs: Vec<PathBuf> =
-                                dir.ancestors().take_while(|a| a.starts_with(&root) && *a != root).map(Path::to_path_buf).collect();
+                            let dirs: Vec<PathBuf> = dir
+                                .ancestors()
+                                .take_while(|a| a.starts_with(&root) && *a != root)
+                                .map(Path::to_path_buf)
+                                .collect();
                             started = Some(Instant::now());
                             for d in dirs.into_iter().rev() {
                                 w.tree_action(file_tree::Action::Expand(d), window, cx);
@@ -848,7 +887,10 @@ impl Workspace {
                     if let Ok(Some(rows)) = state
                         && let Some(t) = started
                     {
-                        eprintln!("[perf] tree expand → rows ready {:.1} ms ({rows} rows)", t.elapsed().as_secs_f64() * 1e3);
+                        eprintln!(
+                            "[perf] tree expand → rows ready {:.1} ms ({rows} rows)",
+                            t.elapsed().as_secs_f64() * 1e3
+                        );
                         break;
                     }
                 }
@@ -1066,7 +1108,14 @@ impl Workspace {
                 .background_executor()
                 .spawn(async move {
                     dirs.into_iter()
-                        .map(|(id, d)| (id, d.ancestors().find(|a| a.join(".git").exists()).map(|a| main_checkout(a).unwrap_or_else(|| a.to_path_buf()))))
+                        .map(|(id, d)| {
+                            (
+                                id,
+                                d.ancestors()
+                                    .find(|a| a.join(".git").exists())
+                                    .map(|a| main_checkout(a).unwrap_or_else(|| a.to_path_buf())),
+                            )
+                        })
                         .collect()
                 })
                 .await;
@@ -1094,7 +1143,14 @@ impl Workspace {
     /// Sidebar groups: (repo root or None for "Other", tab indices), see `group_order`.
     fn groups(&self) -> Vec<(Option<PathBuf>, Vec<usize>)> {
         let keys: Vec<Option<PathBuf>> = (0..self.tabs.len()).map(|i| self.tab_group(i)).collect();
-        let pinned: Vec<PathBuf> = self.projects.sorted().into_iter().map(|i| &self.projects.0[i]).filter(|p| p.pinned).map(|p| p.root.clone()).collect();
+        let pinned: Vec<PathBuf> = self
+            .projects
+            .sorted()
+            .into_iter()
+            .map(|i| &self.projects.0[i])
+            .filter(|p| p.pinned)
+            .map(|p| p.root.clone())
+            .collect();
         with_pinned(group_order(&keys), &pinned)
     }
 
@@ -1113,13 +1169,25 @@ impl Workspace {
 
     /// Opens a session in `dir` (picker, group `+`, Ctrl+Shift+N, `dirigent <path>`): its project is remembered;
     /// claude starts when asked, else per the project's default, with the project's flags.
-    pub(super) fn new_session(&mut self, dir: PathBuf, claude: Option<bool>, window: &mut Window, cx: &mut Context<Self>) -> usize {
+    pub(super) fn new_session(
+        &mut self,
+        dir: PathBuf,
+        claude: Option<bool>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> usize {
         self.new_session_with(dir, SessionOpts { claude, ..Default::default() }, window, cx)
     }
 
     /// `new_session` with the setup dialog's choices: name, first prompt, the project (a worktree lies outside its
     /// project's directory) and its setup command (fresh worktrees).
-    pub(super) fn new_session_with(&mut self, dir: PathBuf, opts: SessionOpts, window: &mut Window, cx: &mut Context<Self>) -> usize {
+    pub(super) fn new_session_with(
+        &mut self,
+        dir: PathBuf,
+        opts: SessionOpts,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> usize {
         let project = match &opts.project {
             Some(root) => self.projects.get(root).cloned(),
             None => self.projects.of_dir(&dir).cloned(),
@@ -1132,7 +1200,10 @@ impl Workspace {
         self.mark_dirty(cx);
         let claude = opts.claude.unwrap_or(project.auto_claude);
         let setup = project.setup_cmd.as_deref().filter(|_| opts.setup);
-        if let (Some(line), Some(v)) = (crate::projects::start_line(setup, claude, &project.claude_args, opts.prompt.as_deref()), &self.tabs[i].view) {
+        if let (Some(line), Some(v)) = (
+            crate::projects::start_line(setup, claude, &project.claude_args, opts.prompt.as_deref()),
+            &self.tabs[i].view,
+        ) {
             // Our shim is first on the session's PATH: claude starts with our hooks. The PTY holds the line until the
             // shell has read its rc files.
             let session = v.read(cx).session.clone();
@@ -1265,7 +1336,10 @@ impl Workspace {
             return;
         }
         let Some((_, slots)) = self.groups().into_iter().find(|(k, _)| *k == group) else { return };
-        let (Some(a), Some(b)) = (slots.iter().position(|&s| s == from), slots.iter().position(|&s| s == target)) else { return };
+        let (Some(a), Some(b)) = (slots.iter().position(|&s| s == from), slots.iter().position(|&s| s == target))
+        else {
+            return;
+        };
         if a == b {
             return;
         }
@@ -1355,7 +1429,6 @@ impl Workspace {
         }
         cx.notify();
     }
-
 
     fn start_rename(&mut self, idx: usize, window: &mut Window, cx: &mut Context<Self>) {
         let Some(tab) = self.tabs.get(idx) else { return };
@@ -1466,7 +1539,12 @@ impl Workspace {
                         self.projects.touch(&d.root, now_secs()); // a group that wasn't remembered yet
                     }
                     if let Some(p) = self.projects.get_mut(&d.root) {
-                        let typed = crate::projects::Typed { auto: d.auto, flags: &d.flags.text, setup: &d.setup.text, wt_dir: &d.wt_dir.text };
+                        let typed = crate::projects::Typed {
+                            auto: d.auto,
+                            flags: &d.flags.text,
+                            setup: &d.setup.text,
+                            wt_dir: &d.wt_dir.text,
+                        };
                         p.apply_defaults(&typed, &home());
                         self.mark_dirty(cx);
                     }
@@ -1548,7 +1626,13 @@ impl Workspace {
             let urgent = a.state == agent::State::NeedsYou;
             let body = a.note.clone().unwrap_or_else(|| if urgent { "Needs your input" } else { "Finished" }.into());
             crate::perf::event_with(|| format!("notify tab {}: {body}", tab.id));
-            self.notifier.show(notify::Notice { tab: tab.id as u32, title, body, urgent, sound: self.settings.notifications.sound });
+            self.notifier.show(notify::Notice {
+                tab: tab.id as u32,
+                title,
+                body,
+                urgent,
+                sound: self.settings.notifications.sound,
+            });
         }
     }
 
@@ -1564,8 +1648,15 @@ impl Workspace {
     /// A notification was clicked: show its session and bring the window up.
     /// `dirigent [--new] [--claude] [PATH]` (from another process, or the one that started us): focus the session
     /// in that directory or make one, start claude, show the file, bring the window up.
-    fn open_request(&mut self, req: crate::cli::Request, window: &mut Window, cx: &mut Context<Self>) -> Result<(), String> {
-        crate::perf::event_with(|| format!("cli request: {:?} new={} claude={} open={}", req.dir, req.new, req.claude, req.open.is_some()));
+    fn open_request(
+        &mut self,
+        req: crate::cli::Request,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Result<(), String> {
+        crate::perf::event_with(|| {
+            format!("cli request: {:?} new={} claude={} open={}", req.dir, req.new, req.claude, req.open.is_some())
+        });
         if let Some(dir) = req.dir.clone() {
             if self.modal.is_some() {
                 self.close_modal(window, cx);
@@ -1575,7 +1666,8 @@ impl Workspace {
                 self.tabs
                     .iter()
                     .map(|t| {
-                        let agent = board.as_ref().is_some_and(|b| b.get(t.id as u32).state != crate::agent::State::NoAgent);
+                        let agent =
+                            board.as_ref().is_some_and(|b| b.get(t.id as u32).state != crate::agent::State::NoAgent);
                         (t.cwd.as_path(), agent && t.view.is_some())
                     })
                     .collect()
@@ -1672,7 +1764,11 @@ impl Workspace {
                 })
                 .collect(),
             active: self.active.min(self.tabs.len().saturating_sub(1)),
-            sidebar: persist::SidebarState { width: self.docks[0].width, open: self.docks[0].open, tab: self.docks[0].active },
+            sidebar: persist::SidebarState {
+                width: self.docks[0].width,
+                open: self.docks[0].open,
+                tab: self.docks[0].active,
+            },
             window: self.window_state,
             last_dir: Some(self.last_dir.clone()),
             collapsed_groups: self.collapsed.iter().cloned().collect(),
@@ -1697,7 +1793,9 @@ impl Workspace {
         cx.spawn(async move |this, cx| {
             let gone: Vec<usize> = cx
                 .background_executor()
-                .spawn(async move { ids.into_iter().filter(|(_, s)| !persist::transcript_exists(s)).map(|(id, _)| id).collect() })
+                .spawn(async move {
+                    ids.into_iter().filter(|(_, s)| !persist::transcript_exists(s)).map(|(id, _)| id).collect()
+                })
                 .await;
             if gone.is_empty() {
                 return;
@@ -1756,10 +1854,12 @@ impl Workspace {
             let checked: Vec<(usize, String, String, bool)> = cx
                 .background_executor()
                 .spawn(async move {
-                    jobs.into_iter().map(|(id, s, a)| {
-                        let ok = persist::transcript_exists(&s);
-                        (id, s, a, ok)
-                    }).collect()
+                    jobs.into_iter()
+                        .map(|(id, s, a)| {
+                            let ok = persist::transcript_exists(&s);
+                            (id, s, a, ok)
+                        })
+                        .collect()
                 })
                 .await;
             let _ = this.update(cx, |w, cx| {
@@ -1811,7 +1911,9 @@ impl Workspace {
         // Limits countdowns, "2m ago" and "Working · 3m" all have minute granularity.
         let shown = self.agents.as_ref().is_some_and(|h| {
             let b = h.board.lock().unwrap();
-            b.five_hour.is_some() || b.seven_day.is_some() || b.tabs.values().any(|a| a.last_activity.is_some() || a.state_since.is_some())
+            b.five_hour.is_some()
+                || b.seven_day.is_some()
+                || b.tabs.values().any(|a| a.last_activity.is_some() || a.state_since.is_some())
         });
         if !shown || !self.window_visible || self._minute.is_some() {
             return;
@@ -1834,7 +1936,6 @@ impl Workspace {
             self.show_panel(Panel::Sessions, cx);
         }
     }
-
 }
 
 mod command_center;
@@ -1879,11 +1980,22 @@ impl Workspace {
             return;
         }
         t.main_root = main_root;
-        crate::perf::event_with(|| format!("tab {id} repo → {}", match &new { TabRepo::Repo(r) => r.display().to_string(), _ => "none".into() }));
-        self.tracker.set_repo(id as u32, match &new {
-            TabRepo::Repo(r) => Some(r.clone()),
-            _ => None,
+        crate::perf::event_with(|| {
+            format!(
+                "tab {id} repo → {}",
+                match &new {
+                    TabRepo::Repo(r) => r.display().to_string(),
+                    _ => "none".into(),
+                }
+            )
         });
+        self.tracker.set_repo(
+            id as u32,
+            match &new {
+                TabRepo::Repo(r) => Some(r.clone()),
+                _ => None,
+            },
+        );
         if let TabRepo::Repo(old) = std::mem::replace(&mut t.repo, new) {
             self.repos.release(&old);
         }
@@ -2016,7 +2128,8 @@ impl Workspace {
         }
         let ws = cx.entity().downgrade();
         let m = self.metrics.clone();
-        let mode = (self.settings.diff_mode, self.settings.split_style, self.settings.diff_engine, self.diff_narrow(window));
+        let mode =
+            (self.settings.diff_mode, self.settings.split_style, self.settings.diff_engine, self.diff_narrow(window));
         let view = cx.new(|cx| DiffView::new(root, file, &m, mode, ws, cx));
         self.show_overlay(Overlay::Diff(view), window, cx);
     }
@@ -2073,7 +2186,14 @@ impl Workspace {
 
     /// Ctrl+click on a path printed in a session: resolved against that session's directory (`~/` from home),
     /// checked off-thread, then shown in the preview at `line`. Not a file: a status-bar note.
-    pub fn open_path_from(&mut self, view_id: EntityId, raw: String, line: Option<u32>, window: &mut Window, cx: &mut Context<Self>) {
+    pub fn open_path_from(
+        &mut self,
+        view_id: EntityId,
+        raw: String,
+        line: Option<u32>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let Some(i) = self.tab_of_view(view_id) else { return };
         let joined = match raw.strip_prefix("~/") {
             Some(rest) => home().join(rest),
@@ -2420,8 +2540,12 @@ impl Workspace {
                             };
                             // What each hunk has staged/unstaged (re-read every time: staging doesn't change the
                             // HEAD→worktree diff itself).
-                            let rows: Vec<(u32, git::write::Span)> =
-                                layout.lines.iter().enumerate().filter_map(|(i, l)| Some((i as u32, l.span?))).collect();
+                            let rows: Vec<(u32, git::write::Span)> = layout
+                                .lines
+                                .iter()
+                                .enumerate()
+                                .filter_map(|(i, l)| Some((i as u32, l.span?)))
+                                .collect();
                             let spans: Vec<_> = rows.iter().map(|r| r.1).collect();
                             let states = git::write::hunk_state(&repo, &read_file, &spans);
                             let hunks: HashMap<u32, (bool, bool)> = rows.iter().map(|r| r.0).zip(states).collect();
@@ -2470,7 +2594,9 @@ impl Workspace {
                         return;
                     }
                     if let Some(colored) = &colored {
-                        crate::perf::event_with(|| format!("diff syntax: colored in {:.1} ms", started.elapsed().as_secs_f64() * 1e3));
+                        crate::perf::event_with(|| {
+                            format!("diff syntax: colored in {:.1} ms", started.elapsed().as_secs_f64() * 1e3)
+                        });
                         view.update(cx, |v, cx| v.set_layout(Some(colored.clone()), file.clone(), cx));
                     }
                     // Third pass: the structural diff from the same trees.
@@ -2533,7 +2659,11 @@ impl Workspace {
                         return;
                     }
                     crate::perf::event_with(|| {
-                        format!("file syntax: {} in {:.1} ms", if colors.is_some() { "colored" } else { "plain" }, started.elapsed().as_secs_f64() * 1e3)
+                        format!(
+                            "file syntax: {} in {:.1} ms",
+                            if colors.is_some() { "colored" } else { "plain" },
+                            started.elapsed().as_secs_f64() * 1e3
+                        )
                     });
                     if let Some(colors) = colors {
                         view.update(cx, |v, cx| v.set_colors(colors, cx));
@@ -2574,8 +2704,10 @@ impl Workspace {
             self.tree_rows = None;
         }
         self.tree_pending.retain(|d, _| wanted.contains(d));
-        let missing: Vec<PathBuf> =
-            wanted.into_iter().filter(|d| !self.tree_cache.contains_key(d) && !self.tree_pending.contains_key(d)).collect();
+        let missing: Vec<PathBuf> = wanted
+            .into_iter()
+            .filter(|d| !self.tree_cache.contains_key(d) && !self.tree_pending.contains_key(d))
+            .collect();
         for d in missing {
             self.request_listing(d, cx);
         }
@@ -2607,7 +2739,12 @@ impl Workspace {
                 match result {
                     Ok(listing) => {
                         crate::perf::event_with(|| {
-                            format!("listed {} ({} entries) in {:.1} ms", dir.display(), listing.entries.len(), started.elapsed().as_secs_f64() * 1e3)
+                            format!(
+                                "listed {} ({} entries) in {:.1} ms",
+                                dir.display(),
+                                listing.entries.len(),
+                                started.elapsed().as_secs_f64() * 1e3
+                            )
                         });
                         if w.tree_cache.get(&dir).is_some_and(|l| **l == listing) {
                             return;
@@ -2655,7 +2792,9 @@ impl Workspace {
             (Some(r), _) => {
                 let started = Instant::now();
                 let rows = Arc::new(file_tree::flatten(r, &t.tree, &self.tree_cache, self.show_ignored));
-                crate::perf::event_with(|| format!("tree flatten: {} rows in {:.2} ms", rows.len(), started.elapsed().as_secs_f64() * 1e3));
+                crate::perf::event_with(|| {
+                    format!("tree flatten: {} rows in {:.2} ms", rows.len(), started.elapsed().as_secs_f64() * 1e3)
+                });
                 self.tree_rows = Some((r.clone(), rows.clone()));
                 rows
             }
@@ -2721,14 +2860,20 @@ impl Workspace {
             Action::None => return,
             Action::Select(p) => self.change_tree(|t| t.selected = Some(p), cx),
             Action::Expand(p) => {
-                self.change_tree(|t| {
-                    t.expanded.insert(p.clone());
-                }, cx);
+                self.change_tree(
+                    |t| {
+                        t.expanded.insert(p.clone());
+                    },
+                    cx,
+                );
                 self.request_listing(p, cx); // fresh on every expand (ignored dirs are never watched)
             }
-            Action::Collapse(p) => self.change_tree(|t| {
-                t.expanded.remove(&p);
-            }, cx),
+            Action::Collapse(p) => self.change_tree(
+                |t| {
+                    t.expanded.remove(&p);
+                },
+                cx,
+            ),
             Action::Open(p) => {
                 let focus = self.files_panel.focus_handle(cx);
                 self.open_file(p, false, window, cx);
@@ -2842,7 +2987,13 @@ impl Workspace {
     }
 
     /// A Search panel result: the file in the preview, at the hit's line with the matched text marked.
-    pub fn open_search_hit(&mut self, path: PathBuf, hit: Option<(u32, String)>, window: &mut Window, cx: &mut Context<Self>) {
+    pub fn open_search_hit(
+        &mut self,
+        path: PathBuf,
+        hit: Option<(u32, String)>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         self.open_file(path, false, window, cx);
         if let (Some((line, text)), Some(Overlay::File(f))) = (hit, &self.overlay) {
             f.update(cx, |f, cx| f.go_to_match(line as usize, text, cx));
@@ -2901,13 +3052,22 @@ fn main_checkout(dir: &Path) -> Option<PathBuf> {
     let gitdir = PathBuf::from(text.trim().strip_prefix("gitdir:")?.trim());
     let gitdir = if gitdir.is_absolute() { gitdir } else { dir.join(gitdir) };
     let common = gitdir.parent()?.parent()?; // <main>/.git
-    (gitdir.parent()?.file_name()? == "worktrees" && common.file_name()? == ".git").then(|| common.parent().map(Path::to_path_buf)).flatten()
+    (gitdir.parent()?.file_name()? == "worktrees" && common.file_name()? == ".git")
+        .then(|| common.parent().map(Path::to_path_buf))
+        .flatten()
 }
 
 /// Pinned projects without tabs become empty groups after the tab groups (before "Other").
-fn with_pinned(mut groups: Vec<(Option<PathBuf>, Vec<usize>)>, pinned: &[PathBuf]) -> Vec<(Option<PathBuf>, Vec<usize>)> {
+fn with_pinned(
+    mut groups: Vec<(Option<PathBuf>, Vec<usize>)>,
+    pinned: &[PathBuf],
+) -> Vec<(Option<PathBuf>, Vec<usize>)> {
     let at = groups.iter().position(|(k, _)| k.is_none()).unwrap_or(groups.len());
-    let empty: Vec<_> = pinned.iter().filter(|p| !groups.iter().any(|(k, _)| k.as_ref() == Some(*p))).map(|p| (Some(p.clone()), Vec::new())).collect();
+    let empty: Vec<_> = pinned
+        .iter()
+        .filter(|p| !groups.iter().any(|(k, _)| k.as_ref() == Some(*p)))
+        .map(|p| (Some(p.clone()), Vec::new()))
+        .collect();
     groups.splice(at..at, empty);
     groups
 }
@@ -2991,7 +3151,14 @@ mod tests {
         }
         assert!(slots.contains(&order[1]));
         // Group order survives: first-occurrence order of the keys is the same before and after.
-        let keys = [Some(PathBuf::from("/b")), Some(PathBuf::from("/a")), None, Some(PathBuf::from("/a")), Some(PathBuf::from("/a")), Some(PathBuf::from("/b"))];
+        let keys = [
+            Some(PathBuf::from("/b")),
+            Some(PathBuf::from("/a")),
+            None,
+            Some(PathBuf::from("/a")),
+            Some(PathBuf::from("/a")),
+            Some(PathBuf::from("/b")),
+        ];
         let after: Vec<_> = order.iter().map(|&j| keys[j].clone()).collect();
         let firsts = |k: &[Option<PathBuf>]| group_order(k).into_iter().map(|(g, _)| g).collect::<Vec<_>>();
         assert_eq!(firsts(&keys), firsts(&after));

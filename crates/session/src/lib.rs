@@ -1,11 +1,11 @@
 //! One agent session: a PTY running a shell plus its terminal state. No UI dependencies.
 
+pub mod expect;
 pub mod keys;
 pub mod links;
 pub mod mouse;
-pub mod select;
-pub mod expect;
 pub mod osc7;
+pub mod select;
 
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
@@ -14,12 +14,12 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 
 use alacritty_terminal::Term;
-use async_channel::{Receiver, TrySendError};
 use alacritty_terminal::event::{Event, EventListener, WindowSize};
 use alacritty_terminal::grid::{Dimensions, Scroll};
 use alacritty_terminal::sync::FairMutex;
 use alacritty_terminal::term::Config;
 use alacritty_terminal::vte::ansi::{Processor, Rgb};
+use async_channel::{Receiver, TrySendError};
 pub use portable_pty::CommandBuilder;
 use portable_pty::{Child, MasterPty, PtySize, native_pty_system};
 
@@ -234,22 +234,14 @@ impl Session {
             // dropping `tx` closes the channel = exit notification
         })?;
 
-        Ok(Self {
-            term,
-            wakeups,
-            title,
-            flags,
-            writer,
-            master: pair.master,
-            child,
-            size: size_shared,
-        })
+        Ok(Self { term, wakeups, title, flags, writer, master: pair.master, child, size: size_shared })
     }
 
     /// Answers a prompt once: when `needle` (whitespace ignored, escapes stripped) appears in the output before
     /// `within` runs out, writes `reply`'s parts, each after a 400 ms pause. Replaces an earlier one.
     pub fn answer_once(&self, needle: &str, reply: Vec<Vec<u8>>, within: std::time::Duration) {
-        *self.flags.expect.lock().unwrap() = Some(expect::Expect::new(needle, reply, std::time::Instant::now() + within));
+        *self.flags.expect.lock().unwrap() =
+            Some(expect::Expect::new(needle, reply, std::time::Instant::now() + within));
         self.flags.expecting.store(true, Ordering::Release);
     }
 

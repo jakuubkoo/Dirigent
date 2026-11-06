@@ -113,9 +113,11 @@ pub fn socket_path(runtime: &Path, state_override: Option<&Path>) -> PathBuf {
         None => runtime.join("dirigent.sock"),
         Some(state) => {
             // FNV-1a: stable across Rust versions (an old running app and a new client agree).
-            let h = state.as_os_str().as_encoded_bytes().iter().fold(0xcbf29ce484222325u64, |h, &b| {
-                (h ^ b as u64).wrapping_mul(0x100000001b3)
-            });
+            let h = state
+                .as_os_str()
+                .as_encoded_bytes()
+                .iter()
+                .fold(0xcbf29ce484222325u64, |h, &b| (h ^ b as u64).wrapping_mul(0x100000001b3));
             runtime.join(format!("dirigent.{h:016x}.sock"))
         }
     }
@@ -159,7 +161,10 @@ pub fn send(sock: &Path, req: &Request) -> Result<Sent, String> {
     }
     match reply.trim_end() {
         "ok" => Ok(Sent::Done),
-        r => Err(r.strip_prefix("error: ").unwrap_or(if r.is_empty() { "the running dirigent closed the connection" } else { r }).to_string()),
+        r => Err(r
+            .strip_prefix("error: ")
+            .unwrap_or(if r.is_empty() { "the running dirigent closed the connection" } else { r })
+            .to_string()),
     }
 }
 
@@ -213,7 +218,10 @@ fn answer(conn: UnixStream, tx: &async_channel::Sender<Incoming>) -> bool {
     let _ = conn.set_read_timeout(Some(Duration::from_secs(2)));
     let mut line = String::new();
     let read = BufReader::new((&conn).take(MAX_REQUEST)).read_line(&mut line);
-    let result = match read.map_err(|e| e.to_string()).and_then(|_| serde_json::from_str::<Request>(&line).map_err(|e| e.to_string())) {
+    let result = match read
+        .map_err(|e| e.to_string())
+        .and_then(|_| serde_json::from_str::<Request>(&line).map_err(|e| e.to_string()))
+    {
         Err(e) => Err(format!("bad request: {e}")),
         Ok(req) => {
             let (reply, answer) = std::sync::mpsc::channel();
@@ -240,7 +248,9 @@ pub fn pick(req: &Request, tabs: &[(&Path, bool)], active: usize, order: &[usize
     }
     let dir = req.dir.as_deref()?;
     let fits = |&i: &usize| {
-        tabs.get(i).is_some_and(|(cwd, agent)| (*cwd == dir || Some(*cwd) == req.alt_dir.as_deref()) && (!req.claude || *agent))
+        tabs.get(i).is_some_and(|(cwd, agent)| {
+            (*cwd == dir || Some(*cwd) == req.alt_dir.as_deref()) && (!req.claude || *agent)
+        })
     };
     std::iter::once(active).chain(order.iter().copied()).find(fits)
 }

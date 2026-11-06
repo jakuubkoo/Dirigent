@@ -22,7 +22,15 @@ pub fn wayland_globals() -> Vec<String> {
 
     struct Probe;
     impl Dispatch<WlRegistry, GlobalListContents> for Probe {
-        fn event(_: &mut Self, _: &WlRegistry, _: wl_registry::Event, _: &GlobalListContents, _: &Connection, _: &QueueHandle<Self>) {}
+        fn event(
+            _: &mut Self,
+            _: &WlRegistry,
+            _: wl_registry::Event,
+            _: &GlobalListContents,
+            _: &Connection,
+            _: &QueueHandle<Self>,
+        ) {
+        }
     }
     // gpui picks Wayland exactly when WAYLAND_DISPLAY is set and non-empty.
     if std::env::var_os("WAYLAND_DISPLAY").is_none_or(|d| d.is_empty()) {

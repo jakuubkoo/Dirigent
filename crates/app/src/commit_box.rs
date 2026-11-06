@@ -12,7 +12,7 @@ use gpui::{
 };
 
 use crate::text_area::{Key, TextArea};
-use crate::theme::{z, self, MONO_FONT, radius, space, text_size};
+use crate::theme::{self, MONO_FONT, radius, space, text_size, z};
 use crate::ui::{self, icon, tip};
 use crate::workspace::Workspace;
 
@@ -152,7 +152,10 @@ impl CommitBox {
             let (a, b) = (sel.start.max(start), sel.end.min(end + 1));
             if a < b {
                 let shown_end = (b - start).min(line.len() + 1);
-                hl.push((a - start..shown_end, HighlightStyle { background_color: Some(t.bg.selected_focus.into()), ..Default::default() }));
+                hl.push((
+                    a - start..shown_end,
+                    HighlightStyle { background_color: Some(t.bg.selected_focus.into()), ..Default::default() },
+                ));
             }
             // A trailing space keeps empty lines measurable and shows a selected newline.
             let text = StyledText::new(format!("{line} ")).with_highlights(hl);
@@ -185,11 +188,14 @@ impl CommitBox {
                     }))
                     .child(text)
                     .children(cursor.map(|col| {
-                        canvas(|_, _, _| {}, move |_, _, window, _| {
-                            if let Some(p) = layout.position_for_index(col) {
-                                window.paint_quad(fill(Bounds::new(p, size(z(1.5), layout.line_height())), color));
-                            }
-                        })
+                        canvas(
+                            |_, _, _| {},
+                            move |_, _, window, _| {
+                                if let Some(p) = layout.position_for_index(col) {
+                                    window.paint_quad(fill(Bounds::new(p, size(z(1.5), layout.line_height())), color));
+                                }
+                            },
+                        )
                         .absolute()
                         .size_full()
                     }))
@@ -209,36 +215,34 @@ impl Render for CommitBox {
         let n = self.area.text.split('\n').count().clamp(MIN_LINES, MAX_LINES);
         let empty = self.area.text.is_empty();
         let lines = self.lines(focused, cx);
-        let editor = div()
-            .id("commit-message")
-            .track_focus(&self.focus)
-            .key_context("CommitBox")
-            .on_key_down(cx.listener(Self::key))
-            .on_mouse_up(MouseButton::Left, cx.listener(|b: &mut Self, _, _, _| b.dragging = false))
-            .cursor_text()
-            .relative()
-            .h(line_h * n as f32 + z(space::SM * 2.))
-            .overflow_y_scroll()
-            .px(z(space::MD))
-            .py(z(space::SM))
-            .rounded(z(radius::MD))
-            .bg(t.bg.input)
-            .border_1()
-            .border_color(if focused { t.accent } else { t.border.subtle })
-            .font_family(MONO_FONT)
-            .text_size(z(text_size::SM))
-            .text_color(t.text.primary)
-            .children(lines)
-            .when(empty && !focused, |d| {
-                d.child(
-                    div()
-                        .absolute()
-                        .top(z(space::SM))
-                        .left(z(space::MD))
-                        .text_color(t.text.faint)
-                        .child(if self.amend { "Amended message" } else { "Commit message (Ctrl+Enter to commit)" }),
-                )
-            });
+        let editor =
+            div()
+                .id("commit-message")
+                .track_focus(&self.focus)
+                .key_context("CommitBox")
+                .on_key_down(cx.listener(Self::key))
+                .on_mouse_up(MouseButton::Left, cx.listener(|b: &mut Self, _, _, _| b.dragging = false))
+                .cursor_text()
+                .relative()
+                .h(line_h * n as f32 + z(space::SM * 2.))
+                .overflow_y_scroll()
+                .px(z(space::MD))
+                .py(z(space::SM))
+                .rounded(z(radius::MD))
+                .bg(t.bg.input)
+                .border_1()
+                .border_color(if focused { t.accent } else { t.border.subtle })
+                .font_family(MONO_FONT)
+                .text_size(z(text_size::SM))
+                .text_color(t.text.primary)
+                .children(lines)
+                .when(empty && !focused, |d| {
+                    d.child(
+                        div().absolute().top(z(space::SM)).left(z(space::MD)).text_color(t.text.faint).child(
+                            if self.amend { "Amended message" } else { "Commit message (Ctrl+Enter to commit)" },
+                        ),
+                    )
+                });
         let p = &self.props;
         let ws = self.workspace.clone();
         let button = |id: &'static str, label: String, enabled: bool, primary: bool| {
@@ -252,7 +256,9 @@ impl Render for CommitBox {
                 .when(primary && enabled, |d| d.bg(t.accent).text_color(t.text.on_accent))
                 .when(!primary && enabled, |d| d.border_1().border_color(t.border.subtle).text_color(t.text.primary))
                 .when(enabled, |d| d.cursor_pointer().hover(|s| s.opacity(0.85)))
-                .when(!enabled, |d| d.border_1().border_color(t.border.subtle).text_color(t.text.faint).cursor_not_allowed())
+                .when(!enabled, |d| {
+                    d.border_1().border_color(t.border.subtle).text_color(t.text.faint).cursor_not_allowed()
+                })
                 .child(label)
         };
         let can = self.can_commit();
@@ -306,7 +312,11 @@ impl Render for CommitBox {
             )
             .child(div().flex_1())
             .children(p.agent_files.filter(|&n| n > 0).map(|_| {
-                generate("generate-agent", true, "Write a message for the agent's files (whole contents vs HEAD; claude -p, Haiku)")
+                generate(
+                    "generate-agent",
+                    true,
+                    "Write a message for the agent's files (whole contents vs HEAD; claude -p, Haiku)",
+                )
             }))
             .children(p.agent_files.map(|n| {
                 button("commit-agent", format!("Commit agent's files ({n})…"), agent_ok, false)
@@ -320,7 +330,11 @@ impl Render for CommitBox {
             .child(generate("generate-staged", false, "Write a message for the staged diff (claude -p, Haiku)"))
             .child(
                 button("commit-go", commit_label, can, true)
-                    .tooltip(tip(if p.staged == 0 && !self.amend { "Nothing staged" } else { "Commit the staged changes (Ctrl+Enter)" }))
+                    .tooltip(tip(if p.staged == 0 && !self.amend {
+                        "Nothing staged"
+                    } else {
+                        "Commit the staged changes (Ctrl+Enter)"
+                    }))
                     .on_click(move |_: &ClickEvent, _, cx| {
                         if can {
                             let _ = w4.update(cx, |w, cx| w.commit(r4.clone(), cx));

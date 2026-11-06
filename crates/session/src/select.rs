@@ -117,11 +117,13 @@ pub(crate) mod tests {
         let mut t = term(10, 3, &lines);
         t.scroll_display(Scroll::Delta(4));
         // Viewport rows now show history.
-        let shown: Vec<String> = (0..3).map(|r| {
-            let p = grid_point(&t, 0, r);
-            start(&mut t, 2, p, Side::Left);
-            text(&t).unwrap()
-        }).collect();
+        let shown: Vec<String> = (0..3)
+            .map(|r| {
+                let p = grid_point(&t, 0, r);
+                start(&mut t, 2, p, Side::Left);
+                text(&t).unwrap()
+            })
+            .collect();
         assert_eq!(shown, ["line4", "line5", "line6"]);
         select_all(&mut t);
         let all = text(&t).unwrap();

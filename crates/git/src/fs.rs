@@ -2,9 +2,9 @@
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::mpsc::{self, RecvTimeoutError, Sender};
-use std::sync::Arc;
 use std::time::Instant;
 
 use notify::{Config, Event, EventKindMask, RecursiveMode, Watcher as _};
@@ -199,8 +199,35 @@ mod tests {
 
     #[test]
     fn natural_order() {
-        let mut v = vec!["file_10.txt", "File_2.txt", "file_1.txt", "file_100.txt", "a", "B", "v1.10", "v1.9", "x007", "x7", "99999999999999999999999"];
+        let mut v = vec![
+            "file_10.txt",
+            "File_2.txt",
+            "file_1.txt",
+            "file_100.txt",
+            "a",
+            "B",
+            "v1.10",
+            "v1.9",
+            "x007",
+            "x7",
+            "99999999999999999999999",
+        ];
         v.sort_by(|a, b| natural_cmp(a, b));
-        assert_eq!(v, vec!["99999999999999999999999", "a", "B", "file_1.txt", "File_2.txt", "file_10.txt", "file_100.txt", "v1.9", "v1.10", "x007", "x7"]);
+        assert_eq!(
+            v,
+            vec![
+                "99999999999999999999999",
+                "a",
+                "B",
+                "file_1.txt",
+                "File_2.txt",
+                "file_10.txt",
+                "file_100.txt",
+                "v1.9",
+                "v1.10",
+                "x007",
+                "x7"
+            ]
+        );
     }
 }

@@ -1,0 +1,100 @@
+# A vX.Y.Z tag on main → Linux x86_64 binaries, a tarball with install.sh --prebuilt, SHA256SUMS, and a GitHub
+# Release with that version's CHANGELOG section. On a PR touching the release path it is a dry run: the same build
+# and package, uploaded as a workflow artifact, no release. See RELEASING.md.
+name: Release
+
+on:
+  push:
+    tags: ["v[0-9]+.[0-9]+.[0-9]+"]
+  pull_request:
+    paths:
+      - .github/workflows/release.yml
+      - scripts/install.sh
+      - scripts/uninstall.sh
+      - CHANGELOG.md
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build:
+    # The oldest supported runner: the binaries then need glibc 2.35 or newer.
+    runs-on: ubuntu-22.04
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Version (a tag must match the workspace version)
+        id: version
+        run: |
+          version=$(sed -n 's/^version = "\(.*\)"$/\1/p' Cargo.toml | head -1)
+          if [[ "$GITHUB_REF_TYPE" == tag && "$GITHUB_REF_NAME" != "v$version" ]]; then
+            echo "::error::tag $GITHUB_REF_NAME does not match the workspace version $version"
+            exit 1
+          fi
+          grep -q "^## \[$version\]" CHANGELOG.md || { echo "::error::CHANGELOG.md has no [$version] section"; exit 1; }
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+      - name: Build packages
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -yq --no-install-recommends $(scripts/install.sh --print-deps)
+      - run: rustup toolchain install
+      - name: Build
+        run: |
+          export DIRIGENT_BUILD="$(git rev-parse --short HEAD) $(git log -1 --format=%cs)"
+          cargo build --release --locked
+          target/release/dirigent --version
+      - name: Package
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          name="dirigent-$VERSION-x86_64-linux"
+          d="dist/$name"
+          mkdir -p "$d/licenses/fonts" "$d/licenses/icons" "$d/licenses/grammars"
+          for b in dirigent dirigent-hook; do
+            cp "target/release/$b" "$d/"
+            strip "$d/$b"
+          done
+          cp scripts/install.sh scripts/uninstall.sh LICENSE THIRD-PARTY-NOTICES.md CHANGELOG.md "$d/"
+          cp crates/app/assets/fonts/*.txt "$d/licenses/fonts/"
+          cp crates/app/assets/icons/LICENSE.txt "$d/licenses/icons/"
+          cp crates/syntax/licenses/* "$d/licenses/grammars/"
+          tar -C dist -czf "dist/$name.tar.gz" "$name"
+          (cd dist && sha256sum "$name.tar.gz" > SHA256SUMS && cat SHA256SUMS)
+          # The release notes: this version's CHANGELOG section, without its heading or the link definitions.
+          awk -v v="$VERSION" '/^## \[/ { on = index($0, "## [" v "]") == 1; next } /^\[[^]]*\]: / { next } on' \
+            CHANGELOG.md > dist/notes.md
+          test -s dist/notes.md
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: release
+          path: |
+            dist/*.tar.gz
+            dist/SHA256SUMS
+            dist/notes.md
+          if-no-files-found: error
+
+  publish:
+    if: github.ref_type == 'tag'
+    needs: build
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write # create the release; nothing else here can write
+    steps:
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: release
+          path: dist
+      - name: GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          (cd dist && sha256sum -c SHA256SUMS)
+          gh release create "$TAG" --repo "$GITHUB_REPOSITORY" --verify-tag --title "Dirigent $TAG" \
+            --notes-file dist/notes.md dist/*.tar.gz dist/SHA256SUMS

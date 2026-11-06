@@ -42,7 +42,10 @@ mod tests {
     #[test]
     fn permission_text_shows_paths_never_commands() {
         assert_eq!(permission_text("Bash", &json!({"command": "TOKEN=x deploy"})), "Wants to run a command");
-        assert_eq!(permission_text("Edit", &json!({"file_path": "/home/x/src/main.rs", "old_string": "a"})), "Edit: /home/x/src/main.rs");
+        assert_eq!(
+            permission_text("Edit", &json!({"file_path": "/home/x/src/main.rs", "old_string": "a"})),
+            "Edit: /home/x/src/main.rs"
+        );
         assert_eq!(permission_text("WebFetch", &json!({"url": "https://example.com"})), "Wants to use WebFetch");
         let long = format!("/home/x/{}", "dir/".repeat(40));
         let t = permission_text("Write", &json!({ "file_path": long }));

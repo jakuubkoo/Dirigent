@@ -164,8 +164,18 @@ mod tests {
     fn cache() -> Cache {
         let mut c = Cache::new();
         let l = |entries| Arc::new(Listing { entries });
-        c.insert("/r".into(), l(vec![entry("/r", "src", true, false), entry("/r", "target", true, true), entry("/r", "Cargo.toml", false, false)]));
-        c.insert("/r/src".into(), l(vec![entry("/r/src", "util", true, false), entry("/r/src", "main.rs", false, false)]));
+        c.insert(
+            "/r".into(),
+            l(vec![
+                entry("/r", "src", true, false),
+                entry("/r", "target", true, true),
+                entry("/r", "Cargo.toml", false, false),
+            ]),
+        );
+        c.insert(
+            "/r/src".into(),
+            l(vec![entry("/r/src", "util", true, false), entry("/r/src", "main.rs", false, false)]),
+        );
         c.insert("/r/src/util".into(), l(vec![entry("/r/src/util", "x.rs", false, false)]));
         c.insert("/r/target".into(), l(vec![entry("/r/target", "debug", true, false)]));
         c
@@ -185,8 +195,15 @@ mod tests {
         let rows = flatten(root, &state(&[], None), &cache(), true);
         assert_eq!(names(&rows), vec!["src", "target", "Cargo.toml"]);
         let s = state(&["/r/src", "/r/src/util"], None);
-        assert_eq!(names(&flatten(root, &s, &cache(), true)), vec!["src", "  util", "    x.rs", "  main.rs", "target", "Cargo.toml"]);
-        assert_eq!(names(&flatten(root, &s, &cache(), false)), vec!["src", "  util", "    x.rs", "  main.rs", "Cargo.toml"], "ignored hidden");
+        assert_eq!(
+            names(&flatten(root, &s, &cache(), true)),
+            vec!["src", "  util", "    x.rs", "  main.rs", "target", "Cargo.toml"]
+        );
+        assert_eq!(
+            names(&flatten(root, &s, &cache(), false)),
+            vec!["src", "  util", "    x.rs", "  main.rs", "Cargo.toml"],
+            "ignored hidden"
+        );
         // util stays expanded in the state while src is collapsed: not shown, not wanted.
         let s = state(&["/r/src/util", "/other"], None);
         assert_eq!(names(&flatten(root, &s, &cache(), true)), vec!["src", "target", "Cargo.toml"]);
@@ -195,7 +212,10 @@ mod tests {
         let rows = flatten(root, &s, &cache(), true);
         let ignored: Vec<_> = rows.iter().filter(|r| r.ignored).map(|r| r.entry().name.as_str()).collect();
         assert_eq!(ignored, vec!["target", "debug"], "inside an ignored dir counts as ignored");
-        assert_eq!(wanted(root, &s), vec![PathBuf::from("/r"), "/r/src".into(), "/r/src/util".into(), "/r/target".into()]);
+        assert_eq!(
+            wanted(root, &s),
+            vec![PathBuf::from("/r"), "/r/src".into(), "/r/src/util".into(), "/r/target".into()]
+        );
     }
 
     #[test]
@@ -229,7 +249,14 @@ mod tests {
             files: ["src/a/b.rs", "src/c.rs", "new/deep/file.txt", "top.md"]
                 .iter()
                 .zip(['M', 'A', '?', 'D'])
-                .map(|(p, k)| git::FileChange { path: p.to_string(), orig: None, kind: k, staged: false, unstaged: true, lines: None })
+                .map(|(p, k)| git::FileChange {
+                    path: p.to_string(),
+                    orig: None,
+                    kind: k,
+                    staged: false,
+                    unstaged: true,
+                    lines: None,
+                })
                 .collect(),
             ..Status::default()
         };
