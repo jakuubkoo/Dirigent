@@ -41,15 +41,31 @@ pub enum DiffEngine {
     Word,
 }
 
-/// What a plain click on a sidebar group's `+` opens (Shift: the other claude choice).
+/// What a plain click on a sidebar group's `+` opens (Shift: the other claude choice; with Dialog, a session
+/// right away per the project's default). Files without the key (Project was the default) now get Dialog.
 #[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq, Default)]
 #[serde(rename_all = "lowercase")]
 pub enum PlusOpens {
-    /// The project's "start claude" default.
+    /// The New session setup dialog.
     #[default]
+    Dialog,
+    /// The project's "start claude" default.
     Project,
     Shell,
     Claude,
+}
+
+impl PlusOpens {
+    /// A click on `+`: None = the setup dialog, else whether the new session starts claude.
+    pub fn claude(self, project_default: bool, shift: bool) -> Option<bool> {
+        match self {
+            PlusOpens::Dialog if !shift => None,
+            PlusOpens::Dialog => Some(project_default),
+            PlusOpens::Project => Some(project_default != shift),
+            PlusOpens::Shell => Some(shift),
+            PlusOpens::Claude => Some(!shift),
+        }
+    }
 }
 
 /// Desktop notifications.
@@ -117,7 +133,7 @@ impl Default for Settings {
     fn default() -> Self {
         Self {
             trust_auto_accept: true,
-            plus_opens: PlusOpens::Project,
+            plus_opens: PlusOpens::Dialog,
             ui_zoom: 100,
             font_size: crate::theme::TERMINAL_FONT_SIZE,
             scrollback: 10_000,
@@ -221,7 +237,13 @@ pub fn parse(text: &str, fallback: &Settings) -> Parsed {
     let mut g = Get { v: &v, notes: &mut notes };
     let mut s = Settings {
         trust_auto_accept: g.get("general", "trust_auto_accept", d.trust_auto_accept, "true or false", |_| true),
-        plus_opens: g.get("general", "plus_opens", d.plus_opens, "\"project\", \"shell\" or \"claude\"", |_| true),
+        plus_opens: g.get(
+            "general",
+            "plus_opens",
+            d.plus_opens,
+            "\"dialog\", \"project\", \"shell\" or \"claude\"",
+            |_| true,
+        ),
         ui_zoom: g.get("general", "ui_zoom", d.ui_zoom, "a whole number 50–200 (percent)", |n: &u32| {
             (UI_ZOOM.0..=UI_ZOOM.1).contains(n)
         }),
@@ -619,6 +641,40 @@ mod tests {
         assert_eq!(at(170).zoom_step(None), 100);
         assert_eq!(parse(r#"{"general":{"ui_zoom":300}}"#, &at(100)).settings.ui_zoom, 100, "out of range: default");
         assert_eq!(parse(r#"{"general":{"ui_zoom":150}}"#, &at(100)).settings.ui_zoom, 150);
+    }
+
+    #[test]
+    fn plus_opens_dialog_by_default_and_keeps_saved_choices() {
+        let plus = |text: &str| parse(text, &Settings::default()).settings.plus_opens;
+        // No key: the old default (project) was never written, so those files get the new default.
+        assert_eq!(plus("{}"), PlusOpens::Dialog);
+        for (v, want) in [
+            ("dialog", PlusOpens::Dialog),
+            ("project", PlusOpens::Project),
+            ("shell", PlusOpens::Shell),
+            ("claude", PlusOpens::Claude),
+        ] {
+            assert_eq!(plus(&format!(r#"{{"general":{{"plus_opens":"{v}"}}}}"#)), want);
+        }
+        assert_eq!(Settings::default().to_json(), "{}\n", "dialog is the default: not written");
+        let project = Settings { plus_opens: PlusOpens::Project, ..Settings::default() }.to_json();
+        assert_eq!(serde_json::from_str::<Value>(&project).unwrap(), json!({ "general": { "plus_opens": "project" } }));
+        let bad = parse(r#"{"general":{"plus_opens":"popup"}}"#, &Settings::default());
+        assert_eq!((bad.settings.plus_opens, bad.notes.len()), (PlusOpens::Dialog, 1));
+    }
+
+    #[test]
+    fn plus_click_dialog_or_session() {
+        use PlusOpens::*;
+        assert_eq!(Dialog.claude(true, false), None, "plain click: the dialog");
+        assert_eq!(Dialog.claude(true, true), Some(true), "Shift: right away, project default");
+        assert_eq!(Dialog.claude(false, true), Some(false));
+        assert_eq!(Project.claude(true, false), Some(true));
+        assert_eq!(Project.claude(true, true), Some(false));
+        assert_eq!(Shell.claude(true, false), Some(false));
+        assert_eq!(Shell.claude(false, true), Some(true));
+        assert_eq!(Claude.claude(false, false), Some(true));
+        assert_eq!(Claude.claude(true, true), Some(false));
     }
 
     fn d_scroll() -> usize {
