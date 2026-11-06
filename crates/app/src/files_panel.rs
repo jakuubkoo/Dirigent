@@ -302,6 +302,10 @@ pub struct FileView {
     cell_width: Pixels,
     /// One px under the terminal's font size (Settings → Terminal).
     font_size: Pixels,
+    /// A line to show once the content has arrived (opened from a `path:line` link).
+    go_to: Option<usize>,
+    /// A search hit: its 0-based line and the matched text, marked in that line.
+    mark: Option<(usize, SharedString)>,
 }
 
 impl FileView {
@@ -328,6 +332,24 @@ impl FileView {
             line_height: m.line_height,
             cell_width: m.cell_width,
             font_size: m.font_size - z(1.),
+            go_to: None,
+            mark: None,
+        }
+    }
+
+    /// A Search panel hit: shows 1-based `line` and marks `text` in it.
+    pub fn go_to_match(&mut self, line: usize, text: String, cx: &mut Context<Self>) {
+        self.mark = Some((line.saturating_sub(1), text.into()));
+        self.go_to_line(line, cx);
+        cx.notify();
+    }
+
+    /// Shows 1-based `line` near the top (a few lines of context above it), now or once the content has loaded.
+    pub fn go_to_line(&mut self, line: usize, cx: &mut Context<Self>) {
+        if self.content.is_some() {
+            self.scroll_to(line.saturating_sub(4), cx);
+        } else {
+            self.go_to = Some(line);
         }
     }
 
@@ -354,6 +376,9 @@ impl FileView {
             None => self.failed = true,
         }
         self.change = change;
+        if let Some(line) = self.go_to.take().filter(|_| self.content.is_some()) {
+            self.scroll.scroll_to_item(line.saturating_sub(4), ScrollStrategy::Top);
+        }
         cx.notify();
     }
 
@@ -445,6 +470,7 @@ impl Render for FileView {
             (Some(Content::Lines { lines, truncated }), _) => {
                 let (lines, lh, truncated) = (lines.clone(), self.line_height, *truncated);
                 let colors = self.colors.clone();
+                let mark = self.mark.clone();
                 let digits = lines.len().to_string().len().max(3) as f32;
                 let gutter = self.cell_width * digits + z(space::XL);
                 let count = lines.len() + truncated as usize;
@@ -466,17 +492,28 @@ impl Render for FileView {
                                     .text_color(t.text.faint)
                                     .child((ix + 1).to_string()),
                             )
-                            .child(div().pr(z(14.)).text_color(t.diff.context).child(
-                                match colors.as_ref().and_then(|c| c.get(ix)).filter(|s| !s.is_empty()) {
+                            .child(div().pr(z(14.)).text_color(t.diff.context).child({
+                                // The marked search hit: the match on a highlight (syntax colors left out on that line).
+                                let marked = mark.as_ref().filter(|(l, _)| *l == ix).and_then(|(_, m)| text.find(m.as_ref()).map(|s| s..s + m.len()));
+                                match colors.as_ref().and_then(|c| c.get(ix)).filter(|s| !s.is_empty() && marked.is_none()) {
                                     Some(spans) => StyledText::new(text.clone())
                                         .with_highlights(spans.iter().filter_map(|(r, c)| {
                                             let color = t.syntax.color(*c)?;
                                             Some((r.start as usize..r.end as usize, HighlightStyle { color: Some(color.into()), ..Default::default() }))
                                         }))
                                         .into_any_element(),
-                                    None => text.clone().into_any_element(),
-                                },
-                            ))
+                                    None => match marked {
+                                        Some(r) => StyledText::new(text.clone())
+                                            .with_highlights([(r, HighlightStyle {
+                                                background_color: Some(t.search_match.into()),
+                                                color: Some(t.text.primary.into()),
+                                                ..Default::default()
+                                            })])
+                                            .into_any_element(),
+                                        None => text.clone().into_any_element(),
+                                    },
+                                }
+                            }))
                         })
                         .collect::<Vec<_>>()
                 })

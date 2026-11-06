@@ -34,6 +34,9 @@ pub struct Project {
     /// Run in a new worktree before claude starts (e.g. `pnpm install`).
     #[serde(default)]
     pub setup_cmd: Option<String>,
+    /// Files last opened through the Command Center (relative paths, newest first; quick open lists them first).
+    #[serde(default)]
+    pub recent: Vec<String>,
 }
 
 /// Project defaults as typed in the dialog or on the Settings page.
@@ -178,11 +181,18 @@ pub fn fuzzy(query: &str, text: &str) -> Option<Match> {
     }
     let t: Vec<char> = text.chars().collect();
     let lower: Vec<char> = t.iter().map(|c| c.to_lowercase().next().unwrap_or(*c)).collect();
+    let q: Vec<char> = query.chars().flat_map(char::to_lowercase).collect();
     let starts = |i: usize| i == 0 || matches!(t[i - 1], '/' | '-' | '_' | '.' | ' ') || (t[i - 1].is_lowercase() && t[i].is_uppercase());
-    let mut chars = Vec::new();
+    fuzzy_core(&q, &lower, starts)
+}
+
+/// `fuzzy` over already lowercased units (chars, or ASCII bytes for file paths); `starts(i)` = a word starts at `i`.
+/// Indices in the result are unit indices.
+pub fn fuzzy_core<T: Copy + PartialEq>(query: &[T], lower: &[T], starts: impl Fn(usize) -> bool) -> Option<Match> {
+    let mut chars = Vec::with_capacity(query.len());
     let mut score = 0;
     let mut from = 0;
-    for q in query.chars().flat_map(char::to_lowercase) {
+    for &q in query {
         let first = (from..lower.len()).find(|&i| lower[i] == q)?;
         // Continue a run if possible; else prefer a word start a bit further on.
         let at = if chars.last().is_some_and(|&l| l + 1 == first) {
@@ -203,7 +213,7 @@ pub fn fuzzy(query: &str, text: &str) -> Option<Match> {
         chars.push(at);
         from = at + 1;
     }
-    score -= (t.len() / 8) as i32; // shorter texts win ties
+    score -= (lower.len() / 8) as i32; // shorter texts win ties
     Some(Match { score, chars })
 }
 
