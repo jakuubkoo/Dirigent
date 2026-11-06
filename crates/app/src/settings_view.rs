@@ -919,7 +919,7 @@ impl SettingsView {
                     .when(focused, |d| d.border_color(t.accent))
                     .children(labels.iter().enumerate().map(|(i, l)| {
                         let (view, ws, k) = (view.clone(), ws.clone(), item.key);
-                        segment(l, l, i == cur, true).on_click(move |_: &ClickEvent, window, cx| {
+                        segment(l, *l, i == cur, true).on_click(move |_: &ClickEvent, window, cx| {
                             act(&view, &ws, window, cx, |v, s, p, _| {
                                 v.focus_field(Field::Item(k), s, p);
                                 Some(Apply::Settings(k, Val::Choice(i)))

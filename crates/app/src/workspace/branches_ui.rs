@@ -39,7 +39,8 @@ fn filter(all: &[Branch], q: &str) -> Vec<Row> {
         .enumerate()
         .filter_map(|(i, b)| projects::fuzzy(q, &b.name).map(|m| (m.score as i64, i, m.chars)))
         .collect();
-    hits.sort_by(|a, b| b.0.cmp(&a.0).then(a.1.cmp(&b.1)));
+    // Best match first; with no query the current branch leads, then git's order (most recent commit first).
+    hits.sort_by(|a, b| b.0.cmp(&a.0).then(all[b.1].current.cmp(&all[a.1].current)).then(a.1.cmp(&b.1)));
     let exact = all.iter().any(|b| !b.remote && b.name == q);
     let create = (!q.is_empty() && !exact && !q.contains(char::is_whitespace)).then(|| Row::Create(q.to_string()));
     create.into_iter().chain(hits.into_iter().map(|(_, i, hl)| Row::Branch(i, hl))).collect()
@@ -47,7 +48,7 @@ fn filter(all: &[Branch], q: &str) -> Vec<Row> {
 
 impl Workspace {
     /// The repo bar's branch button, the status bar branch, Ctrl+Shift+O.
-    pub(super) fn open_branches(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    pub fn open_branches(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(root) = self.active_root() else { return self.flash("Not in a git repository".into(), cx) };
         self.menu = None;
         self.modal = Some(Modal::Branches(Box::new(Branches {
@@ -220,7 +221,8 @@ impl Workspace {
             _ => None,
         };
         let hint = if dirty > 0 {
-            format!("↑↓ select · Enter switch · Ctrl+Enter create · {dirty} uncommitted change(s) come along")
+            let s = if dirty == 1 { " comes" } else { "s come" };
+            format!("↑↓ select · Enter switch · Ctrl+Enter create · {dirty} uncommitted change{s} along")
         } else {
             "↑↓ select · Enter switch · Ctrl+Enter create · Esc".into()
         };
@@ -294,13 +296,7 @@ fn branch_row(b: &Branches, i: usize, cx: &mut Context<Workspace>) -> AnyElement
                     )
                 })
                 .collect();
-            let ab = br.ab.map(|(a, b)| {
-                [(a > 0).then(|| format!("↑{a}")), (b > 0).then(|| format!("↓{b}"))]
-                    .into_iter()
-                    .flatten()
-                    .collect::<Vec<_>>()
-                    .join(" ")
-            });
+            let ab = br.ab.map(ui::ahead_behind);
             row.child(ui::icon(
                 icon::BRANCH,
                 14.,
@@ -350,7 +346,8 @@ mod tests {
 
     #[test]
     fn rows() {
-        let all = [b("main", false), b("feat/side", false), b("origin/fix-x", true)];
+        let mut all = [b("main", false), b("feat/side", false), b("origin/fix-x", true)];
+        all[1].current = true;
         let names = |q: &str| {
             filter(&all, q)
                 .iter()
@@ -360,7 +357,7 @@ mod tests {
                 })
                 .collect::<Vec<_>>()
         };
-        assert_eq!(names(""), ["main", "feat/side", "origin/fix-x"]);
+        assert_eq!(names(""), ["feat/side", "main", "origin/fix-x"], "the current branch first");
         assert_eq!(names("main"), ["main"], "an existing name: no Create row");
         assert_eq!(names("side"), ["+side", "feat/side"]);
         assert_eq!(names("fix-x"), ["+fix-x", "origin/fix-x"], "a remote's name can still become a local branch");

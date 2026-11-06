@@ -39,6 +39,9 @@ pub enum Job {
     /// `origin/x` → a local `x` tracking it.
     SwitchRemote(String),
     CreateBranch(String),
+    /// Open the branch's pull/merge request (pushing first when needed): via gh, GitLab push options, or the
+    /// browser form.
+    CreatePr,
     /// Several jobs in order (commit & push); stops at the first failure, whose retry is the rest.
     Seq(Vec<Job>),
 }
@@ -102,6 +105,7 @@ impl Job {
             Job::Sync => "Syncing…".into(),
             Job::Switch(b) | Job::SwitchRemote(b) => format!("Switching to {b}…"),
             Job::CreateBranch(b) => format!("Creating {b}…"),
+            Job::CreatePr => "Creating the pull request…".into(),
             Job::Seq(jobs) => jobs.first().map(Job::label).unwrap_or_default(),
         }
     }
@@ -117,7 +121,7 @@ impl Job {
     pub fn is_network(&self) -> bool {
         match self {
             Job::Seq(jobs) => jobs.iter().any(Job::is_network),
-            j => matches!(j, Job::Fetch | Job::Pull | Job::Push | Job::Sync),
+            j => matches!(j, Job::Fetch | Job::Pull | Job::Push | Job::Sync | Job::CreatePr),
         }
     }
 
@@ -150,6 +154,9 @@ impl Job {
             Job::Switch(b) => quiet(write::switch(root, b)),
             Job::SwitchRemote(b) => quiet(write::switch_remote(root, b)),
             Job::CreateBranch(b) => quiet(write::create_branch(root, b)),
+            Job::CreatePr => {
+                crate::pr::create(root, cancel).map(|(url, note)| Done { note: Some(note), open: Some(url) })
+            }
             Job::Seq(_) => unreachable!("run handles sequences"),
             j => quiet(j.run_local(repo)),
         }

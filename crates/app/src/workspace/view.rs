@@ -908,7 +908,7 @@ impl Workspace {
         };
         let needs = self.needs_you_count();
         let branch = match self.tabs.get(self.active).map(|t| &t.repo) {
-            Some(TabRepo::Repo(root)) => self.repos.status(root).map(|s| s.branch.clone()),
+            Some(TabRepo::Repo(root)) => self.repos.status(root).map(|s| (s.branch.clone(), s.ab)),
             _ => None,
         };
         let n = self.tabs.len();
@@ -946,14 +946,20 @@ impl Workspace {
                         })),
                 )
             })
-            .children(branch.map(|b| {
+            .children(branch.map(|(b, ab)| {
                 div()
+                    .id("status-branch")
                     .flex()
                     .items_center()
                     .gap(z(space::XS))
                     .text_color(t.text.muted)
+                    .cursor_pointer()
+                    .hover(|s| s.text_color(t.text.primary))
                     .child(ui::icon(icon::BRANCH, 11., t.text.dim))
                     .child(b)
+                    .children(ab.map(ui::ahead_behind).filter(|s| !s.is_empty()))
+                    .tooltip(tip("Switch or create a branch (Ctrl+Shift+O)"))
+                    .on_click(cx.listener(|w, _: &ClickEvent, window, cx| w.open_branches(window, cx)))
             }))
             .child(div().text_color(t.text.dim).child(format!("{n} session{}", if n == 1 { "" } else { "s" })))
             .when(needs > 0, |d| {

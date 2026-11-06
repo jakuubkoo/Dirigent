@@ -9,6 +9,10 @@ use crate::line_edit::LineEdit;
 use crate::theme::{self, radius, space, text_size, z};
 
 pub mod icon {
+    pub const CHECK: &str = "icons/check.svg";
+    pub const TRASH: &str = "icons/trash-2.svg";
+    pub const PULL_REQUEST: &str = "icons/git-pull-request.svg";
+    pub const EXTERNAL: &str = "icons/external-link.svg";
     pub const CHEVRON_RIGHT: &str = "icons/chevron-right.svg";
     pub const CHEVRON_DOWN: &str = "icons/chevron-down.svg";
     pub const PLUS: &str = "icons/plus.svg";
@@ -55,6 +59,10 @@ pub mod icon {
 
 #[cfg(test)]
 pub const ALL_ICONS: &[&str] = &[
+    icon::CHECK,
+    icon::TRASH,
+    icon::PULL_REQUEST,
+    icon::EXTERNAL,
     icon::CHEVRON_RIGHT,
     icon::CHEVRON_DOWN,
     icon::PLUS,
@@ -294,5 +302,30 @@ mod tests {
         assert_eq!(file_icon("README.md"), icon::FILE_TEXT);
         assert_eq!(file_icon("build.sh"), icon::FILE_SHELL);
         assert_eq!(file_icon("LICENSE"), icon::FILE);
+    }
+}
+
+/// `↑2 ↓3` (zeros left out; both zero → empty).
+pub fn ahead_behind((ahead, behind): (u32, u32)) -> String {
+    let parts = [(ahead > 0).then(|| format!("↑{ahead}")), (behind > 0).then(|| format!("↓{behind}"))];
+    parts.into_iter().flatten().collect::<Vec<_>>().join(" ")
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Check {
+    Off,
+    On,
+    /// Some of it (a partly staged file, some files of a list).
+    Partial,
+}
+
+/// A 13 px checkbox (the caller adds the click and the tooltip).
+pub fn checkbox(state: Check) -> Div {
+    let t = theme::get();
+    let b = div().flex_none().size(z(13.)).rounded(z(3.)).flex().items_center().justify_center();
+    match state {
+        Check::Off => b.border_1().border_color(t.border.strong),
+        Check::On => b.bg(t.accent).child(icon(icon::CHECK, 10., t.text.on_accent)),
+        Check::Partial => b.bg(t.accent).child(icon(icon::MINIMIZE, 10., t.text.on_accent)),
     }
 }

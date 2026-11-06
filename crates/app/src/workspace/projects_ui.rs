@@ -63,10 +63,12 @@ pub(super) enum MenuKind {
     Terminal(usize),
     /// Right click on a dock's panel tab.
     Panel(crate::layout::Panel),
+    /// The Changes panel's ⋯ and Commit ▾ (root = the repo).
+    Git(GitMenu),
 }
 
 /// (action, label, one-line explanation)
-type Item = (&'static str, &'static str, &'static str);
+pub(super) type Item = (&'static str, &'static str, &'static str);
 
 /// Up/Down over `n` items from `sel`, wrapping; nothing selected yet: Down takes the first, Up the last.
 fn menu_step(sel: Option<usize>, n: usize, down: bool) -> Option<usize> {
@@ -369,6 +371,7 @@ impl Workspace {
                 v.push(("select_all", "Select all", ""));
                 v
             }
+            MenuKind::Git(kind) => self.git_menu_items(&menu.root, kind, cx),
             MenuKind::Panel(p) => vec![match self.settings.layout.dock_of(p) {
                 crate::layout::Dock::Left => ("move", "Move to right dock", ""),
                 crate::layout::Dock::Right => ("move", "Move to left dock", ""),
@@ -437,6 +440,10 @@ impl Workspace {
                     _ => {}
                 });
             }
+            return cx.notify();
+        }
+        if let MenuKind::Git(_) = menu.kind {
+            self.git_menu_action(root, action, window, cx);
             return cx.notify();
         }
         if let MenuKind::Panel(p) = menu.kind {

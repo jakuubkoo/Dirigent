@@ -24,16 +24,16 @@ impl Workspace {
         let st = self.repos.status(root);
         let agent_files = self.agent_ran().then(|| self.agent_files(root).len());
         let props = Props {
-            branch: st.as_ref().map(|s| s.branch.clone()).unwrap_or_default(),
             staged: st.as_ref().map_or(0, |s| s.files.iter().filter(|f| f.staged).count()),
             agent_files,
+            scope_agent: self.commit_scope_agent(root),
             busy: self.git_ops.get(root).is_some_and(|o| o.inflight > 0),
         };
         b.update(cx, |b, cx| b.set_props(props, cx));
         b
     }
 
-    fn agent_ran(&self) -> bool {
+    pub(super) fn agent_ran(&self) -> bool {
         self.tabs
             .get(self.active)
             .is_some_and(|t| t.claude_session.is_some() || !self.tracker.view(t.id as u32).touched.is_empty())
@@ -130,11 +130,57 @@ impl Workspace {
                 }
             }
         }
-        // Refs a network job moved show through the watcher; a refresh covers packed-refs-only updates.
+        // Refs a network job moved show through the watcher; a refresh covers packed-refs-only updates. A push or a
+        // new request changes the strip.
         if job.is_network() {
             self.repos.refresh(&root);
+            self.pr_lookup(root.clone(), false, cx);
         }
         self.sync_panel(cx);
+    }
+
+    /// Looks up the PR/MR strip for the repo's current branch off-thread (`recheck`: ask gh/glab about their login
+    /// again). The panel re-renders only if the answer changed.
+    pub(super) fn pr_lookup(&mut self, root: PathBuf, recheck: bool, cx: &mut Context<Self>) {
+        let Some(branch) = self.repos.status(&root).map(|s| s.branch.clone()) else { return };
+        let slot = self.prs.entry(root.clone()).or_default();
+        if slot.branch != branch {
+            slot.view = None;
+        } else if slot.loading && !recheck {
+            return;
+        }
+        slot.branch = branch.clone();
+        if branch.is_empty() || branch.starts_with("(detached") {
+            slot.loading = false;
+            return;
+        }
+        slot.loading = true;
+        cx.spawn(async move |this, cx| {
+            let (r, b) = (root.clone(), branch.clone());
+            let view = cx.background_executor().spawn(async move { crate::pr::lookup(&r, &b, recheck) }).await;
+            let _ = this.update(cx, |w, cx| {
+                let Some(slot) = w.prs.get_mut(&root).filter(|s| s.branch == branch) else { return };
+                slot.loading = false;
+                if slot.view.as_ref() == Some(&view) {
+                    return;
+                }
+                // Once ever: say what gh/glab would add (the link works without them).
+                if matches!(view.info, crate::pr::Info::Link(_))
+                    && !w.pr_hint_shown
+                    && let Some(tool) = crate::pr::tool_for(view.forge)
+                {
+                    w.pr_hint_shown = true;
+                    w.git_ops.entry(root.clone()).or_default().view.note = Some(format!(
+                        "Tip: install {tool} and run `{tool} auth login` to see {} status here",
+                        view.noun()
+                    ));
+                    w.mark_dirty(cx);
+                }
+                slot_set(w, &root, view);
+                w.sync_panel(cx);
+            });
+        })
+        .detach();
     }
 
     /// Stops the repo's running network job (git and its ssh are killed; nothing half-written: git's ref updates
@@ -167,18 +213,145 @@ impl Workspace {
         }
     }
 
-    /// Commit box: commits the staged changes.
-    pub fn commit(&mut self, root: PathBuf, cx: &mut Context<Self>) {
+    /// The ⋯ / Commit ▾ dropdown of the Changes panel at `at`.
+    pub fn open_git_menu(
+        &mut self,
+        root: PathBuf,
+        kind: GitMenu,
+        at: gpui::Point<gpui::Pixels>,
+        cx: &mut Context<Self>,
+    ) {
+        self.open_menu(root, projects_ui::MenuKind::Git(kind), at, cx);
+    }
+
+    pub(super) fn git_menu_items(&self, root: &Path, kind: GitMenu, cx: &gpui::App) -> Vec<projects_ui::Item> {
+        let agent = self.agent_ran() && !self.agent_files(root).is_empty();
+        let pr = match self.prs.get(root).and_then(|p| p.view.as_ref()) {
+            Some(v) if v.forge == git::remote::Forge::GitLab => "Commit, push & create MR",
+            _ => "Commit, push & create PR",
+        };
+        match kind {
+            GitMenu::More => {
+                let mut v = vec![
+                    ("fetch", "Fetch", "Get the remote's new commits; nothing local changes"),
+                    ("pull", "Pull (fast-forward only)", "Never merges or rebases"),
+                    ("push", "Push", "A branch without an upstream is published (push -u)"),
+                    ("pr_refresh", "Refresh PR status", "Asks gh / glab again (also whether you're logged in)"),
+                ];
+                if self.agent_ran() {
+                    v.push(("forget", "Forget agent's files", "Clears this agent's file list; no file is touched"));
+                }
+                v
+            }
+            GitMenu::Commit => {
+                let mut v = Vec::new();
+                if agent {
+                    v.push(("commit_agent", "Commit agent's files…", "Only this session's agent files (asks first)"));
+                }
+                v.push(("commit_push", "Commit & push", "What the button commits, then push (publish)"));
+                v.push(("commit_pr", pr, "Commit, push, then open the new request"));
+                v
+            }
+            GitMenu::DiffView => {
+                let Some(Overlay::Diff(d)) = &self.overlay else { return Vec::new() };
+                let (split, narrow, style, structural, why) = d.read(cx).view_state();
+                let on = |b: bool| if b { "Shown now" } else { "" };
+                let mut v = vec![
+                    ("unified", "Unified", on(!split)),
+                    ("split", "Split", if narrow { "Too narrow here (needs 120 terminal columns)" } else { on(split) }),
+                ];
+                if split {
+                    v.push((
+                        "clean",
+                        "Clean split",
+                        if style == crate::settings::SplitStyle::Clean {
+                            "Shown now"
+                        } else {
+                            "Plain code, only changed tokens colored"
+                        },
+                    ));
+                    v.push((
+                        "classic",
+                        "Classic split",
+                        if style == crate::settings::SplitStyle::Classic {
+                            "Shown now"
+                        } else {
+                            "Line backgrounds and +/- markers"
+                        },
+                    ));
+                }
+                v.push((
+                    "structural",
+                    "Structural",
+                    why.unwrap_or(if structural {
+                        "Shown now"
+                    } else {
+                        "Changed tokens, moved code; reformatting ignored"
+                    }),
+                ));
+                v.push(("word", "Word", on(!structural)));
+                v
+            }
+        }
+    }
+
+    pub(super) fn git_menu_action(&mut self, root: PathBuf, action: &str, window: &mut Window, cx: &mut Context<Self>) {
+        match action {
+            "fetch" => self.run_git(root, Job::Fetch, cx),
+            "pull" => self.run_git(root, Job::Pull, cx),
+            "push" => self.run_git(root, Job::Push, cx),
+            "pr_refresh" => self.pr_lookup(root, true, cx),
+            "forget" => {
+                self.clear_agent_changes(cx);
+                self.sync_panel(cx);
+            }
+            "commit_agent" => self.confirm_agent_commit(root, Vec::new(), window, cx),
+            "commit_push" => self.commit_main(root, vec![Job::Push], window, cx),
+            "commit_pr" => self.commit_main(root, vec![Job::CreatePr], window, cx),
+            "unified" => self.set_diff_mode(crate::settings::DiffMode::Unified, cx),
+            "split" => self.set_diff_mode(crate::settings::DiffMode::Split, cx),
+            "clean" => self.set_split_style(crate::settings::SplitStyle::Clean, cx),
+            "classic" => self.set_split_style(crate::settings::SplitStyle::Classic, cx),
+            "structural" => self.set_diff_engine(crate::settings::DiffEngine::Auto, cx),
+            "word" => self.set_diff_engine(crate::settings::DiffEngine::Word, cx),
+            _ => {}
+        }
+    }
+
+    /// Whether the commit box's main button commits the agent's files (This agent shown and it has some).
+    pub(super) fn commit_scope_agent(&self, root: &Path) -> bool {
+        self.agent_ran()
+            && self.tabs.get(self.active).is_some_and(|t| t.agent_only.unwrap_or(true))
+            && !self.agent_files(root).is_empty()
+    }
+
+    /// The commit box's main action (button, Ctrl+Enter), then `after` (push, create PR) in the same job.
+    pub fn commit_main(&mut self, root: PathBuf, after: Vec<Job>, window: &mut Window, cx: &mut Context<Self>) {
+        if self.commit_scope_agent(&root) {
+            self.confirm_agent_commit(root, after, window, cx);
+        } else {
+            self.commit(root, after, cx);
+        }
+    }
+
+    /// Commits the staged changes (then `after`).
+    pub fn commit(&mut self, root: PathBuf, after: Vec<Job>, cx: &mut Context<Self>) {
         let Some(b) = self.commit_boxes.get(&root).cloned() else { return };
         let b = b.read(cx);
         let Some(message) = b.message() else { return };
         let amend = b.amend;
-        self.run_git(root, Job::Commit { message, amend }, cx);
+        self.run_git(root, then(Job::Commit { message, amend }, after), cx);
     }
 
     /// "Commit agent's files": lists exactly what will be committed (with the shared / via-command marks) and
-    /// commits on Enter / the button.
-    pub fn confirm_agent_commit(&mut self, root: PathBuf, window: &mut Window, cx: &mut Context<Self>) {
+    /// commits (then `after`) on Enter / the button.
+    pub fn confirm_agent_commit(
+        &mut self,
+        root: PathBuf,
+        after: Vec<Job>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let Some(b) = self.commit_boxes.get(&root).cloned() else { return };
         let (message, amend) = {
             let b = b.read(cx);
@@ -203,7 +376,7 @@ impl Workspace {
             files: marked,
             ok: if amend { "Amend" } else { "Commit" },
             danger: false,
-            then: Then::Git(root, Job::CommitOnly { message, files, amend }),
+            then: Then::Git(root, then(Job::CommitOnly { message, files, amend }, after)),
         });
         window.focus(&self.focus, cx);
         cx.notify();
@@ -318,4 +491,15 @@ impl Workspace {
             }
         }
     }
+}
+
+fn slot_set(w: &mut Workspace, root: &Path, view: crate::pr::View) {
+    if let Some(slot) = w.prs.get_mut(root) {
+        slot.view = Some(view);
+    }
+}
+
+/// `job`, or `job` then `after` as one sequence.
+fn then(job: Job, after: Vec<Job>) -> Job {
+    if after.is_empty() { job } else { Job::Seq(std::iter::once(job).chain(after).collect()) }
 }

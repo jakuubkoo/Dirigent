@@ -23,6 +23,9 @@ pub struct State {
     /// Remembered projects (added later: missing in older files → seeded from the tabs).
     #[serde(default)]
     pub projects: Option<Vec<crate::projects::Project>>,
+    /// The one-time "install gh/glab for PR status" note was shown.
+    #[serde(default)]
+    pub pr_hint_shown: bool,
 }
 
 impl Default for State {
@@ -37,6 +40,7 @@ impl Default for State {
             git_panel: PanelState::default(),
             collapsed_groups: Vec::new(),
             projects: None,
+            pr_hint_shown: false,
         }
     }
 }

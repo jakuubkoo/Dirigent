@@ -1,5 +1,6 @@
-//! The commit box at the top of the Changes panel: a multi-line message (`text_area`), Amend, Generate, Commit
-//! and "Commit this agent's files". One per repo (the draft survives tab switches); the git work happens in the
+//! The commit box at the bottom of the Changes panel: a multi-line message (`text_area`) with Generate, Amend,
+//! and one split button whose main action follows the panel's scope (This agent → the agent's files, with a
+//! confirmation; All → the staged changes); its ▾ adds Commit & push / Commit, push & create PR. One per repo (the draft survives tab switches); the git work happens in the
 //! workspace (`run_git`), off the UI thread.
 
 use std::cell::RefCell;
@@ -35,10 +36,11 @@ pub struct CommitBox {
 
 #[derive(Clone, Default, PartialEq)]
 pub struct Props {
-    pub branch: String,
     pub staged: usize,
     /// The active tab's agent has changed files here (count).
     pub agent_files: Option<usize>,
+    /// The main button commits the agent's files (This agent shown and it has some).
+    pub scope_agent: bool,
     pub busy: bool,
 }
 
@@ -82,8 +84,11 @@ impl CommitBox {
         cx.notify();
     }
 
+    /// Whether the main button / Ctrl+Enter can run.
     fn can_commit(&self) -> bool {
-        self.message().is_some() && !self.props.busy && (self.props.staged > 0 || self.amend)
+        let p = &self.props;
+        let what = if p.scope_agent { p.agent_files.is_some_and(|n| n > 0) } else { p.staged > 0 || self.amend };
+        self.message().is_some() && !p.busy && what
     }
 
     fn key(&mut self, ev: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
@@ -93,8 +98,8 @@ impl CommitBox {
             if self.can_commit() {
                 let (root, ws) = (self.root.clone(), self.workspace.clone());
                 // Not now: the workspace reads this box back while committing.
-                cx.defer(move |cx| {
-                    let _ = ws.update(cx, |w, cx| w.commit(root, cx));
+                cx.defer_in(window, move |_, window, cx| {
+                    let _ = ws.update(cx, |w, cx| w.commit_main(root, Vec::new(), window, cx));
                 });
             }
             cx.stop_propagation();
@@ -215,79 +220,136 @@ impl Render for CommitBox {
         let n = self.area.text.split('\n').count().clamp(MIN_LINES, MAX_LINES);
         let empty = self.area.text.is_empty();
         let lines = self.lines(focused, cx);
-        let editor =
-            div()
-                .id("commit-message")
-                .track_focus(&self.focus)
-                .key_context("CommitBox")
-                .on_key_down(cx.listener(Self::key))
-                .on_mouse_up(MouseButton::Left, cx.listener(|b: &mut Self, _, _, _| b.dragging = false))
-                .cursor_text()
-                .relative()
-                .h(line_h * n as f32 + z(space::SM * 2.))
-                .overflow_y_scroll()
-                .px(z(space::MD))
-                .py(z(space::SM))
-                .rounded(z(radius::MD))
-                .bg(t.bg.input)
-                .border_1()
-                .border_color(if focused { t.accent } else { t.border.subtle })
-                .font_family(MONO_FONT)
-                .text_size(z(text_size::SM))
-                .text_color(t.text.primary)
-                .children(lines)
-                .when(empty && !focused, |d| {
-                    d.child(
-                        div().absolute().top(z(space::SM)).left(z(space::MD)).text_color(t.text.faint).child(
-                            if self.amend { "Amended message" } else { "Commit message (Ctrl+Enter to commit)" },
-                        ),
-                    )
-                });
+        let editor = div()
+            .id("commit-message")
+            .track_focus(&self.focus)
+            .key_context("CommitBox")
+            .on_key_down(cx.listener(Self::key))
+            .on_mouse_up(MouseButton::Left, cx.listener(|b: &mut Self, _, _, _| b.dragging = false))
+            .cursor_text()
+            .relative()
+            .h(line_h * n as f32 + z(space::SM * 2.))
+            .overflow_y_scroll()
+            .px(z(space::MD))
+            .py(z(space::SM))
+            .rounded(z(radius::MD))
+            .bg(t.bg.input)
+            .border_1()
+            .border_color(if focused { t.accent } else { t.border.subtle })
+            .font_family(MONO_FONT)
+            .text_size(z(text_size::SM))
+            .text_color(t.text.primary)
+            .children(lines)
+            .when(empty && !focused, |d| {
+                d.child(
+                    div()
+                        .absolute()
+                        .top(z(space::SM))
+                        .left(z(space::MD))
+                        .font_family(theme::UI_FONT)
+                        .text_color(t.text.faint)
+                        .child(if self.amend { "Amended message" } else { "Message (Ctrl+Enter commits)" }),
+                )
+            });
         let p = &self.props;
         let ws = self.workspace.clone();
-        let button = |id: &'static str, label: String, enabled: bool, primary: bool| {
-            div()
-                .id(id)
-                .flex_none()
-                .px(z(space::SM))
-                .py(z(space::XXS))
-                .rounded(z(radius::SM))
-                .text_size(z(text_size::XS))
-                .when(primary && enabled, |d| d.bg(t.accent).text_color(t.text.on_accent))
-                .when(!primary && enabled, |d| d.border_1().border_color(t.border.subtle).text_color(t.text.primary))
-                .when(enabled, |d| d.cursor_pointer().hover(|s| s.opacity(0.85)))
-                .when(!enabled, |d| {
-                    d.border_1().border_color(t.border.subtle).text_color(t.text.faint).cursor_not_allowed()
-                })
-                .child(label)
-        };
         let can = self.can_commit();
-        let commit_label = if self.amend { "Amend".to_string() } else { format!("Commit ({})", p.staged) };
         let root = self.root.clone();
         let generating = self.generating;
-        // ✦ next to a commit button: a message for exactly what that button commits.
-        let generate = |id: &'static str, agent_only: bool, hint: &'static str| {
-            let (root, ws) = (self.root.clone(), ws.clone());
+        let scope_agent = p.scope_agent;
+        // ✦ in the message box: a message for exactly what the main button commits.
+        let generate = {
+            let (root, ws) = (root.clone(), ws.clone());
             div()
-                .id(id)
-                .flex_none()
+                .id("generate")
+                .absolute()
+                .top(z(space::XS))
+                .right(z(space::XS))
                 .p(z(space::XXS))
                 .rounded(z(radius::SM))
                 .when(!generating, |d| d.cursor_pointer().hover(|s| s.bg(t.bg.hover)))
+                .when(generating, |d| d.cursor_not_allowed())
                 .child(ui::icon(icon::GENERATE, 13., if generating { t.text.faint } else { t.accent }))
-                .tooltip(tip(if generating { "Generating…" } else { hint }))
+                .tooltip(tip(match (generating, scope_agent) {
+                    (true, _) => "Generating…",
+                    (false, true) => "Write a message for the agent's files (whole contents vs HEAD; claude -p, Haiku)",
+                    (false, false) => "Write a message for the staged diff (claude -p, Haiku)",
+                }))
                 .on_click(move |_: &ClickEvent, _, cx| {
-                    let _ = ws.update(cx, |w, cx| w.generate_message(root.clone(), agent_only, cx));
+                    if !generating {
+                        let _ = ws.update(cx, |w, cx| w.generate_message(root.clone(), scope_agent, cx));
+                    }
                 })
         };
-        let (r1, r3, r4) = (root.clone(), root.clone(), root);
-        let (w1, w3, w4) = (ws.clone(), ws.clone(), ws.clone());
-        let agent_ok = self.message().is_some() && !p.busy && p.agent_files.is_some_and(|n| n > 0);
+        let editor = editor.child(generate);
+        let label = match (scope_agent, self.amend) {
+            (true, false) => {
+                format!("Commit agent's {} file{}…", p.agent_files.unwrap_or(0), plural(p.agent_files.unwrap_or(0)))
+            }
+            (true, true) => {
+                format!("Amend with agent's {} file{}…", p.agent_files.unwrap_or(0), plural(p.agent_files.unwrap_or(0)))
+            }
+            (false, true) => "Amend".to_string(),
+            (false, false) if p.staged == 0 => "Nothing staged".to_string(),
+            (false, false) => format!("Commit {} staged", p.staged),
+        };
+        let more_ok = self.message().is_some() && !p.busy;
+        let (r1, r2, r3) = (root.clone(), root.clone(), root);
+        let (w1, w2, w3) = (ws.clone(), ws.clone(), ws);
+        let split = div()
+            .flex_none()
+            .flex()
+            .h(z(24.))
+            .rounded(z(radius::MD))
+            .overflow_hidden()
+            .text_size(z(text_size::SM))
+            .when(can, |d| d.bg(t.accent).text_color(t.text.on_accent))
+            .when(!can, |d| d.border_1().border_color(t.border.subtle).text_color(t.text.faint))
+            .child(
+                div()
+                    .id("commit-go")
+                    .flex()
+                    .items_center()
+                    .px(z(space::MD))
+                    .when(can, |d| d.cursor_pointer().hover(|s| s.opacity(0.85)))
+                    .when(!can, |d| d.cursor_not_allowed())
+                    .child(label)
+                    .tooltip(tip(if scope_agent {
+                        "Commit only this session's agent files (asks first; Ctrl+Enter). All shows every change."
+                    } else {
+                        "Commit the staged changes (Ctrl+Enter)"
+                    }))
+                    .on_click(move |_: &ClickEvent, window, cx| {
+                        if can {
+                            let _ = w1.update(cx, |w, cx| w.commit_main(r1.clone(), Vec::new(), window, cx));
+                        }
+                    }),
+            )
+            .child(div().w(z(1.)).my(z(4.)).bg(if can { t.text.on_accent } else { t.border.subtle }).opacity(0.5))
+            .child(
+                div()
+                    .id("commit-more")
+                    .flex()
+                    .items_center()
+                    .px(z(space::XS))
+                    .when(more_ok, |d| d.cursor_pointer().hover(|s| s.bg(t.bg.hover)))
+                    .when(!more_ok, |d| d.cursor_not_allowed())
+                    .child(ui::icon(icon::CHEVRON_DOWN, 12., if can { t.text.on_accent } else { t.text.dim }))
+                    .tooltip(tip("Commit & push, commit, push & create PR, commit the agent's files"))
+                    .on_click(move |ev: &ClickEvent, _, cx| {
+                        if more_ok {
+                            let at = ev.position();
+                            let _ = w2.update(cx, |w, cx| {
+                                w.open_git_menu(r2.clone(), crate::workspace::GitMenu::Commit, at, cx)
+                            });
+                        }
+                    }),
+            );
         let row = div()
             .flex()
             .items_center()
             .gap(z(space::SM))
-            .text_size(z(text_size::XS))
+            .text_size(z(text_size::SM))
             .text_color(t.text.muted)
             .child(
                 div()
@@ -296,69 +358,19 @@ impl Render for CommitBox {
                     .items_center()
                     .gap(z(space::XS))
                     .cursor_pointer()
-                    .child(
-                        div()
-                            .size(z(11.))
-                            .rounded(z(3.))
-                            .border_1()
-                            .border_color(if self.amend { t.accent } else { t.border.strong })
-                            .when(self.amend, |d| d.bg(t.accent)),
-                    )
+                    .child(ui::checkbox(if self.amend { ui::Check::On } else { ui::Check::Off }))
                     .child("Amend")
                     .tooltip(tip("Rewrite the last commit (prefills its message)"))
                     .on_click(move |_: &ClickEvent, _, cx| {
-                        let _ = w1.update(cx, |w, cx| w.toggle_amend(r1.clone(), cx));
+                        let _ = w3.update(cx, |w, cx| w.toggle_amend(r3.clone(), cx));
                     }),
             )
             .child(div().flex_1())
-            .children(p.agent_files.filter(|&n| n > 0).map(|_| {
-                generate(
-                    "generate-agent",
-                    true,
-                    "Write a message for the agent's files (whole contents vs HEAD; claude -p, Haiku)",
-                )
-            }))
-            .children(p.agent_files.map(|n| {
-                button("commit-agent", format!("Commit agent's files ({n})…"), agent_ok, false)
-                    .tooltip(tip("Commit only this session's agent files (asks first); everything else stays as it is"))
-                    .on_click(move |_: &ClickEvent, window, cx| {
-                        if agent_ok {
-                            let _ = w3.update(cx, |w, cx| w.confirm_agent_commit(r3.clone(), window, cx));
-                        }
-                    })
-            }))
-            .child(generate("generate-staged", false, "Write a message for the staged diff (claude -p, Haiku)"))
-            .child(
-                button("commit-go", commit_label, can, true)
-                    .tooltip(tip(if p.staged == 0 && !self.amend {
-                        "Nothing staged"
-                    } else {
-                        "Commit the staged changes (Ctrl+Enter)"
-                    }))
-                    .on_click(move |_: &ClickEvent, _, cx| {
-                        if can {
-                            let _ = w4.update(cx, |w, cx| w.commit(r4.clone(), cx));
-                        }
-                    }),
-            );
-        div()
-            .flex()
-            .flex_col()
-            .gap(z(space::SM))
-            .px(z(space::LG))
-            .pt(z(space::MD))
-            .pb(z(space::SM))
-            .child(
-                div()
-                    .flex()
-                    .items_center()
-                    .gap(z(space::XS))
-                    .text_size(z(text_size::XS))
-                    .text_color(t.text.muted)
-                    .child(ui::icon(icon::BRANCH, 12., t.text.muted))
-                    .child(div().min_w_0().truncate().text_color(t.text.primary).child(p.branch.clone())),
-            )
-            .child(editor)
-            .child(row)
+            .child(split);
+        div().flex().flex_col().gap(z(space::SM)).px(z(space::MD)).py(z(space::MD)).child(editor).child(row)
     }
+}
+
+fn plural(n: usize) -> &'static str {
+    if n == 1 { "" } else { "s" }
 }

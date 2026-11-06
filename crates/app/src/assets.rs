@@ -16,6 +16,10 @@ pub const APP_ICON_SVG: &[u8] = include_bytes!("../assets/icon/dirigent.svg");
 pub const APP_ICON_PNG: &[u8] = include_bytes!("../assets/icon/dirigent-256.png");
 
 static ICONS: &[(&str, &[u8])] = icons![
+    "check",
+    "trash-2",
+    "git-pull-request",
+    "external-link",
     "chevron-right",
     "chevron-down",
     "plus",

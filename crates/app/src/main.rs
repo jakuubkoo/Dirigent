@@ -15,6 +15,7 @@ mod line_edit;
 mod notify;
 mod perf;
 mod persist;
+mod pr;
 mod projects;
 mod quick_open;
 mod scrollbar;
