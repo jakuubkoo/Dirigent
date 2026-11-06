@@ -66,7 +66,9 @@ dirigent --claude .       # ... and start claude in it
 In the app, Ctrl+Shift+T opens the project picker: type to search your projects, or a path (`/`, `~`, `.`) with Tab
 completion. Enter opens the setup dialog (name, shared directory or a new worktree, start claude with a first
 prompt); Ctrl+Enter opens a session at once. Hover a sidebar group for `+` (new session there) and `⋯` (pin, rename,
-defaults, worktrees).
+defaults, worktrees). Right click a session (or Shift+F10 / the Menu key) for rename, close, restart, duplicate,
+resume, mark as read, copy path, open folder and forget the agent's files; drag sessions to reorder them within their
+group.
 
 ## Shortcuts
 
@@ -76,7 +78,8 @@ defaults, worktrees).
 | Ctrl+= or Ctrl++ / Ctrl+- / Ctrl+0 | Zoom the whole UI in / out / back to 100 % (saved as UI zoom) |
 | Ctrl+Shift+T | New session (project picker) |
 | Ctrl+Shift+N | New session in the current project |
-| Ctrl+Shift+W | Close session |
+| Ctrl+Shift+W / middle click / hover x | Close session (asks first while claude runs in it) |
+| Shift+F10 / Menu key / right click | Session menu (arrows, Enter, Esc) |
 | Ctrl+Tab / Ctrl+Shift+Tab | Next / previous session |
 | Ctrl+1..9 | Jump to session |
 | Ctrl+Shift+J | Next session that needs you |
@@ -86,7 +89,7 @@ defaults, worktrees).
 | Ctrl+Shift+G / Ctrl+Shift+E | Show Changes / Files |
 | Ctrl+Shift+D | Unified / split diff |
 | Ctrl+Enter | Commit (in the commit box) |
-| Esc | Close a diff, preview, Settings or dialog |
+| Esc | Close a diff, preview, Settings, menu or dialog |
 
 ## State
 

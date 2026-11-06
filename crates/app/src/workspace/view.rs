@@ -5,8 +5,8 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use gpui::{
-    ClickEvent, Context, DragMoveEvent, FontWeight, IntoElement, MouseButton, Render,
-    SharedString, StyleRefinement, Transformation, Window, div, percentage,
+    ClickEvent, Context, DragMoveEvent, FontWeight, IntoElement, MouseButton, MouseDownEvent, Render,
+    SharedString, StyleRefinement, Transformation, Window, canvas, div, percentage,
 };
 
 use super::*;
@@ -16,6 +16,7 @@ use crate::ui::{self, icon, line_counts, tip};
 impl Render for Workspace {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         crate::perf::root_render();
+        self.active_row.set(None); // set again while the active row paints
         self.flush_pending_open(window, cx);
         self.spinner_drawn.set(false);
         self.refresh_metrics(window, cx);
@@ -148,6 +149,7 @@ impl Render for Workspace {
             .on_action(cx.listener(|w, _: &ZoomIn, _, cx| w.zoom(Some(1), cx)))
             .on_action(cx.listener(|w, _: &ZoomOut, _, cx| w.zoom(Some(-1), cx)))
             .on_action(cx.listener(|w, _: &ZoomReset, _, cx| w.zoom(None, cx)))
+            .on_action(cx.listener(|w, _: &SessionMenu, window, cx| w.open_session_menu(w.active, None, window, cx)))
             .on_action(cx.listener(|w, _: &Activate1, window, cx| w.activate_nth(0, window, cx)))
             .on_action(cx.listener(|w, _: &Activate2, window, cx| w.activate_nth(1, window, cx)))
             .on_action(cx.listener(|w, _: &Activate3, window, cx| w.activate_nth(2, window, cx)))
@@ -417,7 +419,7 @@ impl Workspace {
             };
             let id = group_id(&key);
             let gname = SharedString::from(format!("gh-{}", id.display()));
-            let menu_here = self.menu.as_ref().is_some_and(|m| Some(&m.root) == key.as_ref());
+            let menu_here = self.menu.as_ref().is_some_and(|m| !matches!(m.kind, projects_ui::MenuKind::Session(_)) && Some(&m.root) == key.as_ref());
             // Hover buttons: + (a session per the project default; Shift: the opposite), ▾ (with/without claude),
             // ⋯ (pin, rename, defaults, remove). Never toggle the group.
             let buttons = key.clone().map(|root| {
@@ -611,8 +613,34 @@ impl Workspace {
                 .into_any_element()
         };
         let bar = if needs_you { Some(t.state.needs_you) } else if active { Some(t.accent) } else { None };
+        let row = SharedString::from(format!("row-{}", tab.id));
+        // Hover: an x left of the state icon (over the "ago" text), on the row's own background. Paint-time only.
+        let close = div()
+            .id(("close", tab.id))
+            .absolute()
+            .right(z(18.))
+            .top(z(-3.))
+            .size(z(20.))
+            .flex()
+            .items_center()
+            .justify_center()
+            .rounded(z(radius::SM))
+            .bg(if active { t.bg.selected } else { t.bg.hover })
+            .cursor_pointer()
+            .opacity(0.)
+            .group_hover(row.clone(), |s| s.opacity(1.))
+            .child(ui::icon(icon::CLOSE, 13., t.text.muted))
+            .tooltip(tip("Close session (or middle click)"))
+            .on_click(cx.listener(move |w, _: &ClickEvent, window, cx| {
+                cx.stop_propagation();
+                w.close_session(i, false, window, cx);
+            }));
+        let group = self.tab_group(i);
+        let drag = SessionDrag { id: tab.id, group: group.clone(), pos: i, name: tab.name.clone().into() };
+        let (tab_id, accent, anchor) = (tab.id, t.accent, self.active_row.clone());
         div()
             .id(("tab", tab.id))
+            .group(row)
             .relative()
             .h(z(height::SESSION_ROW))
             .mx(z(space::SM))
@@ -626,6 +654,22 @@ impl Workspace {
             .when(active, |d| d.bg(t.bg.selected))
             .when(!active, |d| d.hover(|s| s.bg(t.bg.hover)))
             .children(bar.map(|c| div().absolute().left_0().top(z(10.)).bottom(z(10.)).w(z(2.)).rounded_full().bg(c)))
+            // Shift+F10 opens the active row's menu just below it: its bottom-left, as painted.
+            .when(active, |d| {
+                d.child(canvas(move |b, _, _| anchor.set(Some(b.bottom_left())), |_, _, _, _| {}).absolute().size_full())
+            })
+            .on_mouse_down(MouseButton::Right, cx.listener(move |w, e: &MouseDownEvent, window, cx| {
+                w.open_session_menu(i, Some(e.position), window, cx);
+            }))
+            .on_mouse_down(MouseButton::Middle, cx.listener(move |w, _, window, cx| w.close_session(i, false, window, cx)))
+            // Reorder within the group: a line where it will land (above when moving up, below when moving down).
+            .on_drag(drag, |d: &SessionDrag, _, _, cx| cx.new(|_| RowGhost(d.name.clone())))
+            .drag_over::<SessionDrag>(move |s, d, _, _| match () {
+                _ if d.group != group || d.id == tab_id => s,
+                _ if d.pos > i => s.border_t_2().border_color(accent),
+                _ => s.border_b_2().border_color(accent),
+            })
+            .on_drop(cx.listener(move |w, d: &SessionDrag, _, cx| w.drop_session(d, i, cx)))
             .on_click(cx.listener(move |w, e: &ClickEvent, window, cx| {
                 if e.click_count() == 2 {
                     w.start_rename(i, window, cx);
@@ -649,7 +693,7 @@ impl Workspace {
                             .child(tab.name.clone()),
                     )
                     .children(ago.map(|a| div().flex_none().text_size(z(text_size::XS)).text_color(t.text.dim).child(a)))
-                    .child(state_icon),
+                    .child(div().relative().flex_none().child(state_icon).child(close)),
             )
             .child(div().text_size(z(text_size::XS)).text_color(t.text.dim).child(second))
             .into_any_element()
