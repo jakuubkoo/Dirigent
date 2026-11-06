@@ -535,7 +535,7 @@ impl GitPanel {
     /// `enabled`: no job running (Create is shown but inactive meanwhile, so the strip doesn't flicker).
     /// `gone`: the remote branch was deleted: no Create (it would publish the branch again).
     fn pr_strip(&self, root: &Path, pr: &crate::pr::View, enabled: bool, gone: bool) -> Option<gpui::AnyElement> {
-        use crate::pr::{Checks, Info, State};
+        use crate::pr::{Info, State};
         let t = theme::get();
         let noun = pr.noun();
         let strip = || {
@@ -591,20 +591,33 @@ impl GitPanel {
                     State::Merged => ("Merged", t.git.renamed),
                     State::Closed => ("Closed", t.state.error),
                 };
-                let checks = match p.checks {
-                    _ if matches!(p.state, State::Merged | State::Closed) => None,
-                    Checks::None => None,
-                    Checks::Passing => Some(("checks passing", t.text.dim)),
-                    Checks::Pending => Some(("checks running", t.state.working)),
-                    Checks::Failing => Some(("checks failing", t.state.error)),
-                };
+                // "checks 3/5 · 1 failing" / "all 5 passed": each check in the tooltip, click → the checks page.
+                let checks = crate::pr::summary(&p.checks).filter(|_| matches!(p.state, State::Open | State::Draft));
+                let checks = checks.map(|(text, failing)| {
+                    let col = if crate::pr::running(&p.checks) { t.state.working } else { t.text.dim };
+                    let (list, url) = (p.checks.clone(), p.checks_url.clone());
+                    div()
+                        .id("pr-checks")
+                        .min_w_0()
+                        .flex()
+                        .gap(z(space::XS))
+                        .cursor_pointer()
+                        .hover(|s| s.underline())
+                        .child(div().flex_none().text_color(col).child(text))
+                        .children(failing.map(|f| div().min_w_0().truncate().text_color(t.state.error).child(f)))
+                        .tooltip(move |w, cx| {
+                            let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH);
+                            tip(crate::pr::check_lines(&list, now.map_or(0, |d| d.as_secs() as i64)))(w, cx)
+                        })
+                        .on_click(move |_: &ClickEvent, _, cx| cx.open_url(&url))
+                });
                 let closed = matches!(p.state, State::Merged | State::Closed);
                 Some(
                     strip()
                         .child(ui::icon(icon::PULL_REQUEST, 13., color))
                         .child(div().flex_none().text_color(t.text.primary).child(format!("#{}", p.number)))
                         .child(div().flex_none().text_color(color).child(state))
-                        .children(checks.map(|(c, col)| div().min_w_0().truncate().text_color(col).child(c)))
+                        .children(checks)
                         .child(div().flex_1())
                         .when(closed && !gone, |d| d.child(create()))
                         .child(link("pr-view", "View".into(), p.url.clone()))

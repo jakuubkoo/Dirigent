@@ -338,6 +338,8 @@ pub struct Workspace {
     pr_hint_shown: bool,
     /// Background fetch (Settings → Git), only while `fetch_minutes` > 0.
     fetch_task: Option<Task<()>>,
+    /// Refreshes the active repo's PR every 30 s while its checks run and the Changes panel shows (pr_poll_check).
+    pr_poll: Option<Task<()>>,
     /// Preferences (settings.json), and what's wrong with the file (shown on the Settings page and the status bar).
     pub(crate) settings: Settings,
     pub(crate) settings_notes: Vec<String>,
@@ -492,6 +494,7 @@ impl Workspace {
             prs: HashMap::new(),
             pr_hint_shown: saved.pr_hint_shown,
             fetch_task: None,
+            pr_poll: None,
             settings: loaded.parsed.settings,
             settings_notes: loaded.parsed.notes,
             settings_broken: loaded.parsed.broken,
@@ -2308,6 +2311,7 @@ impl Workspace {
         };
         self.git_panel.update(cx, |p, cx| p.set(view, selected, cx));
         self.sync_files(false, cx);
+        self.pr_poll_check(cx);
     }
 
     /// Changes panel: This agent / All for the active tab.
@@ -3179,6 +3183,7 @@ impl Workspace {
     fn set_dock_open(&mut self, d: Dock, open: bool, cx: &mut Context<Self>) {
         if self.docks[d.ix()].open != open {
             self.docks[d.ix()].open = open;
+            self.pr_poll_check(cx);
             self.flush_resize = true;
             self.mark_dirty(cx);
             cx.notify();
@@ -3235,6 +3240,7 @@ impl Workspace {
         let d = self.settings.layout.dock_of(tab);
         if self.docks[d.ix()].active != tab {
             self.docks[d.ix()].active = tab;
+            self.pr_poll_check(cx);
             self.mark_dirty(cx);
             cx.notify();
         }

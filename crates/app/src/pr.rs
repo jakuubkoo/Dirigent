@@ -26,20 +26,93 @@ pub enum State {
     Closed,
 }
 
+/// One check's (GitHub check run / status, GitLab job) state.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Checks {
-    None,
     Pending,
     Passing,
     Failing,
+    /// Finished without running (skipped, manual, neutral): counts as done, neither passed nor failed.
+    Skipped,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct Check {
+    pub name: String,
+    pub state: Checks,
+    /// Unix seconds; None when the forge doesn't say (or hasn't started / finished).
+    pub started: Option<i64>,
+    pub finished: Option<i64>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct Pr {
     pub number: u64,
     pub state: State,
-    pub checks: Checks,
+    pub checks: Vec<Check>,
     pub url: String,
+    /// The request's checks / pipeline page.
+    pub checks_url: String,
+}
+
+/// The strip's checks text and its red "· N failing" part: "checks 3/5" + "· 1 failing", "all 5 passed".
+/// None without checks.
+pub fn summary(checks: &[Check]) -> Option<(String, Option<String>)> {
+    let n = checks.len();
+    let count = |s| checks.iter().filter(|c| c.state == s).count();
+    let (pending, failed, skipped) = (count(Checks::Pending), count(Checks::Failing), count(Checks::Skipped));
+    let failing = (failed > 0).then(|| format!("· {failed} failing"));
+    Some(match () {
+        _ if n == 0 => return None,
+        _ if pending > 0 || failed > 0 => (format!("checks {}/{n}", n - pending), failing),
+        _ if skipped > 0 => (format!("{} passed, {skipped} skipped", n - skipped), None),
+        _ => (format!("all {n} passed"), None),
+    })
+}
+
+/// Checks are still running (the panel refreshes meanwhile).
+pub fn running(checks: &[Check]) -> bool {
+    checks.iter().any(|c| c.state == Checks::Pending)
+}
+
+/// The tooltip: one line per check, "fmt — passed in 14s", "build — running for 2m 05s".
+pub fn check_lines(checks: &[Check], now: i64) -> String {
+    let lines = checks.iter().map(|c| {
+        let took = |end: Option<i64>| c.started.zip(end).map(|(s, e)| fmt_dur(e - s));
+        let what = match c.state {
+            Checks::Pending if c.started.is_some() => format!("running for {}", took(Some(now)).unwrap_or_default()),
+            Checks::Pending => "queued".into(),
+            Checks::Passing => took(c.finished).map_or("passed".into(), |d| format!("passed in {d}")),
+            Checks::Failing => took(c.finished).map_or("failed".into(), |d| format!("failed after {d}")),
+            Checks::Skipped => "skipped".into(),
+        };
+        format!("{} — {what}", c.name)
+    });
+    lines.collect::<Vec<_>>().join("\n")
+}
+
+/// "14s", "2m 05s", "1h 12m".
+fn fmt_dur(secs: i64) -> String {
+    match secs.max(0) {
+        s if s < 60 => format!("{s}s"),
+        s if s < 3600 => format!("{}m {:02}s", s / 60, s % 60),
+        s => format!("{}h {:02}m", s / 3600, s % 3600 / 60),
+    }
+}
+
+/// `2026-11-06T20:05:00Z` / `…:00.085Z` (UTC, fractions ignored) → unix seconds; gh's "not yet" (`0001-…`) → None.
+fn unix(ts: &str) -> Option<i64> {
+    let n = |r: std::ops::Range<usize>| ts.get(r)?.parse::<i64>().ok();
+    let (y, m, d) = (n(0..4)?, n(5..7)?, n(8..10)?);
+    if y < 1970 {
+        return None;
+    }
+    // Days from 1970-01-01 (Howard Hinnant's days_from_civil).
+    let y = if m <= 2 { y - 1 } else { y };
+    let doy = (153 * ((m + 9) % 12) + 2) / 5 + d - 1;
+    let doe = y % 400 * 365 + y % 400 / 4 - y % 400 / 100 + doy;
+    let days = y / 400 * 146097 + doe - 719468;
+    Some(days * 86400 + n(11..13)? * 3600 + n(14..16)? * 60 + n(17..19)?)
 }
 
 /// What the PR strip shows for a branch.
@@ -119,8 +192,19 @@ pub fn lookup(root: &Path, branch: &str, recheck: bool) -> View {
                     &["mr", "view", branch, "-F", "json"]
                 };
                 match remote::run_tool(tool, root, args, &Cancel::default(), TOOL_TIMEOUT) {
+                    Ok(o) if forge == Forge::GitHub => Info::Known(parse_gh(&o.stdout)),
                     Ok(o) => {
-                        Info::Known(if forge == Forge::GitHub { parse_gh(&o.stdout) } else { parse_glab(&o.stdout) })
+                        let mut pr = parse_glab(&o.stdout);
+                        if let (Some(pr), Some((project, pipeline))) = (&mut pr, glab_pipeline(&o.stdout)) {
+                            let path = format!("projects/{project}/pipelines/{pipeline}/jobs?per_page=100");
+                            let jobs =
+                                remote::run_tool("glab", root, &["api", &path], &Cancel::default(), TOOL_TIMEOUT);
+                            // Without the jobs the pipeline stays one check.
+                            if let Some(jobs) = jobs.ok().and_then(|o| parse_glab_jobs(&o.stdout)) {
+                                pr.checks = jobs;
+                            }
+                        }
+                        Info::Known(pr)
                     }
                     // "no pull requests found for branch …" / "no open merge request available for …"
                     Err(e) if is_none_found(&e.to_string()) => Info::Known(None),
@@ -148,22 +232,28 @@ pub fn parse_gh(json: &str) -> Option<Pr> {
         ("MERGED", _) => State::Merged,
         _ => State::Closed,
     };
-    let checks = v["statusCheckRollup"].as_array().map_or(Checks::None, |runs| {
-        let each = runs.iter().map(|r| {
-            // CheckRun: status + conclusion; StatusContext: state.
+    let runs = v["statusCheckRollup"].as_array().map(Vec::as_slice).unwrap_or_default();
+    let checks = runs
+        .iter()
+        .map(|r| {
+            // CheckRun: name, status + conclusion; StatusContext: context, state.
             let s = r["status"].as_str().or(r["state"].as_str()).unwrap_or("");
-            let c = r["conclusion"].as_str().unwrap_or(s);
-            match (s, c) {
-                (_, "FAILURE" | "TIMED_OUT" | "CANCELLED" | "ACTION_REQUIRED" | "STARTUP_FAILURE" | "ERROR") => {
+            let c = r["conclusion"].as_str().filter(|c| !c.is_empty()).unwrap_or(s);
+            let state = match c {
+                "FAILURE" | "TIMED_OUT" | "CANCELLED" | "ACTION_REQUIRED" | "STARTUP_FAILURE" | "ERROR" => {
                     Checks::Failing
                 }
-                ("QUEUED" | "IN_PROGRESS" | "PENDING" | "WAITING" | "REQUESTED" | "EXPECTED", _) => Checks::Pending,
+                "QUEUED" | "IN_PROGRESS" | "PENDING" | "WAITING" | "REQUESTED" | "EXPECTED" => Checks::Pending,
+                "SKIPPED" | "NEUTRAL" | "STALE" => Checks::Skipped,
                 _ => Checks::Passing,
-            }
-        });
-        summarize(each)
-    });
-    Some(Pr { number: v["number"].as_u64()?, state, checks, url: v["url"].as_str()?.to_string() })
+            };
+            let name = r["name"].as_str().or(r["context"].as_str()).unwrap_or("check").to_string();
+            let at = |k: &str| r[k].as_str().and_then(unix);
+            Check { name, state, started: at("startedAt"), finished: at("completedAt") }
+        })
+        .collect();
+    let url = v["url"].as_str()?.to_string();
+    Some(Pr { number: v["number"].as_u64()?, state, checks, checks_url: format!("{url}/checks"), url })
 }
 
 /// `glab mr view <branch> -F json` (GitLab's merge request object). Built from GitLab's API docs: glab isn't
@@ -177,22 +267,51 @@ pub fn parse_glab(json: &str) -> Option<Pr> {
         "merged" => State::Merged,
         _ => State::Closed,
     };
-    let pipeline = v["head_pipeline"]["status"].as_str().or(v["pipeline"]["status"].as_str());
-    let checks = match pipeline {
-        None => Checks::None,
-        Some("success" | "skipped" | "manual") => Checks::Passing,
-        Some("failed" | "canceled") => Checks::Failing,
-        Some(_) => Checks::Pending,
-    };
-    Some(Pr { number: v["iid"].as_u64()?, state, checks, url: v["web_url"].as_str()?.to_string() })
+    let pipe = if v["head_pipeline"].is_object() { &v["head_pipeline"] } else { &v["pipeline"] };
+    let url = v["web_url"].as_str()?.to_string();
+    // The pipeline as one check until its jobs are read (glab_jobs).
+    let checks = pipe["status"].as_str().map(|s| vec![gl_check("pipeline", s, pipe)]).unwrap_or_default();
+    let checks_url = pipe["web_url"].as_str().map_or_else(|| format!("{url}/pipelines"), str::to_string);
+    Some(Pr { number: v["iid"].as_u64()?, state, checks, url, checks_url })
 }
 
-fn summarize(each: impl Iterator<Item = Checks>) -> Checks {
-    each.fold(Checks::None, |acc, c| match (acc, c) {
-        (Checks::Failing, _) | (_, Checks::Failing) => Checks::Failing,
-        (Checks::Pending, _) | (_, Checks::Pending) => Checks::Pending,
-        _ => Checks::Passing,
-    })
+/// The MR's head pipeline `(project id, pipeline id)`, for its jobs.
+fn glab_pipeline(json: &str) -> Option<(u64, u64)> {
+    let v: Value = serde_json::from_str(json).ok()?;
+    let p = if v["head_pipeline"].is_object() { &v["head_pipeline"] } else { &v["pipeline"] };
+    Some((p["project_id"].as_u64().or(v["project_id"].as_u64())?, p["id"].as_u64()?))
+}
+
+/// `glab api projects/<id>/pipelines/<id>/jobs` (GitLab's job objects; retried jobs are left out by the API).
+pub fn parse_glab_jobs(json: &str) -> Option<Vec<Check>> {
+    let v: Value = serde_json::from_str(json).ok()?;
+    let mut jobs: Vec<Check> = v
+        .as_array()?
+        .iter()
+        .map(|j| {
+            let mut c = gl_check(j["name"].as_str().unwrap_or("job"), j["status"].as_str().unwrap_or(""), j);
+            // allow_failure: the pipeline still passes.
+            if c.state == Checks::Failing && j["allow_failure"].as_bool() == Some(true) {
+                c.state = Checks::Skipped;
+            }
+            c
+        })
+        .collect();
+    // The API lists the newest job first.
+    jobs.reverse();
+    (!jobs.is_empty()).then_some(jobs)
+}
+
+/// A GitLab pipeline or job by its status.
+fn gl_check(name: &str, status: &str, v: &Value) -> Check {
+    let state = match status {
+        "success" => Checks::Passing,
+        "failed" | "canceled" => Checks::Failing,
+        "skipped" | "manual" => Checks::Skipped,
+        _ => Checks::Pending,
+    };
+    let at = |k: &str| v[k].as_str().and_then(unix);
+    Check { name: name.to_string(), state, started: at("started_at"), finished: at("finished_at") }
 }
 
 /// The request's title: the last commit's subject, else the branch name made readable.
@@ -277,36 +396,80 @@ pub fn create(root: &Path, cancel: &Cancel) -> Result<(String, String), GitError
 mod tests {
     use super::*;
 
+    fn fixture(name: &str) -> Pr {
+        let path = format!("{}/tests/fixtures/{name}", env!("CARGO_MANIFEST_DIR"));
+        parse_gh(&std::fs::read_to_string(path).unwrap()).unwrap()
+    }
+
+    fn text(pr: &Pr) -> String {
+        summary(&pr.checks).map(|(t, f)| f.map_or(t.clone(), |f| format!("{t} {f}"))).unwrap_or_default()
+    }
+
     #[test]
     fn gh_real_output() {
-        // Captured from `gh pr view 8 --json number,state,isDraft,url,statusCheckRollup` (gh 2.46, this repo).
-        let pr = parse_gh(include_str!("../tests/fixtures/gh_pr_view_merged.json")).unwrap();
-        assert_eq!((pr.number, pr.state, pr.checks), (8, State::Merged, Checks::Passing));
-        assert!(pr.url.ends_with("/pull/8"));
-        let one = |s: &str| {
-            parse_gh(&format!(r#"{{"number":1,"state":"OPEN","isDraft":false,"url":"u","statusCheckRollup":[{s}]}}"#))
-                .unwrap()
-                .checks
-        };
-        assert_eq!(
-            one(r#"{"status":"IN_PROGRESS","conclusion":""},{"status":"COMPLETED","conclusion":"SUCCESS"}"#),
-            Checks::Pending
+        // Captured with `gh pr view <n> --json number,state,isDraft,url,statusCheckRollup` (gh 2.46).
+        // This repo's #8: 6 passed, 2 skipped.
+        let pr = fixture("gh_pr_view_merged.json");
+        assert_eq!((pr.number, pr.state), (8, State::Merged));
+        assert!(pr.url.ends_with("/pull/8") && pr.checks_url.ends_with("/pull/8/checks"));
+        assert_eq!(text(&pr), "6 passed, 2 skipped");
+        assert!(!running(&pr.checks));
+        // This repo's #19 mid-run: 3 of 5 done, gh's "not finished" completedAt is no time.
+        let pr = fixture("gh_pr_view_running.json");
+        assert_eq!((text(&pr), pr.state), ("checks 3/5".into(), State::Open));
+        assert!(running(&pr.checks));
+        let build = &pr.checks[0];
+        assert_eq!((build.name.as_str(), build.state, build.finished), ("build", Checks::Pending, None));
+        // A public PR mid-run with a failed status context (StatusContext: `context`, `state`).
+        let pr = fixture("gh_pr_view_failing_running.json");
+        assert_eq!(text(&pr), "checks 3/7 · 1 failing");
+        assert!(pr.checks.iter().any(|c| c.name == "renovate/artifacts" && c.state == Checks::Failing));
+        // A public PR, finished: 2 failed, 2 skipped, 1 neutral.
+        let pr = fixture("gh_pr_view_failed.json");
+        assert_eq!(text(&pr), "checks 5/5 · 2 failing");
+        assert!(!running(&pr.checks));
+
+        let all = parse_gh(
+            r#"{"number":1,"state":"OPEN","isDraft":false,"url":"u","statusCheckRollup":[{"state":"SUCCESS"},{"state":"SUCCESS"}]}"#,
         );
-        assert_eq!(one(r#"{"status":"COMPLETED","conclusion":"FAILURE"},{"status":"QUEUED"}"#), Checks::Failing);
-        assert_eq!(one(r#"{"state":"SUCCESS"}"#), Checks::Passing);
-        assert_eq!(one(""), Checks::None);
+        assert_eq!(text(&all.unwrap()), "all 2 passed");
         let draft = parse_gh(r#"{"number":2,"state":"OPEN","isDraft":true,"url":"u","statusCheckRollup":[]}"#).unwrap();
-        assert_eq!(draft.state, State::Draft);
+        assert_eq!((draft.state, summary(&draft.checks)), (State::Draft, None));
         assert!(is_none_found("no pull requests found for branch \"x\""));
     }
 
     #[test]
+    fn check_tooltip() {
+        let pr = fixture("gh_pr_view_running.json");
+        let now = unix("2026-11-06T20:07:05Z").unwrap();
+        let lines = check_lines(&pr.checks, now);
+        assert_eq!(lines.lines().next(), Some("build — running for 2m 05s"));
+        assert!(lines.contains("fmt — passed in 14s"), "{lines}");
+        assert_eq!(unix("1970-01-02T00:00:01.085Z"), Some(86401));
+        assert_eq!(unix("0001-01-01T00:00:00Z"), None);
+        assert_eq!(fmt_dur(4380), "1h 13m");
+    }
+
+    #[test]
     fn glab_output() {
-        let v = r#"{"iid":12,"state":"opened","draft":false,"web_url":"https://gl/x/-/merge_requests/12","head_pipeline":{"status":"running"}}"#;
+        // From GitLab's API docs (merge request + pipeline jobs objects); not captured live.
+        let v = r#"{"iid":12,"state":"opened","draft":false,"project_id":7,"web_url":"https://gl/x/-/merge_requests/12","head_pipeline":{"id":99,"project_id":7,"status":"running","web_url":"https://gl/x/-/pipelines/99"}}"#;
         let pr = parse_glab(v).unwrap();
-        assert_eq!((pr.number, pr.state, pr.checks), (12, State::Open, Checks::Pending));
+        assert_eq!((pr.number, pr.state, text(&pr)), (12, State::Open, "checks 0/1".into()));
+        assert_eq!((pr.checks_url.as_str(), glab_pipeline(v)), ("https://gl/x/-/pipelines/99", Some((7, 99))));
+        let jobs = r#"[
+            {"id":3,"name":"deploy","status":"manual","started_at":null,"finished_at":null,"allow_failure":false},
+            {"id":2,"name":"lint","status":"failed","started_at":"2026-11-06T10:00:00.000Z","finished_at":"2026-11-06T10:00:30.000Z","allow_failure":true},
+            {"id":1,"name":"test","status":"running","started_at":"2026-11-06T10:00:00.000Z","finished_at":null,"allow_failure":false}
+        ]"#;
+        let jobs = parse_glab_jobs(jobs).unwrap();
+        assert_eq!(
+            jobs.iter().map(|c| (c.name.as_str(), c.state)).collect::<Vec<_>>(),
+            [("test", Checks::Pending), ("lint", Checks::Skipped), ("deploy", Checks::Skipped)]
+        );
+        assert_eq!(summary(&jobs).unwrap().0, "checks 2/3");
         let merged = parse_glab(r#"{"iid":3,"state":"merged","web_url":"u"}"#).unwrap();
-        assert_eq!((merged.state, merged.checks), (State::Merged, Checks::None));
+        assert_eq!((merged.state, merged.checks.len(), merged.checks_url.as_str()), (State::Merged, 0, "u/pipelines"));
     }
 
     /// Live: `DIRIGENT_LIVE_REPO=<clone of a GitLab test project>` (credentials from your git setup or

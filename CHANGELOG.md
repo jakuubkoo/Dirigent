@@ -6,6 +6,12 @@ All notable changes to Dirigent are recorded here. The format follows
 
 ## [Unreleased]
 
+### Changed
+
+- The PR/MR strip shows check progress ("checks 3/5 · 1 failing", "all 5 passed") with each check's state and
+  duration in a tooltip; clicking it opens the checks page. While checks run and the Changes panel is visible, the
+  strip refreshes every 30 s. GitLab (with `glab`) lists the pipeline's jobs.
+
 ### Added
 
 - **Find in the terminal** (Ctrl+Alt+F): searches the screen and the whole scrollback (also in full-screen apps),

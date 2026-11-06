@@ -184,6 +184,41 @@ impl Workspace {
         .detach();
     }
 
+    /// The repo whose PR checks are running in the visible Changes panel (the active tab's), if any.
+    fn pr_poll_root(&self) -> Option<PathBuf> {
+        let Some(TabRepo::Repo(root)) = self.tabs.get(self.active).map(|t| &t.repo) else { return None };
+        let slot = self.prs.get(root)?;
+        let Some(crate::pr::Info::Known(Some(pr))) = slot.view.as_ref().map(|v| &v.info) else { return None };
+        let open = matches!(pr.state, crate::pr::State::Open | crate::pr::State::Draft);
+        (open && crate::pr::running(&pr.checks) && self.panel_visible(Panel::Changes)).then(|| root.clone())
+    }
+
+    /// Starts the 30 s PR refresh when checks run in the visible panel, stops it otherwise (finished, panel hidden,
+    /// another tab): no gh/glab calls while idle.
+    pub(super) fn pr_poll_check(&mut self, cx: &mut Context<Self>) {
+        if self.pr_poll_root().is_none() {
+            self.pr_poll = None;
+        } else if self.pr_poll.is_none() {
+            self.pr_poll = Some(cx.spawn(async move |this, cx| {
+                loop {
+                    cx.background_executor().timer(Duration::from_secs(30)).await;
+                    let more = this.update(cx, |w, cx| {
+                        let root = w.pr_poll_root();
+                        if let Some(root) = root.clone() {
+                            w.pr_lookup(root, false, cx);
+                        } else {
+                            w.pr_poll = None;
+                        }
+                        root.is_some()
+                    });
+                    if !matches!(more, Ok(true)) {
+                        return;
+                    }
+                }
+            }));
+        }
+    }
+
     /// Settings → Git: one timer that fetches every watched repo every N minutes (none when 0).
     pub(super) fn restart_fetch_timer(&mut self, cx: &mut Context<Self>) {
         let minutes = self.settings.fetch_minutes;

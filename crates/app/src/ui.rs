@@ -148,7 +148,7 @@ impl Render for Tip {
             .border_color(t.border.strong)
             .text_size(z(text_size::XS))
             .text_color(t.text.primary)
-            .child(self.0.clone())
+            .children(self.0.lines().map(|l| div().child(l.to_string())))
     }
 }
 
