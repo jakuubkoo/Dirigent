@@ -298,6 +298,11 @@ impl Session {
         self.flags.visible.load(Ordering::Acquire)
     }
 
+    /// Clears the unread flag without showing the session (the sidebar's "Mark as read").
+    pub fn clear_unread(&self) {
+        self.flags.unread.store(false, Ordering::Release);
+    }
+
     pub fn is_unread(&self) -> bool {
         self.flags.unread.load(Ordering::Acquire)
     }

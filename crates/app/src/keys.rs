@@ -30,6 +30,8 @@ shortcuts![
     ("ctrl-shift-e", ShowFiles, "Show Files"),
     ("ctrl-shift-d", ToggleDiffMode, "Unified / split diff"),
     ("ctrl-,", OpenSettings, "Settings"),
+    ("shift-f10", SessionMenu, "Session menu (also the Menu key; or right click a session)"),
+    ("menu", SessionMenu, ""),
     // UI zoom (the whole window, terminal font included). Bindings are matched before any view's key handler, so
     // the terminal (and claude in it) never sees these keys.
     ("ctrl-=", ZoomIn, "Zoom in (whole UI)"),
@@ -50,7 +52,9 @@ shortcuts![
 /// Keys that only work in one place (handled by that view), shown after the table.
 pub const EXTRA: &[(&str, &str)] = &[
     ("Ctrl+1..9", "Jump to session"),
-    ("Esc", "Close a diff, preview, Settings or dialog"),
+    ("Esc", "Close a diff, preview, Settings, menu or dialog"),
+    ("Up / Down, Enter", "Menus: choose an item, run it"),
+    ("Middle click", "Close a session (or its x on hover)"),
     ("Ctrl+Enter", "Commit (in the commit box)"),
     ("Enter", "Picker: open the setup dialog · exited session: restart it"),
     ("Ctrl+Enter / Shift+Enter", "Picker: open a session at once (Shift: the other claude choice)"),
@@ -96,9 +100,11 @@ mod tests {
         // gpui parses every key in the table the way it's shown.
         for (k, _) in TABLE {
             let ks = gpui::Keystroke::parse(k).unwrap_or_else(|e| panic!("{k}: {e:?}"));
-            assert!(ks.modifiers.control || *k == "f2", "{k}");
+            // Without Ctrl only keys no terminal app relies on.
+            assert!(ks.modifiers.control || ["f2", "shift-f10", "menu"].contains(k), "{k}");
         }
         assert_eq!(gpui::Keystroke::parse("ctrl--").unwrap().key, "-");
         assert!(listed().any(|(k, l)| k == "Ctrl+," && l == "Settings"));
+        assert_eq!(pretty("shift-f10"), "Shift+F10");
     }
 }

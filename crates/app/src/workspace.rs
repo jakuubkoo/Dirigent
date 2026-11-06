@@ -29,7 +29,7 @@ use crate::terminal_view::{Banner, PADDING, TerminalView};
 actions!(
     dirigent,
     [
-        NewSession, NewInProject, CloseSession, NextSession, PrevSession, Rename, ToggleSidebar, NextNeedsYou, ResumeAll, ShowChanges, ShowFiles, ToggleDiffMode, OpenSettings, ZoomIn, ZoomOut, ZoomReset,
+        NewSession, NewInProject, CloseSession, NextSession, PrevSession, Rename, ToggleSidebar, NextNeedsYou, ResumeAll, ShowChanges, ShowFiles, ToggleDiffMode, OpenSettings, ZoomIn, ZoomOut, ZoomReset, SessionMenu,
         Activate1, Activate2, Activate3, Activate4, Activate5, Activate6, Activate7, Activate8, Activate9
     ]
 );
@@ -134,9 +134,16 @@ enum Modal {
         files: Vec<(String, crate::changes::Mark)>,
         ok: &'static str,
         danger: bool,
-        root: PathBuf,
-        job: crate::git_ops::Job,
+        then: Then,
     },
+}
+
+/// What a confirm dialog's action button does.
+enum Then {
+    Git(PathBuf, crate::git_ops::Job),
+    /// Close / restart the tab with this id (claude runs in it).
+    Close(usize),
+    Restart(usize),
 }
 
 #[derive(Clone)]
@@ -261,6 +268,8 @@ pub struct Workspace {
     translucent: bool,
     /// The last render drew a "working" spinner (set during render, read by the spin tick).
     spinner_drawn: std::cell::Cell<bool>,
+    /// The active session row's bottom-left as last painted (the anchor of Shift+F10's menu); None when not drawn.
+    active_row: std::rc::Rc<std::cell::Cell<Option<gpui::Point<gpui::Pixels>>>>,
     _spin: Option<Task<()>>,
 }
 
@@ -380,6 +389,7 @@ impl Workspace {
             collapsed: saved.collapsed_groups.iter().cloned().collect(),
             translucent,
             spinner_drawn: Default::default(),
+            active_row: Default::default(),
             _spin: None,
         };
         this._changes_task = Some(cx.spawn(async move |this, cx| {
@@ -577,6 +587,15 @@ impl Workspace {
             cx.spawn_in(window, async move |this, cx| {
                 cx.background_executor().timer(Duration::from_millis(ms)).await;
                 let _ = this.update_in(cx, |w, window, cx| w.open_new_session(window, cx));
+            })
+            .detach();
+        }
+
+        if let Some(ms) = std::env::var("DIRIGENT_PERF_MENU").ok().and_then(|v| v.parse().ok()) {
+            // Screenshot harness: the active session's context menu (as Shift+F10) after `ms` milliseconds.
+            cx.spawn_in(window, async move |this, cx| {
+                cx.background_executor().timer(Duration::from_millis(ms)).await;
+                let _ = this.update_in(cx, |w, window, cx| w.open_session_menu(w.active, None, window, cx));
             })
             .detach();
         }
@@ -1019,8 +1038,94 @@ impl Workspace {
         }
     }
 
+    fn tab_idx(&self, id: usize) -> Option<usize> {
+        self.tabs.iter().position(|t| t.id == id)
+    }
+
+    /// Whether claude runs in tab `i` (closing or restarting it would stop it).
+    fn agent_running(&self, i: usize, cx: &gpui::App) -> bool {
+        let exited = self.tabs[i].view.as_ref().is_some_and(|v| v.read(cx).session.is_exited());
+        !exited && self.agent(i).state != agent::State::NoAgent
+    }
+
+    /// Close (Ctrl+Shift+W, the row's x, middle click, the menu) or restart (the menu) tab `i`: asks first when claude
+    /// runs in it (Enter confirms, Esc cancels).
+    pub(super) fn close_session(&mut self, i: usize, restart: bool, window: &mut Window, cx: &mut Context<Self>) {
+        if i >= self.tabs.len() {
+            return;
+        }
+        if !self.agent_running(i, cx) {
+            return if restart { self.restart_tab(i, window, cx) } else { self.close_now(i, window, cx) };
+        }
+        let (id, name) = (self.tabs[i].id, self.tabs[i].name.clone());
+        self.menu = None;
+        self.modal = Some(Modal::Confirm {
+            title: if restart { "Restart shell?" } else { "Close session?" }.to_string(),
+            body: format!("claude is running in {name}; it will be stopped."),
+            files: Vec::new(),
+            ok: if restart { "Restart shell" } else { "Close session" },
+            danger: true,
+            then: if restart { Then::Restart(id) } else { Then::Close(id) },
+        });
+        window.focus(&self.focus, cx);
+        cx.notify();
+    }
+
+    /// A new session in tab `i`'s directory and project (its defaults apply), listed right after it.
+    pub(super) fn duplicate(&mut self, i: usize, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(t) = self.tabs.get(i) else { return };
+        let (dir, id) = (t.cwd.clone(), t.id);
+        let project = t.main_root.clone().or_else(|| self.tab_group(i));
+        let new = self.new_session_with(dir, SessionOpts { project, ..Default::default() }, window, cx);
+        // Pushed last: move it behind the original (everything else keeps its relative order, groups too).
+        let tab = self.tabs.remove(new);
+        let at = self.tab_idx(id).map_or(self.tabs.len(), |o| o + 1);
+        self.tabs.insert(at, tab);
+        self.active = at;
+        self.mark_dirty(cx);
+    }
+
+    /// Resume the saved claude session of tab `i` (a fresh shell first when it exited), and show it.
+    pub(super) fn resume_one(&mut self, i: usize, window: &mut Window, cx: &mut Context<Self>) {
+        let exited = self.tabs[i].view.as_ref().is_some_and(|v| v.read(cx).session.is_exited());
+        if exited {
+            self.restart_tab(i, window, cx);
+        }
+        self.activate(i, window, cx);
+        if let Some(v) = self.tabs[i].view.clone() {
+            v.update(cx, |v, cx| {
+                v.set_banner(None, cx);
+                cx.notify();
+            });
+        }
+        self.resume_tabs(vec![i], cx);
+    }
+
+    /// Whether tab `i` shows unread output or an unseen "done".
+    fn has_unread(&self, i: usize, cx: &gpui::App) -> bool {
+        let unread = i != self.active && self.tabs[i].view.as_ref().is_some_and(|v| v.read(cx).session.is_unread());
+        unread || self.agent(i).unseen
+    }
+
+    pub(super) fn mark_read(&mut self, i: usize, cx: &mut Context<Self>) {
+        let t = &self.tabs[i];
+        if let Some(v) = &t.view {
+            v.read(cx).session.clear_unread();
+        }
+        if let Some(hub) = &self.agents {
+            hub.board.lock().unwrap().mark_seen(t.id as u32);
+        }
+        self.notifier.close(t.id as u32);
+        cx.notify();
+    }
+
     fn close_active(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(t) = self.tabs.get(self.active) else { return };
+        self.close_session(self.active, false, window, cx);
+    }
+
+    /// Closes tab `i`, unless it is the last session in a linked worktree: then asks whether to keep the worktree.
+    fn close_now(&mut self, i: usize, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(t) = self.tabs.get(i) else { return };
         // The last session in a linked worktree: ask whether to keep or remove the worktree.
         if let (Some(main), TabRepo::Repo(root)) = (t.main_root.clone(), t.repo.clone())
             && !self.tabs.iter().any(|o| o.id != t.id && o.repo == t.repo)
@@ -1030,7 +1135,7 @@ impl Workspace {
             return;
         }
         self.modal = None;
-        self.close_tab(self.active, window, cx);
+        self.close_tab(i, window, cx);
     }
 
     /// Closes tab `idx` now (its shell and whatever runs in it are killed off-thread).
@@ -1070,7 +1175,13 @@ impl Workspace {
     }
 
     pub fn restart(&mut self, view_id: EntityId, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(i) = self.tab_of_view(view_id) else { return };
+        if let Some(i) = self.tab_of_view(view_id) {
+            self.restart_tab(i, window, cx);
+        }
+    }
+
+    /// A new shell in tab `i` (the old one, and whatever runs in it, is killed off-thread).
+    fn restart_tab(&mut self, i: usize, window: &mut Window, cx: &mut Context<Self>) {
         if let Some(hub) = &self.agents {
             hub.board.lock().unwrap().reset_live(self.tabs[i].id as u32);
         }
@@ -1116,10 +1227,7 @@ impl Workspace {
     fn modal_key(&mut self, ev: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
         let ks = &ev.keystroke;
         if self.menu.is_some() {
-            if ks.key == "escape" {
-                self.menu = None;
-                cx.notify();
-            }
+            self.menu_key(&ks.key, window, cx);
             cx.stop_propagation(); // a dropdown is open: keys go nowhere else
             return;
         }

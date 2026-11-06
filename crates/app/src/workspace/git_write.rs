@@ -144,8 +144,7 @@ impl Workspace {
             files: marked,
             ok: if amend { "Amend" } else { "Commit" },
             danger: false,
-            root,
-            job: Job::CommitOnly { message, files, amend },
+            then: Then::Git(root, Job::CommitOnly { message, files, amend }),
         });
         window.focus(&self.focus, cx);
         cx.notify();
@@ -225,16 +224,27 @@ impl Workspace {
             ),
             _ => return,
         };
-        self.modal = Some(Modal::Confirm { title, body, files: Vec::new(), ok: "Discard", danger: true, root, job });
+        self.modal = Some(Modal::Confirm { title, body, files: Vec::new(), ok: "Discard", danger: true, then: Then::Git(root, job) });
         window.focus(&self.focus, cx);
         cx.notify();
     }
 
-    /// The confirm dialog's action button (Discard / Commit).
+    /// The confirm dialog's action button (Discard / Commit / Close session / Restart shell).
     pub(super) fn confirm_ok(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if let Some(Modal::Confirm { root, job, .. }) = self.modal.take() {
-            self.close_modal(window, cx);
-            self.run_git(root, job, cx);
+        let Some(Modal::Confirm { then, .. }) = self.modal.take() else { return };
+        self.close_modal(window, cx);
+        match then {
+            Then::Git(root, job) => self.run_git(root, job, cx),
+            Then::Close(id) => {
+                if let Some(i) = self.tab_idx(id) {
+                    self.close_now(i, window, cx);
+                }
+            }
+            Then::Restart(id) => {
+                if let Some(i) = self.tab_idx(id) {
+                    self.restart_tab(i, window, cx);
+                }
+            }
         }
     }
 }

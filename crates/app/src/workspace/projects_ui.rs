@@ -41,11 +41,14 @@ pub(super) enum PickRow {
     },
 }
 
-/// An open dropdown under a group header button.
+/// An open dropdown: under a group header button, or a session row's context menu.
 pub(super) struct Menu {
+    /// The project (group menus) or the session's directory.
     pub root: PathBuf,
     pub kind: MenuKind,
     pub at: Point<Pixels>,
+    /// The keyboard selection (index into `menu_items`); the mouse only hovers.
+    pub sel: Option<usize>,
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -54,6 +57,24 @@ pub(super) enum MenuKind {
     New,
     /// ⋯: pin, rename, defaults, remove.
     Project,
+    /// Right click / Shift+F10 on a session row: the tab id.
+    Session(usize),
+}
+
+/// (action, label, one-line explanation)
+type Item = (&'static str, &'static str, &'static str);
+
+/// Up/Down over `n` items from `sel`, wrapping; nothing selected yet: Down takes the first, Up the last.
+fn menu_step(sel: Option<usize>, n: usize, down: bool) -> Option<usize> {
+    if n == 0 {
+        return None;
+    }
+    Some(match (sel, down) {
+        (None, true) => 0,
+        (None, false) => n - 1,
+        (Some(s), true) => (s + 1) % n,
+        (Some(s), false) => (s + n - 1) % n,
+    })
 }
 
 const PAGE: usize = 10;
@@ -256,13 +277,111 @@ impl Workspace {
     }
 
     pub(super) fn open_menu(&mut self, root: PathBuf, kind: MenuKind, at: Point<Pixels>, cx: &mut Context<Self>) {
-        self.menu = Some(Menu { root, kind, at });
+        self.menu = Some(Menu { root, kind, at, sel: None });
+        cx.notify();
+    }
+
+    /// Tab `i`'s context menu at `at` (right click), or under its row with the first item selected (Shift+F10).
+    pub(super) fn open_session_menu(&mut self, i: usize, at: Option<Point<Pixels>>, window: &mut Window, cx: &mut Context<Self>) {
+        if matches!(self.modal, Some(Modal::Rename { .. })) {
+            self.commit_rename(window, cx);
+        }
+        let Some(t) = self.tabs.get(i).filter(|_| self.modal.is_none()) else { return };
+        let keyboard = at.is_none();
+        // Collapsed sidebar: below the title bar, by the left edge.
+        let at = at.or(self.active_row.get()).unwrap_or_else(|| gpui::point(z(16.), z(theme::height::TITLE_BAR + theme::height::HEADER)));
+        // Focus stays where it is: the root's capture-phase `modal_key` gets the keys anyway, and Esc returns to the
+        // terminal untouched (no cursor repaint).
+        self.menu = Some(Menu { root: t.cwd.clone(), kind: MenuKind::Session(t.id), at, sel: keyboard.then_some(0) });
+        cx.notify();
+    }
+
+    /// The open menu's items (the same list is drawn and walked by the keyboard).
+    fn menu_items(&self, menu: &Menu, cx: &gpui::App) -> Vec<Item> {
+        match menu.kind {
+            MenuKind::New => vec![
+                ("setup", "New session…", "Name it, or give it its own git worktree"),
+                ("new", "New session", ""),
+                ("claude", "New session with claude", ""),
+            ],
+            MenuKind::Project => {
+                let pinned = self.projects.get(&menu.root).is_some_and(|p| p.pinned);
+                let mut v = vec![
+                    if pinned {
+                        ("pin", "Unpin", "The group disappears when its last session closes")
+                    } else {
+                        ("pin", "Pin to sidebar", "Keep this group in the sidebar even with no sessions")
+                    },
+                    ("rename", "Rename…", "The name shown in the sidebar and the picker"),
+                    ("defaults", "Defaults…", "Start claude, its flags, worktree setup command and location"),
+                    ("worktrees", "Worktrees…", "List, open or clean up this repo's git worktrees"),
+                ];
+                if self.projects.get(&menu.root).is_some() {
+                    v.push(("remove", "Remove from recent projects", "Forget it in the picker; files and open sessions stay"));
+                }
+                v
+            }
+            MenuKind::Session(id) => {
+                let Some(i) = self.tab_idx(id) else { return Vec::new() };
+                let t = &self.tabs[i];
+                let exited = t.view.as_ref().is_some_and(|v| v.read(cx).session.is_exited());
+                let resumable = t.claude_session.is_some() && (exited || self.agent(i).state == agent::State::NoAgent);
+                let files = !self.tracker.view(id as u32).touched.is_empty();
+                let mut v = vec![
+                    ("rename", "Rename", ""),
+                    ("close", "Close session", ""),
+                    ("restart", "Restart shell", ""),
+                    ("duplicate", "Duplicate", "A new session in the same directory, with the project's defaults"),
+                ];
+                if resumable {
+                    v.push(("resume", "Resume Claude session", ""));
+                }
+                if self.has_unread(i, cx) {
+                    v.push(("read", "Mark as read", ""));
+                }
+                v.push(("copy", "Copy path", ""));
+                v.push(("open", "Open folder in file manager", ""));
+                if files {
+                    v.push(("forget", "Forget agent's files", "Clears this agent's file list; no file is touched"));
+                }
+                v
+            }
+        }
+    }
+
+    /// Keys while a menu is open (capture phase): arrows walk it, Enter runs the selection, Esc closes; nothing else
+    /// gets through.
+    pub(super) fn menu_key(&mut self, key: &str, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(menu) = &self.menu else { return };
+        match key {
+            "escape" => self.menu = None,
+            "up" | "down" => {
+                let n = self.menu_items(menu, cx).len();
+                let sel = menu_step(menu.sel, n, key == "down");
+                if let Some(m) = &mut self.menu {
+                    m.sel = sel;
+                }
+            }
+            "enter" => {
+                let action = menu.sel.and_then(|s| self.menu_items(menu, cx).get(s).map(|i| i.0));
+                if let Some(action) = action {
+                    return self.menu_action(action, window, cx);
+                }
+            }
+            _ => return,
+        }
         cx.notify();
     }
 
     fn menu_action(&mut self, action: &'static str, window: &mut Window, cx: &mut Context<Self>) {
         let Some(menu) = self.menu.take() else { return };
         let root = menu.root;
+        if let MenuKind::Session(id) = menu.kind {
+            if let Some(i) = self.tab_idx(id) {
+                self.session_action(i, action, root, window, cx);
+            }
+            return cx.notify();
+        }
         match action {
             "setup" => self.open_setup(root, window, cx),
             "worktrees" => self.open_worktrees(root, window, cx),
@@ -311,6 +430,37 @@ impl Workspace {
         cx.notify();
     }
 
+    fn session_action(&mut self, i: usize, action: &str, dir: PathBuf, window: &mut Window, cx: &mut Context<Self>) {
+        match action {
+            "rename" => self.start_rename(i, window, cx),
+            "close" => self.close_session(i, false, window, cx),
+            "restart" => self.close_session(i, true, window, cx),
+            "duplicate" => self.duplicate(i, window, cx),
+            "resume" => self.resume_one(i, window, cx),
+            "read" => self.mark_read(i, cx),
+            "copy" => cx.write_to_clipboard(gpui::ClipboardItem::new_string(dir.display().to_string())),
+            "open" => {
+                // Waited on its own thread: no zombie, and a slow file manager never holds the UI.
+                std::thread::spawn(move || {
+                    let status = std::process::Command::new("xdg-open")
+                        .arg(&dir)
+                        .stdin(std::process::Stdio::null())
+                        .stdout(std::process::Stdio::null())
+                        .stderr(std::process::Stdio::null())
+                        .status();
+                    if !status.as_ref().is_ok_and(|s| s.success()) {
+                        eprintln!("open folder {}: {status:?}", dir.display());
+                    }
+                });
+            }
+            "forget" => {
+                self.tracker.clear(self.tabs[i].id as u32);
+                self.sync_panel(cx);
+            }
+            _ => {}
+        }
+    }
+
     /// The group header's `+`: a session in that project per its default; Shift: the opposite.
     pub(super) fn group_plus(&mut self, root: PathBuf, shift: bool, window: &mut Window, cx: &mut Context<Self>) {
         let auto = match self.settings.plus_opens {
@@ -326,31 +476,7 @@ impl Workspace {
     pub(super) fn menu_view(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
         let menu = self.menu.as_ref()?;
         let t = theme::get();
-        // (action, label, one-line explanation)
-        let items: Vec<(&'static str, &'static str, &'static str)> = match menu.kind {
-            MenuKind::New => vec![
-                ("setup", "New session…", "Name it, or give it its own git worktree"),
-                ("new", "New session", ""),
-                ("claude", "New session with claude", ""),
-            ],
-            MenuKind::Project => {
-                let pinned = self.projects.get(&menu.root).is_some_and(|p| p.pinned);
-                let mut v = vec![
-                    if pinned {
-                        ("pin", "Unpin", "The group disappears when its last session closes")
-                    } else {
-                        ("pin", "Pin to sidebar", "Keep this group in the sidebar even with no sessions")
-                    },
-                    ("rename", "Rename…", "The name shown in the sidebar and the picker"),
-                    ("defaults", "Defaults…", "Start claude, its flags, worktree setup command and location"),
-                    ("worktrees", "Worktrees…", "List, open or clean up this repo's git worktrees"),
-                ];
-                if self.projects.get(&menu.root).is_some() {
-                    v.push(("remove", "Remove from recent projects", "Forget it in the picker; files and open sessions stay"));
-                }
-                v
-            }
-        };
+        let (items, sel) = (self.menu_items(menu, cx), menu.sel);
         let card = div()
             .occlude()
             .min_w(z(200.))
@@ -361,9 +487,10 @@ impl Workspace {
             .border_color(t.border.strong)
             .text_size(z(text_size::SM))
             .max_w(z(340.))
-            .children(items.into_iter().map(|(action, label, hint)| {
+            .children(items.into_iter().enumerate().map(|(n, (action, label, hint))| {
                 div()
                     .id(action)
+                    .when(sel == Some(n), |d| d.bg(t.bg.hover))
                     .px(z(space::MD))
                     .py(z(space::XS))
                     .cursor_pointer()
@@ -379,6 +506,14 @@ impl Workspace {
                 .size_full()
                 .occlude()
                 .on_mouse_down(gpui::MouseButton::Left, cx.listener(|w, _, _, cx| {
+                    w.menu = None;
+                    cx.notify();
+                }))
+                .on_mouse_down(gpui::MouseButton::Right, cx.listener(|w, _, _, cx| {
+                    w.menu = None;
+                    cx.notify();
+                }))
+                .on_mouse_down(gpui::MouseButton::Middle, cx.listener(|w, _, _, cx| {
                     w.menu = None;
                     cx.notify();
                 }))
@@ -542,5 +677,20 @@ fn picker_row(p: &Picker, i: usize, now: i64, cx: &mut Context<Workspace>) -> An
             .child(div().flex_1().min_w_0().truncate().text_size(z(text_size::MD)).text_color(t.text.primary).child(format!("{label}/")))
             .child(div().flex_none().max_w(z(300.)).truncate().text_size(z(text_size::XS)).text_color(t.text.dim).child(tilde(path)))
             .into_any_element(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::menu_step;
+
+    #[test]
+    fn menu_keys_wrap() {
+        assert_eq!(menu_step(None, 3, true), Some(0));
+        assert_eq!(menu_step(None, 3, false), Some(2));
+        assert_eq!(menu_step(Some(2), 3, true), Some(0));
+        assert_eq!(menu_step(Some(0), 3, false), Some(2));
+        assert_eq!(menu_step(Some(1), 3, true), Some(2));
+        assert_eq!(menu_step(None, 0, true), None);
     }
 }
