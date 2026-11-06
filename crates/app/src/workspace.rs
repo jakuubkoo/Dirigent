@@ -138,6 +138,18 @@ enum Modal {
     },
 }
 
+/// Closing the window (title-bar x, the compositor) drops the workspace before `on_app_quit` runs, and with it the
+/// throttled save task: a change from the last 500 ms would be lost. Save it here.
+impl Drop for Workspace {
+    fn drop(&mut self) {
+        if self.save_pending
+            && let Err(e) = persist::save(&self.state_path, &self.snapshot())
+        {
+            eprintln!("dirigent: saving state failed: {e}");
+        }
+    }
+}
+
 /// What a confirm dialog's action button does.
 enum Then {
     Git(PathBuf, crate::git_ops::Job),
@@ -510,6 +522,7 @@ impl Workspace {
         this._subscriptions.push(cx.on_app_quit(|w, _| {
             // Final save, synchronous: the process is about to exit.
             w._save_task = None;
+            w.save_pending = false;
             if let Err(e) = persist::save(&w.state_path, &w.snapshot()) {
                 eprintln!("dirigent: saving state failed: {e}");
             }
@@ -628,6 +641,23 @@ impl Workspace {
             cx.spawn_in(window, async move |this, cx| {
                 cx.background_executor().timer(Duration::from_millis(ms)).await;
                 let _ = this.update_in(cx, |w, window, cx| w.open_new_session(window, cx));
+            })
+            .detach();
+        }
+
+        if let Some(ms) = std::env::var("DIRIGENT_PERF_REORDER").ok().and_then(|v| v.parse().ok()) {
+            // Test harness: after 1 s the active group's last session moves to its top (as a drop would), then the
+            // window closes `ms` later (before the save throttle fires when short).
+            cx.spawn_in(window, async move |this, cx| {
+                cx.background_executor().timer(Duration::from_secs(1)).await;
+                let _ = this.update_in(cx, |w, _, cx| {
+                    let Some((group, slots)) = w.groups().into_iter().find(|(_, m)| m.contains(&w.active)) else { return };
+                    let (Some(&first), Some(&last)) = (slots.first(), slots.last()) else { return };
+                    let drag = SessionDrag { id: w.tabs[last].id, group, pos: last, name: SharedString::default() };
+                    w.drop_session(&drag, first, cx);
+                });
+                cx.background_executor().timer(Duration::from_millis(ms)).await;
+                let _ = this.update_in(cx, |_, window, _| window.remove_window());
             })
             .detach();
         }
