@@ -148,8 +148,20 @@ impl Workspace {
             }
             None => return,
         };
-        let dirty = self.repos.status(&root).map_or(0, |s| s.files.len() + s.more);
         self.close_modal(window, cx);
+        self.switch_branch(root, job, target, window, cx);
+    }
+
+    /// Switches now on a clean tree; with uncommitted changes asks first (they move along, or git refuses).
+    pub(super) fn switch_branch(
+        &mut self,
+        root: PathBuf,
+        job: Job,
+        target: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let dirty = self.repos.status(&root).map_or(0, |s| s.files.len() + s.more);
         if dirty == 0 {
             return self.run_git(root, job, cx);
         }

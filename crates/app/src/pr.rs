@@ -341,6 +341,35 @@ mod tests {
         eprintln!("live: {branch} → {:?}", v.info);
     }
 
+    /// Live: `DIRIGENT_LIVE_GH_REPO=<clone of a GitHub repo>` with gh logged in, `cargo test -p dirigent github_live
+    /// -- --ignored`. Pushes a throwaway branch and opens a PR (close it and delete the branch afterwards).
+    #[test]
+    #[ignore]
+    fn github_live() {
+        let Ok(repo) = std::env::var("DIRIGENT_LIVE_GH_REPO") else { return };
+        let root = std::path::Path::new(&repo);
+        let git = |args: &[&str]| {
+            let ok = std::process::Command::new("git").args(args).current_dir(root).status().unwrap().success();
+            assert!(ok, "git {args:?}");
+        };
+        let branch = format!("test/dirigent-create-pr-{}", std::process::id());
+        git(&["switch", "-q", "-c", &branch, "origin/main"]);
+        std::fs::write(root.join("dirigent-create-pr-test.txt"), "temporary\n").unwrap();
+        git(&["add", "."]);
+        git(&["-c", "commit.gpgsign=false", "commit", "-q", "-m", "Temporary: test Create PR from Dirigent"]);
+        // Not pushed yet: create publishes the branch, then gh creates the PR.
+        let (url, note) = create(root, &Cancel::default()).unwrap();
+        assert!(url.contains("/pull/"), "{url}");
+        assert_eq!(note, "Pull request created");
+        // Again: gh says it exists; we open that one.
+        let (again, note) = create(root, &Cancel::default()).unwrap();
+        assert_eq!((again.as_str(), note.as_str()), (url.as_str(), "This branch already has a pull request"));
+        let v = lookup(root, &branch, true);
+        let Info::Known(Some(pr)) = &v.info else { panic!("{v:?}") };
+        assert_eq!((pr.state, pr.url.as_str()), (State::Open, url.as_str()));
+        eprintln!("live: {branch} → #{} {url}", pr.number);
+    }
+
     #[test]
     fn titles() {
         assert_eq!(humanize("feat/git-redesign"), "Git redesign");

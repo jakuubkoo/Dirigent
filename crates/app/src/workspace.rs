@@ -785,7 +785,8 @@ impl Workspace {
         }
 
         if let Ok(spec) = std::env::var("DIRIGENT_PERF_GIT") {
-            // Screenshot harness: `<ms>:<branches|more|commit|view>` opens the branch switcher or a Changes panel menu
+            // Screenshot harness: `<ms>:<branches|more|commit|view|switch:<branch>>` opens the branch switcher, a Changes
+            // panel menu, or the switch (confirm when dirty)
             // after `ms` milliseconds.
             let (ms, what) = spec.split_once(':').unwrap_or(("1000", &spec));
             let (ms, what) = (ms.parse().unwrap_or(1000), what.to_string());
@@ -803,6 +804,10 @@ impl Workspace {
                             gpui::point(at.x, window.viewport_size().height - z(140.)),
                             cx,
                         ),
+                        s if s.starts_with("switch:") => {
+                            let b = s["switch:".len()..].to_string();
+                            w.switch_branch(root, crate::git_ops::Job::Switch(b.clone()), b, window, cx)
+                        }
                         "view" => w.open_git_menu(
                             root,
                             GitMenu::DiffView,
