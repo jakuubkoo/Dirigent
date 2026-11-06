@@ -1,12 +1,12 @@
 //! Small shared UI pieces built from theme tokens: icons, tooltips, pills, meters, time formatting.
 
 use gpui::{
-    AnyElement, AnyView, App, AppContext, Context, Div, IntoElement, ParentElement, Render, Rgba, SharedString, Styled,
-    Svg, Window, div, prelude::FluentBuilder as _, svg,
+    AnyElement, AnyView, App, AppContext, Context, Div, InteractiveElement, IntoElement, ParentElement, Render, Rgba,
+    SharedString, Stateful, StatefulInteractiveElement, Styled, Svg, Window, div, prelude::FluentBuilder as _, svg,
 };
 
 use crate::line_edit::LineEdit;
-use crate::theme::{self, radius, space, text_size, z};
+use crate::theme::{self, MONO_FONT, radius, space, text_size, z};
 
 pub mod icon {
     pub const CHECK: &str = "icons/check.svg";
@@ -175,6 +175,23 @@ pub fn text_input(edit: &LineEdit, focused: bool, placeholder: &'static str) -> 
                 .child(div().flex_none().whitespace_nowrap().child(edit.after_cursor().to_string()))
         })
         .into_any_element()
+}
+
+/// A search option toggle (`.*`, `Aa`, `ab`): filled while on; the caller adds `on_click`.
+pub fn toggle(id: &'static str, label: &'static str, on: bool, hint: &'static str) -> Stateful<Div> {
+    let t = theme::get();
+    div()
+        .id(id)
+        .flex_none()
+        .px(z(space::XS))
+        .rounded(z(radius::SM))
+        .font_family(MONO_FONT)
+        .text_size(z(text_size::XS))
+        .cursor_pointer()
+        .when(on, |d| d.bg(t.bg.selected).text_color(t.text.primary))
+        .when(!on, |d| d.text_color(t.text.dim).hover(|s| s.bg(t.bg.hover)))
+        .child(label)
+        .tooltip(tip(hint))
 }
 
 /// A checkbox's box (12 px; filled with the accent when on).
