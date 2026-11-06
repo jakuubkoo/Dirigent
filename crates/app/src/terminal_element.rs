@@ -1,7 +1,7 @@
 //! Paints the visible terminal grid. The term lock is held only while copying the grid into
 //! segments/rects; shaping and painting happen after it is released.
 
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 use std::time::Instant;
 
@@ -17,6 +17,7 @@ use session::alacritty_terminal::index::Point as GridPoint;
 use session::alacritty_terminal::term::cell::Flags;
 use session::alacritty_terminal::term::color::Colors;
 use session::alacritty_terminal::vte::ansi::{Color, CursorShape, NamedColor};
+use session::find::{self, Match, RegexSearch};
 
 use crate::terminal_view::TerminalView;
 use crate::theme::{self, MONO_FONT, z};
@@ -103,6 +104,8 @@ pub struct TerminalElement {
     /// While a mouse button is held in the grid: the view gets every move / release in the window, also past the
     /// grid's edge (a div's handlers only fire while hovered).
     drag: Option<WeakEntity<TerminalView>>,
+    /// Find bar open: its regex (the viewport is matched under the lock in prepaint) and the current match.
+    find: Option<(Rc<RefCell<RegexSearch>>, Option<Match>)>,
 }
 
 impl TerminalElement {
@@ -112,8 +115,9 @@ impl TerminalElement {
         bounds: Rc<Cell<Bounds<Pixels>>>,
         hover: Option<(GridPoint, GridPoint)>,
         drag: Option<WeakEntity<TerminalView>>,
+        find: Option<(Rc<RefCell<RegexSearch>>, Option<Match>)>,
     ) -> Self {
-        Self { session, m, bounds, hover, drag }
+        Self { session, m, bounds, hover, drag, find }
     }
 }
 
@@ -168,6 +172,8 @@ impl Element for TerminalElement {
         self.bounds.set(bounds);
         let m = &self.m;
         let selection_bg: Hsla = theme::get().terminal.selection.into();
+        let (match_bg, current_bg): (Hsla, Hsla) =
+            (theme::get().search_match.into(), theme::get().search_current.into());
         let hover = self.hover;
         let mut rects: Vec<(usize, usize, usize, Hsla)> = Vec::new();
         let mut segs: Vec<Segment> = Vec::new();
@@ -184,6 +190,12 @@ impl Element for TerminalElement {
             let cur_at = (cur_row as usize, cur.point.column.0);
             // Only with a selection / a hovered link: no extra work per cell otherwise.
             let selection = content.selection;
+            // Find bar: the viewport's matches, sorted like `display_iter` walks the cells.
+            let (matches, current) = match &self.find {
+                Some((re, current)) => (find::visible(&term, &mut re.borrow_mut()), current.clone()),
+                None => (Vec::new(), None),
+            };
+            let mut mi = 0;
 
             for cell in content.display_iter {
                 let flags = cell.flags;
@@ -205,6 +217,14 @@ impl Element for TerminalElement {
                 }
                 if flags.contains(Flags::HIDDEN) {
                     fg = bg;
+                }
+                if !matches.is_empty() {
+                    while mi < matches.len() && *matches[mi].end() < cell.point {
+                        mi += 1;
+                    }
+                    if let Some(m) = matches.get(mi).filter(|m| *m.start() <= cell.point) {
+                        bg = if current.as_ref() == Some(m) { current_bg } else { match_bg };
+                    }
                 }
                 if selection.is_some_and(|s| s.contains(cell.point)) {
                     bg = selection_bg;

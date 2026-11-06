@@ -50,6 +50,7 @@ actions!(
         QuickOpen,
         CommandPalette,
         FindInFiles,
+        FindInTerminal,
         GitSync,
         GitFetch,
         GitPull,
@@ -780,6 +781,27 @@ impl Workspace {
                 let _ = this.update_in(cx, |w, window, cx| {
                     crate::perf::event("cc open");
                     w.open_cc(&input, window, cx);
+                });
+            })
+            .detach();
+        }
+
+        if let Ok(spec) = std::env::var("DIRIGENT_PERF_FIND") {
+            // Perf / screenshot harness: `<ms>:<query>` opens the active session's find bar with that query, a
+            // `re:` prefix with the regex toggle on (`find start` / `find done N matches X ms` with DIRIGENT_PERF=2).
+            let (ms, query) = spec.split_once(':').unwrap_or((&spec, ""));
+            let (ms, query) = (ms.parse().unwrap_or(1000), query.to_string());
+            cx.spawn_in(window, async move |this, cx| {
+                cx.background_executor().timer(Duration::from_millis(ms)).await;
+                let _ = this.update_in(cx, |w, window, cx| {
+                    let (regex, query) = match query.strip_prefix("re:") {
+                        Some(q) => (true, q.to_string()),
+                        None => (false, query),
+                    };
+                    w.find_in_terminal(Some(query), window, cx);
+                    if let (true, Some(view)) = (regex, w.tabs.get(w.active).and_then(|t| t.view.clone())) {
+                        view.update(cx, |v, cx| v.toggle_find('r', cx));
+                    }
                 });
             })
             .detach();
@@ -2621,6 +2643,16 @@ impl Workspace {
             Overlay::Diff(d) => Some(d.read(cx).root.clone()),
             Overlay::File(f) => f.read(cx).repo.clone(),
             Overlay::Settings(_) => None,
+        }
+    }
+
+    /// Ctrl+Alt+F: the find bar of the active session (a diff, preview or Settings over it closes first).
+    pub fn find_in_terminal(&mut self, query: Option<String>, window: &mut Window, cx: &mut Context<Self>) {
+        if self.overlay.is_some() {
+            self.close_overlay(window, cx);
+        }
+        if let Some(view) = self.tabs.get(self.active).and_then(|t| t.view.clone()) {
+            view.update(cx, |v, cx| v.open_find(query, window, cx));
         }
     }
 

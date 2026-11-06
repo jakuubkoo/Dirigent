@@ -6,6 +6,12 @@ All notable changes to Dirigent are recorded here. The format follows
 
 ## [Unreleased]
 
+### Added
+
+- **Find in the terminal** (Ctrl+Alt+F): searches the screen and the whole scrollback (also in full-screen apps),
+  highlights every match, Enter / Shift+Enter step to the next / previous one, match case and regex toggles, Esc
+  closes. Not Ctrl+F: the shell, Claude Code and less/vim use it.
+
 ### Changed
 
 - The `+` on a project group header opens the New session setup dialog (name, git worktree, first prompt) for that

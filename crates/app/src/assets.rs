@@ -22,6 +22,7 @@ static ICONS: &[(&str, &[u8])] = icons![
     "external-link",
     "chevron-right",
     "chevron-down",
+    "chevron-up",
     "plus",
     "x",
     "minus",
