@@ -59,6 +59,8 @@ pub struct View {
     pub info: Info,
     /// The branch has an upstream (pushed): "Create PR…" makes sense without pushing first.
     pub pushed: bool,
+    /// The remote's default branch (`main`), for "Switch to main and pull"; None without a remote.
+    pub default: Option<String>,
 }
 
 impl View {
@@ -102,7 +104,10 @@ fn target(root: &Path, branch: &str) -> Option<(String, Host)> {
 /// The strip for `branch`. `recheck`: ask gh/glab whether they're logged in again.
 pub fn lookup(root: &Path, branch: &str, recheck: bool) -> View {
     let pushed = remote::upstream(root).is_some();
-    let Some((_, host)) = target(root, branch) else { return View { forge: Forge::Other, info: Info::Hidden, pushed } };
+    let Some((r, host)) = target(root, branch) else {
+        return View { forge: Forge::Other, info: Info::Hidden, pushed, default: None };
+    };
+    let default = Some(remote::default_branch(root, &r));
     let info = match host.forge {
         Forge::Other => Info::Hidden,
         forge => {
@@ -126,7 +131,7 @@ pub fn lookup(root: &Path, branch: &str, recheck: bool) -> View {
             }
         }
     };
-    View { forge: host.forge, info, pushed }
+    View { forge: host.forge, info, pushed, default }
 }
 
 fn is_none_found(err: &str) -> bool {
@@ -206,6 +211,10 @@ fn humanize(branch: &str) -> String {
 /// Creates the branch's PR/MR and returns the URL to open (the new request, or the browser form to make one).
 /// Pushes (publishes) the branch first when the remote doesn't have HEAD yet.
 pub fn create(root: &Path, cancel: &Cancel) -> Result<(String, String), GitError> {
+    // A merged branch whose remote branch is gone: creating would publish it again.
+    if remote::upstream_gone(root) {
+        return Err(GitError::Failed(crate::git_ops::GONE.into()));
+    }
     let branch =
         remote::current_branch(root).ok_or_else(|| GitError::Failed("Not on a branch (detached HEAD)".into()))?;
     let (r, host) = target(root, &branch)

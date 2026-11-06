@@ -7,6 +7,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
+use git::Discovery;
 use git::remote::{self, Cancel};
 use git::write::{self, GitError};
 
@@ -184,4 +185,26 @@ fn unreachable_remote_shows_gits_error() {
     sh(&s.mine, &["remote", "set-url", "origin", "https://127.0.0.1:9/x.git"]);
     let err = remote::fetch(&s.mine, &no_cancel()).unwrap_err().to_string();
     assert!(err.contains("127.0.0.1"), "{err}");
+}
+
+#[test]
+fn upstream_deleted_on_the_remote_is_gone() {
+    let s = setup("gone");
+    write::create_branch(&s.mine, "feat/done").unwrap();
+    commit(&s.mine, "d.txt", "d\n");
+    remote::push_to(&s.mine, "origin", true, &[], &no_cancel()).unwrap();
+    assert!(!remote::upstream_gone(&s.mine));
+    // Merged and deleted on the remote, then a fetch --prune (the background fetch) removes the remote ref.
+    sh(&s.other, &["push", "-q", "origin", "--delete", "feat/done"]);
+    remote::fetch(&s.mine, &no_cancel()).unwrap();
+    assert!(remote::upstream_gone(&s.mine));
+    assert_eq!(remote::upstream(&s.mine), None, "no @{{u}} to push to");
+    let Discovery::Repo(r) = git::discover(&s.mine) else { panic!() };
+    let st = git::status(&r).unwrap();
+    assert_eq!((st.upstream.as_deref(), st.ab), (Some("origin/feat/done"), None), "the panel can tell");
+    // The fetch pushed nothing: the remote still has no such branch.
+    assert!(sh(&s.bare, &["branch", "--list", "feat/done"]).is_empty());
+    // A branch that was never published isn't "gone".
+    write::create_branch(&s.mine, "feat/new").unwrap();
+    assert!(!remote::upstream_gone(&s.mine));
 }

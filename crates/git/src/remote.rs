@@ -160,6 +160,14 @@ pub fn upstream(root: &Path) -> Option<String> {
     (!u.is_empty()).then_some(u)
 }
 
+/// The branch has an upstream configured whose ref is gone: deleted on the remote (usually after its PR/MR was
+/// merged) and pruned by a fetch. Pushing would publish it again.
+pub fn upstream_gone(root: &Path) -> bool {
+    let Some(branch) = current_branch(root) else { return false };
+    run(root, &["for-each-ref", "--format=%(upstream:track)", &format!("refs/heads/{branch}")], None)
+        .is_ok_and(|t| t.trim() == "[gone]")
+}
+
 /// (ahead, behind) vs the upstream.
 pub fn ahead_behind(root: &Path) -> Option<(u32, u32)> {
     let s = run(root, &["rev-list", "--left-right", "--count", "HEAD...@{u}"], None).ok()?;

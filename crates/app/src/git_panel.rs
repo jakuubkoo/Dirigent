@@ -397,12 +397,18 @@ impl GitPanel {
         use crate::git_ops::Job;
         let t = theme::get();
         let detached = st.branch.starts_with("(detached");
+        // An upstream without ahead/behind: its remote branch was deleted (usually merged) and pruned.
+        let gone = st.upstream.is_some() && st.ab.is_none();
         // (label, counts, hint, emphasized)
         let (label, counts, hint, strong): (&'static str, String, &'static str, bool) = match (&st.upstream, st.ab) {
             _ if detached => ("Detached", String::new(), "Not on a branch: switch to one to sync", false),
-            (None, _) | (Some(_), None) => {
-                ("Publish", String::new(), "Push this branch to the remote and track it (push -u)", true)
-            }
+            (Some(_), None) => (
+                "Remote branch deleted (merged?)",
+                String::new(),
+                "Its remote branch is gone. Click for: switch to the default branch and pull, or publish again",
+                false,
+            ),
+            (None, _) => ("Publish", String::new(), "Push this branch to the remote and track it (push -u)", true),
             (Some(_), Some((0, 0))) => ("Up to date", String::new(), "Nothing to push or pull · click to fetch", false),
             (Some(_), Some((a, 0))) => ("Push", format!("↑{a}"), "Fetch, then push your commits", true),
             (Some(_), Some((0, b))) => ("Pull", format!("↓{b}"), "Fetch, then fast-forward to the upstream", true),
@@ -426,12 +432,16 @@ impl GitPanel {
                 d.bg(t.accent).border_color(t.accent).text_color(t.text.on_accent).hover(|s| s.opacity(0.85))
             })
             .when(!enabled, |d| d.text_color(t.text.faint).cursor_not_allowed())
-            .when(label == "Diverged", |d| d.text_color(t.state.needs_you))
+            .when(label == "Diverged" || gone, |d| d.text_color(t.state.needs_you))
             .child(label)
             .when(!counts.is_empty(), |d| d.child(div().text_size(z(text_size::XS)).opacity(0.8).child(counts)))
             .tooltip(tip(hint))
-            .on_click(move |_: &ClickEvent, _, cx| {
-                if enabled {
+            .on_click(move |ev: &ClickEvent, _, cx| {
+                let at = ev.position();
+                if gone {
+                    // Nothing is pushed by itself: the choices are in the ⋯ menu.
+                    let _ = ws.update(cx, |w, cx| w.open_git_menu(r.clone(), crate::workspace::GitMenu::More, at, cx));
+                } else if enabled {
                     let _ = ws.update(cx, |w, cx| w.run_git(r.clone(), Job::Sync, cx));
                 }
             });
@@ -520,7 +530,8 @@ impl GitPanel {
 
     /// The branch's PR/MR: number, state and checks with View, or Create, or a link when gh/glab aren't there.
     /// `enabled`: no job running (Create is shown but inactive meanwhile, so the strip doesn't flicker).
-    fn pr_strip(&self, root: &Path, pr: &crate::pr::View, enabled: bool) -> Option<gpui::AnyElement> {
+    /// `gone`: the remote branch was deleted: no Create (it would publish the branch again).
+    fn pr_strip(&self, root: &Path, pr: &crate::pr::View, enabled: bool, gone: bool) -> Option<gpui::AnyElement> {
         use crate::pr::{Checks, Info, State};
         let t = theme::get();
         let noun = pr.noun();
@@ -592,11 +603,12 @@ impl GitPanel {
                         .child(div().flex_none().text_color(color).child(state))
                         .children(checks.map(|(c, col)| div().min_w_0().truncate().text_color(col).child(c)))
                         .child(div().flex_1())
-                        .when(closed, |d| d.child(create()))
+                        .when(closed && !gone, |d| d.child(create()))
                         .child(link("pr-view", "View".into(), p.url.clone()))
                         .into_any_element(),
                 )
             }
+            Info::Known(None) if gone => None,
             Info::Known(None) => Some(
                 strip()
                     .child(
@@ -613,7 +625,7 @@ impl GitPanel {
             Info::Link(url) => Some(
                 strip()
                     .child(div().flex_1())
-                    .child(create())
+                    .when(!gone, |d| d.child(create()))
                     .child(link(
                         "pr-list",
                         if noun == "MR" { "View merge requests".into() } else { "View pull requests".into() },
@@ -835,7 +847,8 @@ impl Render for GitPanel {
                         })
                 });
                 let detached = st.branch.starts_with("(detached");
-                let pr_strip = pr.as_ref().filter(|_| !detached).and_then(|p| self.pr_strip(&root, p, !busy));
+                let gone = st.upstream.is_some() && st.ab.is_none();
+                let pr_strip = pr.as_ref().filter(|_| !detached).and_then(|p| self.pr_strip(&root, p, !busy, gone));
                 let scope = agent.as_ref().map(|a| {
                     self.scope_switch(a.only, agent_ix.as_ref().map_or(0, Vec::len), st.files.len() + st.more)
                 });

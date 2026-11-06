@@ -281,30 +281,63 @@ impl Workspace {
 
     pub(super) fn git_menu_items(&self, root: &Path, kind: GitMenu, cx: &gpui::App) -> Vec<projects_ui::Item> {
         let agent = self.agent_ran() && !self.agent_files(root).is_empty();
+        let gone = self.repos.status(root).is_some_and(|s| s.upstream.is_some() && s.ab.is_none());
         let pr = match self.prs.get(root).and_then(|p| p.view.as_ref()) {
             Some(v) if v.forge == git::remote::Forge::GitLab => "Commit, push & create MR",
             _ => "Commit, push & create PR",
         };
         match kind {
-            GitMenu::More => {
+            GitMenu::More if gone => {
+                let default = self.prs.get(root).and_then(|p| p.view.as_ref()?.default.clone());
                 let mut v = vec![
-                    ("fetch", "Fetch", "Get the remote's new commits; nothing local changes"),
-                    ("pull", "Pull (fast-forward only)", "Never merges or rebases"),
-                    ("push", "Push", "A branch without an upstream is published (push -u)"),
-                    ("pr_refresh", "Refresh PR status", "Asks gh / glab again (also whether you're logged in)"),
+                    (
+                        "to_default",
+                        match &default {
+                            Some(d) => format!("Switch to {d} and pull").into(),
+                            None => "Switch to the default branch and pull".into(),
+                        },
+                        "The usual next step after a merge (asks first with uncommitted changes)",
+                    ),
+                    ("republish", "Publish again…".into(), "Create the remote branch again (asks first)"),
+                    ("fetch", "Fetch".into(), "Get the remote's new commits; nothing local changes"),
+                    ("pr_refresh", "Refresh PR status".into(), "Asks gh / glab again (also whether you're logged in)"),
                 ];
                 if self.agent_ran() {
-                    v.push(("forget", "Forget agent's files", "Clears this agent's file list; no file is touched"));
+                    v.push((
+                        "forget",
+                        "Forget agent's files".into(),
+                        "Clears this agent's file list; no file is touched",
+                    ));
+                }
+                v
+            }
+            GitMenu::More => {
+                let mut v = vec![
+                    ("fetch", "Fetch".into(), "Get the remote's new commits; nothing local changes"),
+                    ("pull", "Pull (fast-forward only)".into(), "Never merges or rebases"),
+                    ("push", "Push".into(), "A branch without an upstream is published (push -u)"),
+                    ("pr_refresh", "Refresh PR status".into(), "Asks gh / glab again (also whether you're logged in)"),
+                ];
+                if self.agent_ran() {
+                    v.push((
+                        "forget",
+                        "Forget agent's files".into(),
+                        "Clears this agent's file list; no file is touched",
+                    ));
                 }
                 v
             }
             GitMenu::Commit => {
                 let mut v = Vec::new();
                 if agent {
-                    v.push(("commit_agent", "Commit agent's files…", "Only this session's agent files (asks first)"));
+                    v.push((
+                        "commit_agent",
+                        "Commit agent's files…".into(),
+                        "Only this session's agent files (asks first)",
+                    ));
                 }
-                v.push(("commit_push", "Commit & push", "What the button commits, then push (publish)"));
-                v.push(("commit_pr", pr, "Commit, push, then open the new request"));
+                v.push(("commit_push", "Commit & push".into(), "What the button commits, then push (publish)"));
+                v.push(("commit_pr", pr.into(), "Commit, push, then open the new request"));
                 v
             }
             GitMenu::DiffView => {
@@ -312,13 +345,17 @@ impl Workspace {
                 let (split, narrow, style, structural, why) = d.read(cx).view_state();
                 let on = |b: bool| if b { "Shown now" } else { "" };
                 let mut v = vec![
-                    ("unified", "Unified", on(!split)),
-                    ("split", "Split", if narrow { "Too narrow here (needs 120 terminal columns)" } else { on(split) }),
+                    ("unified", "Unified".into(), on(!split)),
+                    (
+                        "split",
+                        "Split".into(),
+                        if narrow { "Too narrow here (needs 120 terminal columns)" } else { on(split) },
+                    ),
                 ];
                 if split {
                     v.push((
                         "clean",
-                        "Clean split",
+                        "Clean split".into(),
                         if style == crate::settings::SplitStyle::Clean {
                             "Shown now"
                         } else {
@@ -327,7 +364,7 @@ impl Workspace {
                     ));
                     v.push((
                         "classic",
-                        "Classic split",
+                        "Classic split".into(),
                         if style == crate::settings::SplitStyle::Classic {
                             "Shown now"
                         } else {
@@ -337,14 +374,14 @@ impl Workspace {
                 }
                 v.push((
                     "structural",
-                    "Structural",
+                    "Structural".into(),
                     why.unwrap_or(if structural {
                         "Shown now"
                     } else {
                         "Changed tokens, moved code; reformatting ignored"
                     }),
                 ));
-                v.push(("word", "Word", on(!structural)));
+                v.push(("word", "Word".into(), on(!structural)));
                 v
             }
         }
@@ -356,6 +393,31 @@ impl Workspace {
             "pull" => self.run_git(root, Job::Pull, cx),
             "push" => self.run_git(root, Job::Push, cx),
             "pr_refresh" => self.pr_lookup(root, true, cx),
+            "to_default" => {
+                let d = self.prs.get(&root).and_then(|p| p.view.as_ref()?.default.clone());
+                self.switch_branch(
+                    root,
+                    Job::SwitchDefault,
+                    d.unwrap_or_else(|| "the default branch".into()),
+                    window,
+                    cx,
+                )
+            }
+            "republish" => {
+                let branch = self.repos.status(&root).map(|s| s.branch.clone()).unwrap_or_default();
+                self.modal = Some(Modal::Confirm {
+                    title: format!("Publish {branch} again?"),
+                    body: "Its remote branch was deleted, usually after its pull/merge request was merged. Publishing \
+                           creates it on the remote again (push -u)."
+                        .into(),
+                    files: Vec::new(),
+                    ok: "Publish again",
+                    danger: false,
+                    then: Then::Git(root, Job::Republish),
+                });
+                window.focus(&self.focus, cx);
+                cx.notify();
+            }
             "forget" => {
                 self.clear_agent_changes(cx);
                 self.sync_panel(cx);
