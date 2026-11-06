@@ -1,6 +1,6 @@
 //! Root view: session list, sidebar, the active terminal (cached view), modal, resize policy.
 
-use crate::theme::z;
+use crate::theme::{self as theme, radius, space, text_size, z};
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -8,7 +8,7 @@ use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
 use gpui::{
-    Context, Entity, EntityId, FocusHandle, Focusable, KeyDownEvent, Render, Task, Window, actions, div,
+    Context, Entity, EntityId, FocusHandle, Focusable, KeyDownEvent, Render, SharedString, Task, Window, actions, div,
     prelude::*,
 };
 use session::{Session, Size};
@@ -144,6 +144,47 @@ enum Then {
     /// Close / restart the tab with this id (claude runs in it).
     Close(usize),
     Restart(usize),
+}
+
+/// A session row being dragged: its tab id, sidebar group and vector index when the drag began.
+#[derive(Clone)]
+pub(super) struct SessionDrag {
+    id: usize,
+    group: Option<PathBuf>,
+    pos: usize,
+    name: SharedString,
+}
+
+/// The card under the pointer while a session row is dragged.
+struct RowGhost(SharedString);
+impl Render for RowGhost {
+    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+        let t = theme::get();
+        div()
+            .px(z(space::MD))
+            .py(z(space::XS))
+            .rounded(z(radius::MD))
+            .bg(t.bg.elevated)
+            .border_1()
+            .border_color(t.border.strong)
+            .text_size(z(text_size::SM))
+            .text_color(t.text.primary)
+            .child(self.0.clone())
+    }
+}
+
+/// The new tab order after moving group member `from` to position `to` (both positions in `slots`, the vector
+/// indices the group holds, ascending). Only those slots change, so the group's first slot (and with it the order of
+/// the groups) stays where it was.
+fn reorder(n: usize, slots: &[usize], from: usize, to: usize) -> Vec<usize> {
+    let mut order: Vec<usize> = (0..n).collect();
+    let mut members = slots.to_vec();
+    let moved = members.remove(from);
+    members.insert(to, moved);
+    for (&slot, &m) in slots.iter().zip(&members) {
+        order[slot] = m;
+    }
+    order
 }
 
 #[derive(Clone)]
@@ -1116,6 +1157,30 @@ impl Workspace {
             hub.board.lock().unwrap().mark_seen(t.id as u32);
         }
         self.notifier.close(t.id as u32);
+        cx.notify();
+    }
+
+    /// Drop of a dragged session row on row `target`: within its group only (another group is refused).
+    pub(super) fn drop_session(&mut self, drag: &SessionDrag, target: usize, cx: &mut Context<Self>) {
+        let Some(from) = self.tab_idx(drag.id) else { return };
+        let group = self.tab_group(from);
+        if group != drag.group || target >= self.tabs.len() || self.tab_group(target) != group {
+            return;
+        }
+        let Some((_, slots)) = self.groups().into_iter().find(|(k, _)| *k == group) else { return };
+        let (Some(a), Some(b)) = (slots.iter().position(|&s| s == from), slots.iter().position(|&s| s == target)) else { return };
+        if a == b {
+            return;
+        }
+        let order = reorder(self.tabs.len(), &slots, a, b);
+        let mut old: Vec<Option<Tab>> = std::mem::take(&mut self.tabs).into_iter().map(Some).collect();
+        self.tabs = order.iter().map(|&j| old[j].take().expect("a permutation")).collect();
+        let new_pos = |i: usize| order.iter().position(|&j| j == i).unwrap_or(i);
+        self.active = new_pos(self.active);
+        if let Some(Modal::Rename { tab, .. }) = &mut self.modal {
+            *tab = new_pos(*tab);
+        }
+        self.mark_dirty(cx);
         cx.notify();
     }
 
@@ -2674,8 +2739,31 @@ pub(crate) fn sh_word(s: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{fmt_remaining, group_order, sh_word, with_pinned};
+    use super::{fmt_remaining, group_order, reorder, sh_word, with_pinned};
     use std::path::PathBuf;
+
+    #[test]
+    fn reorder_moves_only_within_the_group_slots() {
+        // Tabs 0..6; the group holds slots 1, 3, 4 (the others belong to other groups).
+        let slots = [1, 3, 4];
+        // Down: the first member to the end; its slot (the group's first) is taken by the next member.
+        assert_eq!(reorder(6, &slots, 0, 2), vec![0, 3, 2, 4, 1, 5]);
+        // Up: the last member to the top.
+        assert_eq!(reorder(6, &slots, 2, 0), vec![0, 4, 2, 1, 3, 5]);
+        // No move.
+        assert_eq!(reorder(6, &slots, 1, 1), (0..6).collect::<Vec<_>>());
+        // Other groups' slots never change, and the group's first slot stays its own: group order is kept.
+        let order = reorder(6, &slots, 0, 2);
+        for k in [0, 2, 5] {
+            assert_eq!(order[k], k);
+        }
+        assert!(slots.contains(&order[1]));
+        // Group order survives: first-occurrence order of the keys is the same before and after.
+        let keys = [Some(PathBuf::from("/b")), Some(PathBuf::from("/a")), None, Some(PathBuf::from("/a")), Some(PathBuf::from("/a")), Some(PathBuf::from("/b"))];
+        let after: Vec<_> = order.iter().map(|&j| keys[j].clone()).collect();
+        let firsts = |k: &[Option<PathBuf>]| group_order(k).into_iter().map(|(g, _)| g).collect::<Vec<_>>();
+        assert_eq!(firsts(&keys), firsts(&after));
+    }
 
     #[test]
     fn grouping_and_order() {

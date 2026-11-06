@@ -635,7 +635,9 @@ impl Workspace {
                 cx.stop_propagation();
                 w.close_session(i, false, window, cx);
             }));
-        let anchor = self.active_row.clone();
+        let group = self.tab_group(i);
+        let drag = SessionDrag { id: tab.id, group: group.clone(), pos: i, name: tab.name.clone().into() };
+        let (tab_id, accent, anchor) = (tab.id, t.accent, self.active_row.clone());
         div()
             .id(("tab", tab.id))
             .group(row)
@@ -660,6 +662,14 @@ impl Workspace {
                 w.open_session_menu(i, Some(e.position), window, cx);
             }))
             .on_mouse_down(MouseButton::Middle, cx.listener(move |w, _, window, cx| w.close_session(i, false, window, cx)))
+            // Reorder within the group: a line where it will land (above when moving up, below when moving down).
+            .on_drag(drag, |d: &SessionDrag, _, _, cx| cx.new(|_| RowGhost(d.name.clone())))
+            .drag_over::<SessionDrag>(move |s, d, _, _| match () {
+                _ if d.group != group || d.id == tab_id => s,
+                _ if d.pos > i => s.border_t_2().border_color(accent),
+                _ => s.border_b_2().border_color(accent),
+            })
+            .on_drop(cx.listener(move |w, d: &SessionDrag, _, cx| w.drop_session(d, i, cx)))
             .on_click(cx.listener(move |w, e: &ClickEvent, window, cx| {
                 if e.click_count() == 2 {
                     w.start_rename(i, window, cx);
