@@ -18,6 +18,11 @@ All notable changes to Dirigent are recorded here. The format follows
   project; Shift+click starts a session right away. The old instant behavior stays available as "Plain + opens" in
   Settings (Project default, Shell, Claude).
 
+### Fixed
+
+- Dirigent started from a terminal inside Dirigent used that session's Claude hook file as its settings.json
+  ("Settings: 2 problems") and wrote into it. Settings are never read from or written to Dirigent's runtime folder.
+
 ## [0.2.0] - 2026-11-06
 
 A redesigned git workflow (branches, sync, push and pull, pull and merge requests) and sessions that name
