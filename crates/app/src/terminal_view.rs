@@ -246,6 +246,11 @@ impl TerminalView {
             }
             self.session.write(&bytes);
             cx.stop_propagation();
+            // Bare Esc / Ctrl-C may interrupt a working Claude (it sends no hook for that): let the workspace check.
+            if matches!(bytes.as_slice(), [0x1b] | [0x03]) {
+                let (id, session) = (cx.entity_id(), self.session.clone());
+                let _ = self.workspace.update(cx, |w, cx| w.key_interrupt(id, session, cx));
+            }
         }
     }
 

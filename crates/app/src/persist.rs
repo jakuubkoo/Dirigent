@@ -212,15 +212,20 @@ pub fn write_atomic(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
     std::fs::rename(&tmp, path)
 }
 
-/// Whether Claude Code still has a transcript for this session (`~/.claude/projects/*/<id>.jsonl`, the same
-/// cross-project lookup `claude --resume <id>` does). Blocking IO: call off the UI thread.
+/// Whether Claude Code still has a transcript for this session. Blocking IO: call off the UI thread.
 pub fn transcript_exists(session_id: &str) -> bool {
+    transcript_path(session_id).is_some()
+}
+
+/// This session's transcript (`~/.claude/projects/*/<id>.jsonl`, the same cross-project lookup
+/// `claude --resume <id>` does). Blocking IO: call off the UI thread.
+pub fn transcript_path(session_id: &str) -> Option<PathBuf> {
     if session_id.is_empty() || !session_id.chars().all(|c| c.is_ascii_hexdigit() || c == '-') {
-        return false;
+        return None;
     }
     let projects = PathBuf::from(std::env::var_os("HOME").unwrap_or_default()).join(".claude/projects");
-    let Ok(dirs) = std::fs::read_dir(projects) else { return false };
-    dirs.flatten().any(|d| d.path().join(format!("{session_id}.jsonl")).is_file())
+    let dirs = std::fs::read_dir(projects).ok()?;
+    dirs.flatten().map(|d| d.path().join(format!("{session_id}.jsonl"))).find(|p| p.is_file())
 }
 
 #[cfg(test)]

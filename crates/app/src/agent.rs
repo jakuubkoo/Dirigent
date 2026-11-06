@@ -76,6 +76,8 @@ pub struct Agent {
     pub note: Option<String>,
     /// The latest automatic name candidate (the workspace applies it through `offer`).
     pub title: Option<Auto>,
+    /// UserPromptSubmit count: an interrupt check started before a newer prompt must not end that one.
+    pub prompts: u64,
 }
 
 fn now_secs() -> i64 {
@@ -112,6 +114,9 @@ impl Board {
                 if let Some(cwd) = cwd {
                     agent.cwd = Some(cwd.into());
                 }
+                if event == "UserPromptSubmit" {
+                    agent.prompts += 1;
+                }
                 if event == "SessionStart" {
                     agent.started = true;
                     if session_id.is_some() {
@@ -125,7 +130,8 @@ impl Board {
                         Some(State::NeedsYou)
                     }
                     ("Stop" | "StopFailure", _) => Some(State::Done),
-                    // Esc/Ctrl-C interrupts send no Stop; idle_prompt (~60 s later) is the only signal.
+                    // Esc/Ctrl-C interrupts send no hook at all: typed ones are caught by `Board::interrupt`;
+                    // idle_prompt (~60 s later) remains the fallback for the rest.
                     ("Notification", Some("idle_prompt")) if agent.state == State::Working => Some(State::Done),
                     ("SessionEnd", _) => {
                         // The session stays resumable: keep its id and the claude args.
@@ -191,6 +197,8 @@ impl Board {
         if before.last_activity.is_some() {
             now.last_activity = before.last_activity;
         }
+        now.prompts = before.prompts; // a count only interrupt checks read
+
         now != before || self.five_hour != five || self.seven_day != seven
     }
 
@@ -224,6 +232,46 @@ impl Board {
             a.unseen = false;
         }
     }
+
+    /// An Esc/Ctrl-C typed into the tab interrupted its turn: Ready (you're in front of it: no "done", no
+    /// notification), unless the turn already ended or a newer prompt started since the key (`prompts`).
+    pub fn interrupt(&mut self, tab: u32, prompts: u64) -> bool {
+        let Some(a) = self.tabs.get_mut(&tab) else { return false };
+        if a.state != State::Working || a.prompts != prompts {
+            return false;
+        }
+        a.state = State::Ready;
+        a.state_since = Some(now_secs());
+        true
+    }
+}
+
+/// Whether the transcript's last conversational entry is Claude Code's interrupt marker (`[Request interrupted
+/// by user]`, `… for tool use`; written 120–315 ms after the key on 2.1.319). `tail` is the end of the file,
+/// its first line possibly cut. Subagent (sidechain) entries and bookkeeping lines are skipped.
+pub fn interrupted(tail: &str) -> bool {
+    for line in tail.lines().rev() {
+        let Ok(v) = serde_json::from_str::<serde_json::Value>(line) else { continue };
+        let kind = v["type"].as_str().unwrap_or_default();
+        if !matches!(kind, "user" | "assistant") || v["isSidechain"] == true {
+            continue;
+        }
+        let content = &v["message"]["content"];
+        let text = content.as_str().or_else(|| content[0]["text"].as_str()).unwrap_or_default();
+        return kind == "user" && text.starts_with("[Request interrupted by user");
+    }
+    false
+}
+
+/// The last 64 KB of a transcript (the marker and what follows it are a few small lines). Blocking IO.
+pub fn transcript_tail(path: &Path) -> String {
+    use std::io::{Read, Seek, SeekFrom};
+    let Ok(mut f) = std::fs::File::open(path) else { return String::new() };
+    let len = f.metadata().map_or(0, |m| m.len());
+    let _ = f.seek(SeekFrom::Start(len.saturating_sub(64 * 1024)));
+    let mut buf = Vec::new();
+    let _ = f.read_to_end(&mut buf);
+    String::from_utf8_lossy(&buf).into_owned()
 }
 
 pub struct Hub {
@@ -621,6 +669,51 @@ mod tests {
         assert_eq!(b.get(1).state, State::NoAgent);
         assert_eq!(b.get(1).session_id.as_deref(), Some("s1"), "still resumable after exit");
         assert_eq!(b.get(1).resume_failed, None);
+    }
+
+    #[test]
+    fn typed_interrupts() {
+        let mut b = Board::default();
+        let st = |b: &Board| b.get(1).state;
+        b.apply(hook(1, "SessionStart", None));
+        assert!(!b.interrupt(1, 0), "only a working turn can be interrupted");
+        b.apply(hook(1, "UserPromptSubmit", None));
+        let at_key = b.get(1).prompts;
+        assert!(b.interrupt(1, at_key));
+        assert_eq!(
+            (st(&b), b.get(1).unseen, b.get(1).notice_seq),
+            (State::Ready, false, 0),
+            "no done, no notification"
+        );
+        assert!(!b.interrupt(1, at_key), "once");
+        // The prompt went back to the input and was sent again before the check finished: that turn stays.
+        b.apply(hook(1, "UserPromptSubmit", None));
+        assert!(!b.apply(hook(1, "UserPromptSubmit", None)), "a queued prompt while working wakes no UI");
+        assert!(!b.interrupt(1, at_key));
+        assert_eq!(st(&b), State::Working);
+        b.apply(hook(1, "PermissionRequest", None));
+        assert!(!b.interrupt(1, b.get(1).prompts), "a permission prompt isn't working");
+    }
+
+    #[test]
+    fn interrupt_marker_from_real_claude() {
+        let fixture = |name| {
+            std::fs::read_to_string(format!("{}/../hook/tests/fixtures/{name}.jsonl", env!("CARGO_MANIFEST_DIR")))
+                .unwrap()
+        };
+        // claude 2.1.319: Esc while text streamed / during a Bash tool → a marker entry.
+        assert!(interrupted(&fixture("transcript_interrupted")));
+        assert!(interrupted(&fixture("transcript_interrupted_tool")));
+        // Esc before any output (the prompt goes back to the input) writes nothing; a finished turn ends on Claude.
+        assert!(!interrupted(&fixture("transcript_early_esc")));
+        assert!(!interrupted(&fixture("transcript_done")));
+        // An earlier interrupt followed by a new prompt is old news; a cut first line and sidechains are skipped.
+        let marker = r#"{"type":"user","isSidechain":false,"message":{"role":"user","content":[{"type":"text","text":"[Request interrupted by user]"}]}}"#;
+        let prompt = r#"{"type":"user","isSidechain":false,"message":{"role":"user","content":"next"}}"#;
+        let side = r#"{"type":"assistant","isSidechain":true,"message":{"role":"assistant","content":[]}}"#;
+        assert!(!interrupted(&format!("{marker}\n{prompt}\n")));
+        assert!(interrupted(&format!("ted\":true}}\n{marker}\n{side}\n{{\"type\":\"ai-title\"}}\n")));
+        assert!(!interrupted(""));
     }
 
     #[test]

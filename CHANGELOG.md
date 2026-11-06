@@ -22,6 +22,8 @@ All notable changes to Dirigent are recorded here. The format follows
 
 - Dirigent started from a terminal inside Dirigent used that session's Claude hook file as its settings.json
   ("Settings: 2 problems") and wrote into it. Settings are never read from or written to Dirigent's runtime folder.
+- Interrupting Claude with Esc or Ctrl+C now ends the session's "working" state within about a second, instead of
+  a minute later. Esc that only closes a Claude menu or switches its vim mode doesn't count.
 
 ## [0.2.0] - 2026-11-06
 

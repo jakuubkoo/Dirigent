@@ -10,7 +10,7 @@ pub mod select;
 
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
 
@@ -161,6 +161,8 @@ struct Flags {
     /// A prompt to answer once (`answer_once`); checked per chunk only while set.
     expect: Mutex<Option<expect::Expect>>,
     expecting: AtomicBool,
+    /// Bumped per chunk of output: lets the UI tell whether the app went quiet (`output_seq`).
+    output: AtomicU64,
 }
 
 impl Session {
@@ -201,6 +203,7 @@ impl Session {
                     Ok(0) | Err(_) => break, // EOF / EIO when the shell exits
                     Ok(n) => n,
                 };
+                flags2.output.fetch_add(1, Ordering::Relaxed);
                 // The shell's prompt hook reports its cwd every prompt; only a real change wakes the UI, hidden or not.
                 let moved = scanner.scan(&buf[..n]).and_then(|p| osc7::parse(&p, &host)).is_some_and(|dir| {
                     let mut cwd = flags2.cwd.lock().unwrap();
@@ -318,6 +321,11 @@ impl Session {
             return None;
         }
         self.flags.cwd.lock().unwrap().clone()
+    }
+
+    /// Changes whenever output arrived; equal across two reads = nothing was printed in between.
+    pub fn output_seq(&self) -> u64 {
+        self.flags.output.load(Ordering::Relaxed)
     }
 
     pub fn pid(&self) -> Option<u32> {
