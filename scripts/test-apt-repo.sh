@@ -42,7 +42,6 @@ cp "$deb" "$work/v2/"
 
 url="http://127.0.0.1:$port/repo"
 SITE_URL="$url" "$here/apt-repo.sh" "$work/v1" "$work/site1" "$fpr" "$work/test-key.asc"
-SITE_URL="$url" "$here/apt-repo.sh" "$work/v2" "$work/site2" "$fpr" "$work/test-key.asc"
 SITE_URL="http://127.0.0.1:$port/bad" "$here/apt-repo.sh" "$work/v1" "$work/www/bad" "$bad" "$work/bad-key.asc"
 ln -sfn ../site1 "$work/www/repo"
 
@@ -85,7 +84,13 @@ for _ in $(seq 120); do [ -e /t/phase2-ready ] && break; sleep 1; done
 [ -e /t/phase2-ready ]
 apt-get update -qq
 apt-get upgrade -yqq >/dev/null
-test "$(dpkg-query -W -f='${Version}' dirigent)" = "$newer"
+got="$(dpkg-query -W -f='${Version}' dirigent)"
+if [ "$got" != "$newer" ]; then
+    echo "FAIL: after apt upgrade dirigent is $got, expected $newer"
+    apt-cache policy dirigent
+    apt-get -s upgrade
+    exit 1
+fi
 echo "ok: apt upgrade → $newer"
 EOF
 chmod +x "$work/client.sh"
@@ -98,7 +103,12 @@ for image in "${images[@]}"; do
     client=$!
     for _ in $(seq 600); do [[ -e $work/phase1-done ]] && break; kill -0 $client 2>/dev/null || break; sleep 0.5; done
     if [[ -e $work/phase1-done ]]; then
-        ln -sfn ../site2 "$work/www/repo" # publish the newer version under the same URL
+        # Publish the newer version under the same URL, built only now like a real release: built together with
+        # site1, its files would share a second with site1's and http.server would answer apt's If-Modified-Since
+        # with 304 (it compares whole seconds), leaving the old index in place.
+        sleep 1
+        SITE_URL="$url" "$here/apt-repo.sh" "$work/v2" "$work/site2" "$fpr" "$work/test-key.asc"
+        ln -sfn ../site2 "$work/www/repo"
         touch "$work/phase2-ready"
     fi
     wait $client
