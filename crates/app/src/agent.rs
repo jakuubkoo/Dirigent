@@ -20,6 +20,35 @@ pub enum State {
     Done,
 }
 
+/// Where an automatic session name came from; a higher one replaces a lower one of the same Claude session.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Source {
+    /// The session's first prompt, shortened (`hook::notice::prompt_title`).
+    Prompt,
+    /// Claude Code's own title (statusLine `session_name`: `-n`, `/rename`, or its generated title).
+    Claude,
+}
+
+/// An automatic session name and the Claude session it belongs to.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct Auto {
+    pub text: String,
+    pub source: Source,
+    #[serde(default)]
+    pub session: Option<String>,
+}
+
+/// Whether `new` replaces the current automatic name: a new Claude session (a new claude, `/clear`) always may;
+/// within one session a better source wins, Claude's title follows its latest value, and the first prompt stays.
+pub fn offer(cur: Option<&Auto>, new: &Auto) -> bool {
+    let Some(cur) = cur else { return true };
+    if cur == new {
+        return false;
+    }
+    cur.session != new.session || new.source > cur.source || (new.source == Source::Claude && cur.source == new.source)
+}
+
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Agent {
     pub state: State,
@@ -45,6 +74,8 @@ pub struct Agent {
     pub notice_seq: u64,
     /// What that notification says (built by the hook helper); None = a generic text.
     pub note: Option<String>,
+    /// The latest automatic name candidate (the workspace applies it through `offer`).
+    pub title: Option<Auto>,
 }
 
 fn now_secs() -> i64 {
@@ -70,8 +101,14 @@ impl Board {
                 agent.args = Some(args);
                 agent.started = false;
             }
-            Kind::Hook { event, notification_type, session_id, cwd, message, .. } => {
+            Kind::Hook { event, notification_type, session_id, cwd, message, title, .. } => {
                 agent.last_activity = Some(now_secs());
+                if let Some(text) = title {
+                    let new = Auto { text, source: Source::Prompt, session: session_id.clone() };
+                    if offer(agent.title.as_ref(), &new) {
+                        agent.title = Some(new);
+                    }
+                }
                 if let Some(cwd) = cwd {
                     agent.cwd = Some(cwd.into());
                 }
@@ -96,6 +133,7 @@ impl Board {
                         *agent = Agent {
                             session_id: agent.session_id.take(),
                             args: agent.args.take(),
+                            title: agent.title.take(),
                             resume_failed: failed,
                             last_activity: agent.last_activity,
                             state_since: Some(now_secs()),
@@ -125,7 +163,14 @@ impl Board {
                     }
                 }
             }
-            Kind::Status { model, context_pct, five_hour, seven_day } => {
+            Kind::Status { model, context_pct, five_hour, seven_day, session_name, session_id } => {
+                if let Some(text) = session_name {
+                    let session = session_id.or_else(|| agent.session_id.clone());
+                    let new = Auto { text, source: Source::Claude, session };
+                    if offer(agent.title.as_ref(), &new) {
+                        agent.title = Some(new);
+                    }
+                }
                 if agent.state == State::NoAgent {
                     agent.state = State::Ready;
                     agent.state_since = Some(now_secs());
@@ -159,6 +204,7 @@ impl Board {
             *a = Agent {
                 session_id: a.session_id.take(),
                 args: a.args.take(),
+                title: a.title.take(),
                 last_activity: a.last_activity,
                 ..Agent::default()
             };
@@ -404,6 +450,7 @@ mod tests {
                 tool: None,
                 tool_use_id: None,
                 path: None,
+                title: None,
             },
         }
     }
@@ -449,8 +496,90 @@ mod tests {
     fn status(tab: u32, ctx: Option<f32>, five: Option<Limit>) -> Msg {
         Msg {
             tab,
-            kind: Kind::Status { model: Some("Opus 5.5".into()), context_pct: ctx, five_hour: five, seven_day: None },
+            kind: Kind::Status {
+                model: Some("Opus 5.5".into()),
+                context_pct: ctx,
+                five_hour: five,
+                seven_day: None,
+                session_name: None,
+                session_id: None,
+            },
         }
+    }
+
+    fn named(tab: u32, name: &str) -> Msg {
+        named_in(tab, name, None)
+    }
+
+    fn named_in(tab: u32, name: &str, id: Option<&str>) -> Msg {
+        let mut m = status(tab, None, None);
+        if let Kind::Status { session_name, session_id, .. } = &mut m.kind {
+            *session_name = Some(name.into());
+            *session_id = id.map(Into::into);
+        }
+        m
+    }
+
+    /// The status carries its own session id: its order against SessionStart doesn't matter.
+    #[test]
+    fn names_follow_the_status_session() {
+        let mut b = Board::default();
+        let t = |b: &Board| b.get(1).title.map(|a| a.text);
+        // `claude -n foo`: the first status can come before SessionStart.
+        b.apply(named_in(1, "foo", Some("s1")));
+        b.apply(hook_id(1, "SessionStart", None, "s1"));
+        b.apply(prompt(1, "s1", "first prompt"));
+        assert_eq!(t(&b).as_deref(), Some("foo"), "the -n name stays");
+        // /clear, then a late status of the old session: the new session's prompt still wins.
+        b.apply(hook_id(1, "SessionEnd", None, "s1"));
+        b.apply(hook_id(1, "SessionStart", None, "s2"));
+        b.apply(named_in(1, "foo", Some("s1")));
+        b.apply(prompt(1, "s2", "new topic"));
+        assert_eq!(t(&b).as_deref(), Some("new topic"));
+    }
+
+    fn prompt(tab: u32, id: &str, text: &str) -> Msg {
+        let mut m = hook_id(tab, "UserPromptSubmit", None, id);
+        if let Kind::Hook { title, .. } = &mut m.kind {
+            *title = Some(text.into());
+        }
+        m
+    }
+
+    #[test]
+    fn automatic_names() {
+        let mut b = Board::default();
+        let t = |b: &Board| b.get(1).title.map(|a| (a.text, a.source));
+        b.apply(hook_id(1, "SessionStart", None, "s1"));
+        assert!(b.apply(prompt(1, "s1", "first prompt")));
+        assert_eq!(t(&b), Some(("first prompt".into(), Source::Prompt)));
+        b.apply(prompt(1, "s1", "second prompt"));
+        assert_eq!(t(&b).unwrap().0, "first prompt", "only the first prompt of a session counts");
+        assert!(b.apply(named(1, "Claude title")));
+        assert_eq!(t(&b), Some(("Claude title".into(), Source::Claude)));
+        assert!(!b.apply(named(1, "Claude title")), "a repeated statusline is no change");
+        b.apply(prompt(1, "s1", "third prompt"));
+        assert_eq!(t(&b).unwrap().0, "Claude title", "a prompt never beats Claude's title");
+        b.apply(named(1, "renamed in claude"));
+        assert_eq!(t(&b).unwrap().0, "renamed in claude", "/rename: latest wins");
+        // /clear: SessionEnd(old), SessionStart(new); the old name stays until the new session offers one.
+        b.apply(hook_id(1, "SessionEnd", None, "s1"));
+        b.apply(hook_id(1, "SessionStart", None, "s2"));
+        assert_eq!(t(&b).unwrap().0, "renamed in claude");
+        b.apply(prompt(1, "s2", "new topic"));
+        assert_eq!(t(&b), Some(("new topic".into(), Source::Prompt)));
+    }
+
+    #[test]
+    fn offer_rules() {
+        let a = |text: &str, source, s: &str| Auto { text: text.into(), source, session: Some(s.into()) };
+        let claude = a("c", Source::Claude, "s1");
+        assert!(offer(None, &claude));
+        assert!(!offer(Some(&claude), &claude));
+        assert!(!offer(Some(&claude), &a("p", Source::Prompt, "s1")), "resumed session: its prompt stays below");
+        assert!(offer(Some(&claude), &a("p", Source::Prompt, "s2")), "new session");
+        assert!(!offer(Some(&a("p", Source::Prompt, "s1")), &a("q", Source::Prompt, "s1")), "first prompt stays");
+        assert!(offer(Some(&claude), &a("d", Source::Claude, "s1")));
     }
 
     #[test]

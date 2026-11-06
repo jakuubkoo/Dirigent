@@ -76,7 +76,10 @@ const TRUST_PROMPT: &str = "Yes, I trust this folder";
 
 struct Tab {
     id: usize,
-    name: String,
+    /// A name the user set (rename, setup dialog): always shown, never replaced.
+    custom: Option<String>,
+    /// The automatic name (Claude's title or the first prompt); `Workspace::tab_title` resolves what is shown.
+    auto: Option<agent::Auto>,
     /// Directory the tab belongs to (kept even if it no longer exists; the shell then starts in $HOME).
     cwd: PathBuf,
     dir_missing: bool,
@@ -153,6 +156,8 @@ enum Modal {
     Rename {
         tab: usize,
         edit: LineEdit,
+        /// The name the field opened with: an automatic name may change meanwhile.
+        was: String,
     },
     ProjectRename {
         root: PathBuf,
@@ -645,7 +650,12 @@ impl Workspace {
         } else {
             // Restore: rows for every tab, a shell only for the active one (the rest spawn on first view).
             for t in saved.tabs {
-                let i = this.add_tab(Some(t.name), t.cwd, t.claude_session, t.claude_args, t.expanded);
+                let custom = match t.custom {
+                    Some(c) => c.then_some(t.name),
+                    None => (!is_default_name(&t.name)).then_some(t.name), // a file from before automatic names
+                };
+                let i = this.add_tab(custom, t.cwd, t.claude_session, t.claude_args, t.expanded);
+                this.tabs[i].auto = t.auto;
                 if let Some(c) = t.changes {
                     this.tracker.restore(this.tabs[i].id as u32, c);
                 }
@@ -1060,10 +1070,10 @@ impl Workspace {
         let id = self.next_id;
         self.next_id += 1;
         let dir_missing = !cwd.is_dir();
-        let name = name.unwrap_or_else(|| format!("Session {id}"));
         self.tabs.push(Tab {
             id,
-            name,
+            custom: name,
+            auto: None,
             cwd,
             dir_missing,
             view: None,
@@ -1340,7 +1350,7 @@ impl Workspace {
         if !self.agent_running(i, cx) {
             return if restart { self.restart_tab(i, window, cx) } else { self.close_now(i, window, cx) };
         }
-        let (id, name) = (self.tabs[i].id, self.tabs[i].name.clone());
+        let (id, name) = (self.tabs[i].id, self.tab_title(i));
         self.menu = None;
         self.modal = Some(Modal::Confirm {
             title: if restart { "Restart shell?" } else { "Close session?" }.to_string(),
@@ -1504,22 +1514,50 @@ impl Workspace {
         cx.notify();
     }
 
+    /// The name a session shows: the user's own, else the automatic one, else a linked worktree's branch, else
+    /// its directory's name.
+    pub(crate) fn tab_title(&self, i: usize) -> String {
+        let t = &self.tabs[i];
+        if let Some(name) = t.custom.as_ref().or(t.auto.as_ref().map(|a| &a.text)) {
+            return name.clone();
+        }
+        if t.main_root.is_some()
+            && let TabRepo::Repo(root) = &t.repo
+            && let Some(s) = self.repos.status(root)
+            && !s.branch.is_empty()
+        {
+            return s.branch.clone();
+        }
+        t.cwd.file_name().map_or_else(|| t.cwd.display().to_string(), |n| n.to_string_lossy().into_owned())
+    }
+
+    /// Drops the user's own name: the automatic one shows again.
+    pub(crate) fn reset_name(&mut self, i: usize, cx: &mut Context<Self>) {
+        if let Some(t) = self.tabs.get_mut(i)
+            && t.custom.take().is_some()
+        {
+            self.mark_dirty(cx);
+            cx.notify();
+        }
+    }
+
     fn start_rename(&mut self, idx: usize, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(tab) = self.tabs.get(idx) else { return };
-        self.modal = Some(Modal::Rename { tab: idx, edit: LineEdit::new(tab.name.clone()) });
+        if idx >= self.tabs.len() {
+            return;
+        }
+        let was = self.tab_title(idx);
+        self.modal = Some(Modal::Rename { tab: idx, edit: LineEdit::new(was.clone()), was });
         window.focus(&self.focus, cx);
         cx.notify();
     }
 
-    /// Session rename (Enter, or a click anywhere outside the field): keep the typed name unless it is empty.
+    /// Session rename (Enter, or a click anywhere outside the field): a typed name that differs from the one shown
+    /// becomes the session's own name (automatic names no longer replace it); an empty one is ignored.
     fn commit_rename(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if let Some(Modal::Rename { tab, edit }) = self.modal.take() {
+        if let Some(Modal::Rename { tab, edit, was }) = self.modal.take() {
             let name = edit.text.trim();
-            if let Some(t) = self.tabs.get_mut(tab)
-                && !name.is_empty()
-                && t.name != name
-            {
-                t.name = name.to_string();
+            if tab < self.tabs.len() && !name.is_empty() && name != was.trim() {
+                self.tabs[tab].custom = Some(name.to_string());
                 self.mark_dirty(cx);
             }
             self.close_modal(window, cx);
@@ -1663,6 +1701,13 @@ impl Workspace {
                     tab.claude_args = args;
                     dirty = true;
                 }
+                // Kept under a custom name too: "Reset to automatic name" shows it at once.
+                if let Some(title) = a.title
+                    && agent::offer(tab.auto.as_ref(), &title)
+                {
+                    tab.auto = Some(title);
+                    dirty = true;
+                }
             }
         }
         if dirty {
@@ -1679,6 +1724,12 @@ impl Workspace {
     /// looking at (see `notify::should_notify`).
     fn notify_changes(&mut self) {
         let Some(hub) = &self.agents else { return };
+        // Titles only for the tabs with a new notice (this runs on every hook).
+        let titles: Vec<Option<String>> = {
+            let board = hub.board.lock().unwrap();
+            let fresh = |i: usize| board.get(self.tabs[i].id as u32).notice_seq != self.tabs[i].notified_seq;
+            (0..self.tabs.len()).map(|i| fresh(i).then(|| self.tab_title(i))).collect()
+        };
         let board = hub.board.lock().unwrap();
         for (i, tab) in self.tabs.iter_mut().enumerate() {
             let a = board.get(tab.id as u32);
@@ -1694,9 +1745,10 @@ impl Workspace {
                 _ => tab.cwd.file_name(),
             }
             .map(|n| n.to_string_lossy().into_owned());
+            let name: String = titles[i].as_deref().unwrap_or_default().chars().take(60).collect();
             let title = match project {
-                Some(p) if p != tab.name => format!("{} · {p}", tab.name),
-                _ => tab.name.clone(),
+                Some(p) if p != name => format!("{name} · {p}"),
+                _ => name,
             };
             let urgent = a.state == agent::State::NeedsYou;
             let body = a.note.clone().unwrap_or_else(|| if urgent { "Needs your input" } else { "Finished" }.into());
@@ -1829,8 +1881,11 @@ impl Workspace {
             tabs: self
                 .tabs
                 .iter()
-                .map(|t| TabState {
-                    name: t.name.clone(),
+                .enumerate()
+                .map(|(i, t)| TabState {
+                    name: self.tab_title(i),
+                    custom: Some(t.custom.is_some()),
+                    auto: t.auto.clone(),
                     cwd: t.cwd.clone(),
                     claude_session: t.claude_session.clone(),
                     claude_args: t.claude_args.clone(),
@@ -3224,10 +3279,23 @@ pub(crate) fn sh_word(s: &str) -> String {
     }
 }
 
+/// The "Session N" every tab got before automatic names: not a name the user chose.
+fn is_default_name(name: &str) -> bool {
+    name.strip_prefix("Session ").is_some_and(|n| !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit()))
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{fmt_remaining, group_order, reorder, sh_word, with_pinned};
+    use super::{fmt_remaining, group_order, is_default_name, reorder, sh_word, with_pinned};
     use std::path::PathBuf;
+
+    #[test]
+    fn old_default_names_become_automatic() {
+        assert!(is_default_name("Session 1") && is_default_name("Session 42"));
+        for n in ["Session", "Session ", "Session 1a", "session 1", "API refactor", "Session 1 fix"] {
+            assert!(!is_default_name(n), "{n}");
+        }
+    }
 
     #[test]
     fn reorder_moves_only_within_the_group_slots() {

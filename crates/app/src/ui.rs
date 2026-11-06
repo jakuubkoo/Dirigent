@@ -189,8 +189,9 @@ pub fn check_box(on: bool) -> Div {
         .when(on, |d| d.bg(t.accent))
 }
 
-pub fn tip(text: &'static str) -> impl Fn(&mut Window, &mut App) -> AnyView {
-    move |_, cx| cx.new(|_| Tip(text.into())).into()
+pub fn tip(text: impl Into<SharedString>) -> impl Fn(&mut Window, &mut App) -> AnyView {
+    let text = text.into();
+    move |_, cx| cx.new(|_| Tip(text.clone())).into()
 }
 
 /// "now", "42s"→"now", "5m", "3h", "2d".

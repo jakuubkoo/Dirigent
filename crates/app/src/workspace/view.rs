@@ -50,7 +50,7 @@ impl Render for Workspace {
         // Settings belongs to no session: the title says so instead of the active one.
         let mut title = match self.tabs.get(self.active) {
             _ if self.settings_open() => "Settings — Dirigent".to_string(),
-            Some(tab) => format!("{} — Dirigent", tab.name),
+            Some(_) => format!("{} — Dirigent", self.tab_title(self.active)),
             None => "Dirigent".to_string(),
         };
         match self.needs_you_count() {
@@ -547,7 +547,7 @@ impl Workspace {
         let active = i == self.active && !self.settings_open();
         let agent = if exited { agent::Agent::default() } else { self.agent(i) };
         let needs_you = agent.state == agent::State::NeedsYou;
-        if let Some(Modal::Rename { tab: r, edit }) = &self.modal
+        if let Some(Modal::Rename { tab: r, edit, .. }) = &self.modal
             && *r == i
         {
             return div()
@@ -698,7 +698,8 @@ impl Workspace {
                 w.close_session(i, false, window, cx);
             }));
         let group = self.tab_group(i);
-        let drag = SessionDrag { id: tab.id, group: group.clone(), pos: i, name: tab.name.clone().into() };
+        let name: SharedString = self.tab_title(i).into();
+        let drag = SessionDrag { id: tab.id, group: group.clone(), pos: i, name: name.clone() };
         let (tab_id, accent, anchor) = (tab.id, t.accent, self.active_row.clone());
         div()
             .id(("tab", tab.id))
@@ -754,13 +755,15 @@ impl Workspace {
                     .gap(z(space::SM))
                     .child(
                         div()
+                            .id(("tab-name", tab.id))
                             .flex_1()
                             .min_w_0()
                             .truncate()
                             .text_size(z(text_size::MD))
                             .font_weight(if bold { FontWeight::SEMIBOLD } else { FontWeight::NORMAL })
                             .text_color(if active || bold { t.text.primary } else { t.text.muted })
-                            .child(tab.name.clone()),
+                            .tooltip(tip(name.clone()))
+                            .child(name),
                     )
                     .children(
                         ago.map(|a| div().flex_none().text_size(z(text_size::XS)).text_color(t.text.dim).child(a)),
@@ -777,6 +780,7 @@ impl Workspace {
         let Some(tab) = self.tabs.get(self.active) else {
             return div().h(z(height::HEADER)).flex_none().bg(t.bg.elevated);
         };
+        let name: SharedString = self.tab_title(self.active).into();
         let agent = self.agent(self.active);
         let since = agent.state_since.map(|s| fmt_for(now_secs() - s));
         let state = match agent.state {
@@ -788,8 +792,20 @@ impl Workspace {
         };
         ui::overlay_header()
             .child(ui::icon(icon::TERMINAL, 13., t.text.dim))
-            .child(div().flex_none().font_weight(FontWeight::MEDIUM).child(tab.name.clone()))
-            .child(div().min_w_0().truncate().text_color(t.text.dim).child(short_path(&tab.cwd)))
+            .child(
+                div()
+                    .id("session-name")
+                    .min_w_0()
+                    .truncate()
+                    .font_weight(FontWeight::MEDIUM)
+                    .tooltip(tip(name.clone()))
+                    .child(name),
+            )
+            // The path gives up its width long before the name does.
+            .child(crate::git_panel::shrink(
+                div().min_w_0().truncate().text_color(t.text.dim).child(short_path(&tab.cwd)),
+                1000.,
+            ))
             .children(state.map(|(label, color)| {
                 div()
                     .ml_auto()

@@ -1,0 +1,75 @@
+{
+  "session_id": "00000000-0000-4000-8000-000000000004",
+  "transcript_path": "/tmp/redacted",
+  "cwd": "/tmp/redacted",
+  "scratchpad_dir": "/tmp/redacted",
+  "prompt_id": "00000000-0000-4000-8000-000000000005",
+  "effort": {
+    "level": "medium"
+  },
+  "session_name": "Reply with ok",
+  "model": {
+    "id": "claude-haiku-5-5",
+    "display_name": "Haiku 5.5"
+  },
+  "workspace": {
+    "current_dir": "/tmp/redacted",
+    "project_dir": "/tmp/redacted",
+    "added_dirs": []
+  },
+  "version": "2.1.319",
+  "output_style": {
+    "name": "default"
+  },
+  "cost": {
+    "total_cost_usd": 0.007657550000000001,
+    "total_duration_ms": 13598,
+    "total_api_duration_ms": 3243,
+    "total_lines_added": 0,
+    "total_lines_removed": 0
+  },
+  "context_window": {
+    "total_input_tokens": 64770,
+    "total_output_tokens": 4,
+    "context_window_size": 1000000,
+    "current_usage": {
+      "input_tokens": 2,
+      "output_tokens": 4,
+      "cache_creation_input_tokens": 35573,
+      "cache_read_input_tokens": 29195
+    },
+    "used_percentage": 6,
+    "remaining_percentage": 94
+  },
+  "exceeds_200k_tokens": false,
+  "prompt_cache": {
+    "warm": true,
+    "caching_observed": true,
+    "ttl": "1h",
+    "expires_at": 1793993170,
+    "requests": 1,
+    "misses": 0,
+    "expected_rebuilds": 0,
+    "hit_ratio": 0.45074880345839125,
+    "cache_write_tokens": 35573,
+    "miss_recache_tokens": 0,
+    "last_miss_at": null,
+    "last_miss_cause": null,
+    "miss_causes": {},
+    "recache_tokens_if_cold": 64770
+  },
+  "fast_mode": false,
+  "thinking": {
+    "enabled": true
+  },
+  "rate_limits": {
+    "five_hour": {
+      "used_percentage": 27,
+      "resets_at": 1793992800
+    },
+    "seven_day": {
+      "used_percentage": 6,
+      "resets_at": 1794546000
+    }
+  }
+}
