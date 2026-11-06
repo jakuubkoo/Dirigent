@@ -140,7 +140,13 @@ impl Board {
                 self.seven_day = seven_day.or(self.seven_day);
             }
         }
-        *self.tabs.get(&msg.tab).unwrap() != before || self.five_hour != five || self.seven_day != seven
+        // `last_activity` is stamped on every hook but shown only as "N m ago" (the minute timer redraws it): the
+        // clock moving on is no visible change (a second ticking between two hooks woke the UI for nothing).
+        let mut now = self.tabs.get(&msg.tab).unwrap().clone();
+        if before.last_activity.is_some() {
+            now.last_activity = before.last_activity;
+        }
+        now != before || self.five_hour != five || self.seven_day != seven
     }
 
     pub fn get(&self, tab: u32) -> Agent {
@@ -442,6 +448,17 @@ mod tests {
 
     fn status(tab: u32, ctx: Option<f32>, five: Option<Limit>) -> Msg {
         Msg { tab, kind: Kind::Status { model: Some("Opus 5.5".into()), context_pct: ctx, five_hour: five, seven_day: None } }
+    }
+
+    #[test]
+    fn the_clock_moving_on_is_no_visible_change() {
+        let mut b = Board::default();
+        assert!(b.apply(hook(1, "UserPromptSubmit", None)));
+        // As if the last hook came long ago (a second boundary between two hooks is the same thing).
+        b.tabs.get_mut(&1).unwrap().last_activity = Some(0);
+        assert!(!b.apply(hook(1, "PreToolUse", None)), "same state: no UI wakeup");
+        assert!(b.get(1).last_activity.unwrap() > 0, "still stamped");
+        assert!(b.apply(hook(1, "Stop", None)), "a real change still counts");
     }
 
     #[test]
