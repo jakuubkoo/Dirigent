@@ -6,19 +6,6 @@ All notable changes to Dirigent are recorded here. The format follows
 
 ## [Unreleased]
 
-### Changed
-
-- New session dialog: the first prompt is multi-line and wraps (3 to 10 lines, then it scrolls). Enter adds a line there,
-  Ctrl+Enter creates the session. The prompt reaches claude as written (new lines and quotes intact, whatever your
-  shell): it goes through a file in the runtime folder that the `claude` shim reads and deletes, never through the
-  typed command.
-- Every single-line field (dialogs, search, find, settings): a click places the cursor, drag or Shift+click selects,
-  a double click selects a word, the field scrolls to keep the cursor visible, and Ctrl+C / X / V / A, Ctrl+Z / Y
-  (undo, redo) and Ctrl+←/→ (word moves) work.
-- The PR/MR strip shows check progress ("checks 3/5 · 1 failing", "all 5 passed") with each check's state and
-  duration in a tooltip; clicking it opens the checks page. While checks run and the Changes panel is visible, the
-  strip refreshes every 30 s. GitLab (with `glab`) lists the pipeline's jobs.
-
 ### Added
 
 - New session dialog: a branch prefix dropdown (`feat/`, `fix/`, `chore/`, `docs/`, none) next to the branch field,
@@ -27,12 +14,32 @@ All notable changes to Dirigent are recorded here. The format follows
 - New session dialog: while Name is empty, the first prompt names the session and its branch as you type (its first
   words at once, then `claude -p` on Haiku off the UI thread: no tools, no saved session). A name you type stays;
   a `Branch: x` line in the prompt gives the branch as written.
+
+### Changed
+
+- New session dialog: the first prompt is multi-line and wraps (3 to 10 lines, then it scrolls). Enter adds a line
+  there, Ctrl+Enter creates the session. The prompt reaches claude as written (new lines and quotes intact, whatever
+  your shell): it goes through a file in the runtime folder that the `claude` shim reads and deletes, never through
+  the typed command.
+- Every single-line field (dialogs, search, find, settings): a click places the cursor, drag or Shift+click selects,
+  a double click selects a word, the field scrolls to keep the cursor visible, and Ctrl+C / X / V / A, Ctrl+Z / Y
+  (undo, redo) and Ctrl+←/→ (word moves) work.
+
+## [0.3.0] - 2026-11-06
+
+Find in the terminal, check progress in the PR/MR strip, and a round of fixes.
+
+### Added
+
 - **Find in the terminal** (Ctrl+Alt+F): searches the screen and the whole scrollback (also in full-screen apps),
   highlights every match, Enter / Shift+Enter step to the next / previous one, match case and regex toggles, Esc
   closes. Not Ctrl+F: the shell, Claude Code and less/vim use it.
 
 ### Changed
 
+- The PR/MR strip shows check progress ("checks 3/5 · 1 failing", "all 5 passed") with each check's state and
+  duration in a tooltip; clicking it opens the checks page. While checks run and the Changes panel is visible, the
+  strip refreshes every 30 s. GitLab (with `glab`) lists the pipeline's jobs.
 - The `+` on a project group header opens the New session setup dialog (name, git worktree, first prompt) for that
   project; Shift+click starts a session right away. The old instant behavior stays available as "Plain + opens" in
   Settings (Project default, Shell, Claude).
@@ -169,7 +176,8 @@ The first release: a native Linux app (Wayland and X11) for running many Claude 
   - Prebuilt Linux x86_64 tarballs with `install.sh --prebuilt` and SHA256 checksums.
   - CI checks formatting, clippy, tests, licenses and RustSec advisories.
 
-[Unreleased]: https://github.com/jakuubkoo/Dirigent/compare/v0.2.0...HEAD
+[Unreleased]: https://github.com/jakuubkoo/Dirigent/compare/v0.3.0...HEAD
+[0.3.0]: https://github.com/jakuubkoo/Dirigent/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/jakuubkoo/Dirigent/compare/v0.1.1...v0.2.0
 [0.1.1]: https://github.com/jakuubkoo/Dirigent/compare/v0.1.0...v0.1.1
 [0.1.0]: https://github.com/jakuubkoo/Dirigent/releases/tag/v0.1.0
