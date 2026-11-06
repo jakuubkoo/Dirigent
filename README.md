@@ -76,6 +76,9 @@ group.
 |---|---|
 | Ctrl+, | Settings |
 | Ctrl+= or Ctrl++ / Ctrl+- / Ctrl+0 | Zoom the whole UI in / out / back to 100 % (saved as UI zoom) |
+| Ctrl+P | Go to file in the active session's project (`name:42` jumps to a line, Ctrl+Enter opens its diff) |
+| Ctrl+Shift+P | Command palette (`>` in the title-bar search box) |
+| Ctrl+Shift+F | Search in files (`#`; results in the Search panel; `.*` regex, `Aa` case, `ab` whole word) |
 | Ctrl+Shift+T | New session (project picker) |
 | Ctrl+Shift+N | New session in the current project |
 | Ctrl+Shift+W / middle click / hover x | Close session (asks first while claude runs in it) |
