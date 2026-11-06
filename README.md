@@ -27,6 +27,22 @@ stay at zero lag and 0 % CPU when idle. Linux (Wayland and X11) for now.
 
 ## Install
 
+### From a release (no Rust needed)
+
+Download `dirigent-X.Y.Z-x86_64-linux.tar.gz` and `SHA256SUMS` from
+[Releases](https://github.com/jakuubkoo/Dirigent/releases) (Linux x86_64, glibc 2.35+, e.g. Ubuntu 22.04 or newer):
+
+```sh
+sha256sum -c SHA256SUMS
+tar xzf dirigent-*-x86_64-linux.tar.gz
+dirigent-*-x86_64-linux/install.sh --prebuilt
+```
+
+It installs the same files as a build from source (below) and says which runtime libraries are missing, if any.
+`uninstall.sh` in the same folder removes it.
+
+### From source
+
 Needs Rust (https://rustup.rs) and the build packages; the script checks them first and prints the exact
 `sudo apt install …` line if something is missing (it never runs sudo itself).
 
@@ -42,8 +58,10 @@ launcher entry with its icon. `dirigent --version` shows the installed build.
 ## Update
 
 ```sh
-git pull && scripts/install.sh
+git pull && scripts/install.sh      # from source
 ```
+
+or unpack a newer release and run its `install.sh --prebuilt`.
 
 Safe while Dirigent runs: the binaries are replaced atomically, the running window keeps its copy until you
 restart it.
