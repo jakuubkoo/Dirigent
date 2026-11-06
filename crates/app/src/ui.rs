@@ -1,11 +1,17 @@
 //! Small shared UI pieces built from theme tokens: icons, tooltips, pills, meters, time formatting.
 
 use gpui::{
-    AnyElement, AnyView, App, AppContext, Context, Div, InteractiveElement, IntoElement, ParentElement, Render, Rgba,
-    SharedString, Stateful, StatefulInteractiveElement, Styled, Svg, Window, div, prelude::FluentBuilder as _, svg,
+    AnyElement, AnyView, App, AppContext, Bounds, ContentMask, Context, Div, HighlightStyle, InteractiveElement,
+    IntoElement, MouseButton, MouseDownEvent, MouseMoveEvent, ParentElement, Pixels, Point, Render, Rgba, SharedString,
+    Stateful, StatefulInteractiveElement, Styled, StyledText, Svg, TextAlign, TextLayout, TextRun, Window, canvas, div,
+    fill, point, prelude::FluentBuilder as _, size, svg,
 };
 
+use std::cell::RefCell;
+use std::rc::Rc;
+
 use crate::line_edit::LineEdit;
+use crate::text_area::TextArea;
 use crate::theme::{self, MONO_FONT, radius, space, text_size, z};
 
 pub mod icon {
@@ -155,7 +161,6 @@ impl Render for Tip {
 /// A one-line text input (caret only when focused, placeholder when empty).
 pub fn text_input(edit: &LineEdit, focused: bool, placeholder: &'static str) -> AnyElement {
     let t = theme::get();
-    let caret = || div().flex_none().w(z(1.5)).h(z(15.)).bg(t.accent);
     div()
         .flex()
         .items_center()
@@ -168,15 +173,225 @@ pub fn text_input(edit: &LineEdit, focused: bool, placeholder: &'static str) -> 
         .border_1()
         .border_color(if focused { t.accent } else { t.border.subtle })
         .text_size(z(text_size::SM))
-        .when(edit.text.is_empty(), |d| {
-            d.when(focused, |d| d.child(caret())).child(div().text_color(t.text.faint).child(placeholder))
-        })
-        .when(!edit.text.is_empty(), |d| {
-            d.child(div().flex_none().whitespace_nowrap().child(edit.before_cursor().to_string()))
-                .when(focused, |d| d.child(caret()))
-                .child(div().flex_none().whitespace_nowrap().child(edit.after_cursor().to_string()))
-        })
+        .child(line_text(edit, focused, placeholder))
         .into_any_element()
+}
+
+/// A `LineEdit`'s text for any field frame: selection, caret (when focused), horizontal scroll that follows the
+/// caret, and the mouse (click places the caret, Shift+click / drag selects, double click selects a word). The
+/// mouse changes only the selection, so it needs no owner: the next key applies it.
+pub fn line_text(edit: &LineEdit, focused: bool, placeholder: &'static str) -> Div {
+    let t = theme::get();
+    let view = edit.view();
+    let text = edit.text.clone();
+    let (anchor, cursor) = edit.sel();
+    let (accent, sel_bg, faint) = (t.accent, t.bg.selected_focus, t.text.faint);
+    let paint_view = view.clone();
+    let painted = canvas(
+        move |bounds, window, _| {
+            let style = window.text_style();
+            let empty = text.is_empty();
+            let shown: SharedString = if empty { placeholder.into() } else { text.clone().into() };
+            let run = TextRun {
+                len: shown.len(),
+                font: style.font(),
+                color: if empty { faint.into() } else { style.color },
+                background_color: None,
+                underline: None,
+                strikethrough: None,
+            };
+            let font_size = style.font_size.to_pixels(window.rem_size());
+            let line = window.text_system().shape_line(shown, font_size, &[run], None);
+            let mut v = paint_view.borrow_mut();
+            let caret_w = z(1.5);
+            let (width, caret_x) =
+                if empty { (Pixels::ZERO, Pixels::ZERO) } else { (line.width(), line.x_for_index(cursor)) };
+            let room = bounds.size.width - caret_w;
+            if caret_x - v.scroll > room {
+                v.scroll = caret_x - room;
+            }
+            v.scroll = v.scroll.min(caret_x).min((width - room).max(Pixels::ZERO)).max(Pixels::ZERO);
+            v.left = bounds.origin.x;
+            v.owner = Some(window.current_view());
+            v.text = text.clone();
+            v.line = (!empty).then(|| line.clone());
+            if !v.pending {
+                v.sel = (anchor, cursor);
+            }
+            (line, caret_x, v.scroll)
+        },
+        move |bounds, (line, caret_x, scroll), window, cx| {
+            let line_h = bounds.size.height;
+            let origin = point(bounds.origin.x - scroll, bounds.origin.y);
+            window.with_content_mask(Some(ContentMask { bounds }), |window| {
+                let (a, b) = (anchor.min(cursor), anchor.max(cursor));
+                if a < b {
+                    let (x0, x1) = (line.x_for_index(a), line.x_for_index(b));
+                    window.paint_quad(fill(Bounds::new(point(origin.x + x0, origin.y), size(x1 - x0, line_h)), sel_bg));
+                }
+                let _ = line.paint(origin, line_h, TextAlign::Left, None, window, cx);
+                if focused {
+                    window.paint_quad(fill(
+                        Bounds::new(point(origin.x + caret_x, origin.y), size(z(1.5), line_h)),
+                        accent,
+                    ));
+                }
+            });
+        },
+    )
+    .absolute()
+    .top_0()
+    .left_0()
+    .size_full();
+    let (down, drag, up) = (view.clone(), view.clone(), view);
+    div()
+        .relative()
+        .flex_1()
+        .min_w_0()
+        .cursor_text()
+        // Sizes the row like a text line; the canvas draws over it.
+        .child(div().text_color(gpui::transparent_black()).child("Xg"))
+        .child(painted)
+        .on_mouse_down(MouseButton::Left, move |ev: &MouseDownEvent, _, cx| {
+            let mut v = down.borrow_mut();
+            let at = v.index_at(ev.position.x);
+            v.sel = if ev.click_count == 2 {
+                let w = crate::text_area::word_at(&v.text, at);
+                (w.start, w.end)
+            } else if ev.modifiers.shift {
+                (v.sel.0, at)
+            } else {
+                (at, at)
+            };
+            v.pending = true;
+            v.dragging = ev.click_count == 1;
+            if let Some(id) = v.owner {
+                cx.notify(id);
+            }
+        })
+        .on_mouse_move(move |ev: &MouseMoveEvent, _, cx| {
+            let mut v = drag.borrow_mut();
+            if v.dragging && ev.pressed_button == Some(MouseButton::Left) {
+                v.sel.1 = v.index_at(ev.position.x);
+                v.pending = true;
+                if let Some(id) = v.owner {
+                    cx.notify(id);
+                }
+            }
+        })
+        .on_mouse_up(MouseButton::Left, move |_, _, _| up.borrow_mut().dragging = false)
+}
+
+/// A multi-line `TextArea` box: `min`..`max` lines high, then it scrolls; `wrap` soft-wraps long lines (else
+/// they are cut). Mouse: click places the caret, Shift+click
+/// and drag select. `get` finds the area in the owner, `on_press` runs on a press (focus the field). `layouts` keeps
+/// this frame's line layouts for the mouse. The caller adds font, keys and a placeholder.
+#[allow(clippy::too_many_arguments)]
+pub fn text_area_box<V: 'static>(
+    id: &'static str,
+    area: &TextArea,
+    layouts: &Rc<RefCell<Vec<TextLayout>>>,
+    focused: bool,
+    (min, max): (usize, usize),
+    wrap: bool,
+    line_h: Pixels,
+    get: fn(&mut V) -> Option<&mut TextArea>,
+    on_press: fn(&mut V, &mut Window, &mut Context<V>),
+    cx: &mut Context<V>,
+) -> Stateful<Div> {
+    let t = theme::get();
+    let sel = area.selection();
+    let (cur_line, cur_col) = area.line_col(area.cursor());
+    let mut lay = layouts.borrow_mut();
+    lay.clear();
+    let mut start = 0;
+    let mut lines = Vec::new();
+    for (i, line) in area.text.split('\n').enumerate() {
+        let end = start + line.len();
+        // Selected part of this line (the newline shows as one selected space at the end).
+        let mut hl = Vec::new();
+        let (a, b) = (sel.start.max(start), sel.end.min(end + 1));
+        if a < b {
+            let shown_end = (b - start).min(line.len() + 1);
+            hl.push((
+                a - start..shown_end,
+                HighlightStyle { background_color: Some(t.bg.selected_focus.into()), ..Default::default() },
+            ));
+        }
+        // A trailing space keeps empty lines measurable and shows a selected newline.
+        let text = StyledText::new(format!("{line} ")).with_highlights(hl);
+        let layout = text.layout().clone();
+        lay.push(layout.clone());
+        let cursor = (focused && i == cur_line).then_some(cur_col);
+        let color = t.accent;
+        // Places the caret under `pos` on this line (`extend`: keeps the selection's other end).
+        let click = {
+            let layouts = layouts.clone();
+            move |v: &mut V, pos: Point<Pixels>, extend: bool| {
+                let col = layouts.borrow().get(i).map_or(0, |l| match l.index_for_position(pos) {
+                    Ok(c) | Err(c) => c,
+                });
+                if let Some(a) = get(v) {
+                    a.click(a.offset(i, col), extend);
+                }
+            }
+        };
+        let drag = click.clone();
+        lines.push(
+            div()
+                .relative()
+                .w_full()
+                .when(!wrap, |d| d.whitespace_nowrap().overflow_hidden())
+                .on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(move |v: &mut V, ev: &MouseDownEvent, window, cx| {
+                        click(v, ev.position, ev.modifiers.shift);
+                        on_press(v, window, cx);
+                        cx.notify();
+                    }),
+                )
+                .on_mouse_move(cx.listener(move |v: &mut V, ev: &MouseMoveEvent, _, cx| {
+                    if ev.pressed_button == Some(MouseButton::Left) {
+                        drag(v, ev.position, true);
+                        cx.notify();
+                    }
+                }))
+                .child(text)
+                .children(cursor.map(|col| {
+                    canvas(
+                        |_, _, _| {},
+                        move |_, _, window, _| {
+                            if let Some(p) = layout.position_for_index(col) {
+                                window.paint_quad(fill(Bounds::new(p, size(z(1.5), layout.line_height())), color));
+                            }
+                        },
+                    )
+                    .absolute()
+                    .size_full()
+                }))
+                .into_any_element(),
+        );
+        start = end + 1;
+    }
+    let n = area.text.split('\n').count().clamp(min, max);
+    let pad = z(space::SM * 2.) + z(2.); // padding + border
+    div()
+        .id(id)
+        .cursor_text()
+        .relative()
+        // Wrapped lines are taller than their count: the content sizes the box between min and max.
+        .when(!wrap, |d| d.h(line_h * n as f32 + z(space::SM * 2.)))
+        .when(wrap, |d| d.min_h(line_h * min as f32 + pad).max_h(line_h * max as f32 + pad))
+        .overflow_y_scroll()
+        .px(z(space::MD))
+        .py(z(space::SM))
+        .rounded(z(radius::MD))
+        .bg(t.bg.input)
+        .border_1()
+        .border_color(if focused { t.accent } else { t.border.subtle })
+        .text_size(z(text_size::SM))
+        .text_color(t.text.primary)
+        .children(lines)
 }
 
 /// A search option toggle (`.*`, `Aa`, `ab`): filled while on; the caller adds `on_click`.

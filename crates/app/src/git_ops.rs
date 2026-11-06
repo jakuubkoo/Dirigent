@@ -312,24 +312,106 @@ pub fn generate_message(repo: &Repo, files: Option<&[FileChange]>) -> Result<Str
     } else {
         "Write the commit message for this diff."
     };
-    let mut child = Command::new("claude")
-        .args(["-p", "--setting-sources", "", "--model", "haiku", "--tools", "", "--no-session-persistence"])
-        .args(["--system-prompt", GENERATE_PROMPT, ask])
-        .current_dir(std::env::temp_dir())
+    claude_p(GENERATE_PROMPT, ask, &diff, &Stop::default()).map(|out| clean_message(&out))
+}
+
+/// Stops a running `claude -p` from another thread: `kill` only signals (no wait, fine on the UI thread); the
+/// run's own thread reaps the process. Killed before the process started: it is killed as soon as it does.
+#[derive(Clone, Default)]
+pub struct Stop(Arc<Mutex<(Option<std::process::Child>, bool)>>);
+
+impl Stop {
+    pub fn kill(&self) {
+        let mut g = self.0.lock().unwrap_or_else(|e| e.into_inner());
+        g.1 = true;
+        if let Some(c) = g.0.as_mut() {
+            let _ = c.kill();
+        }
+    }
+}
+
+/// `claude -p` on Haiku with no tools, no saved session, none of your settings or hooks (your login): `system`
+/// as the system prompt, `ask` as the prompt, `input` on stdin. Blocking.
+fn claude_p(system: &str, ask: &str, input: &str, stop: &Stop) -> Result<String, String> {
+    let mut cmd = Command::new("claude");
+    cmd.args(["-p", "--setting-sources", "", "--model", "haiku", "--tools", "", "--no-session-persistence"])
+        .args(["--system-prompt", system, ask])
+        .current_dir(std::env::temp_dir());
+    run_stoppable(cmd, input, stop).map_err(|e| e.replace("{cmd}", "claude"))
+}
+
+/// Runs `cmd` with `input` on stdin and returns its stdout; `stop` can kill it meanwhile. Blocking.
+fn run_stoppable(mut cmd: Command, input: &str, stop: &Stop) -> Result<String, String> {
+    use std::io::Read as _;
+    let mut child = cmd
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
-        .map_err(|e| format!("Couldn't run claude: {e}"))?;
-    if let Some(mut stdin) = child.stdin.take() {
-        let _ = stdin.write_all(diff.as_bytes());
+        .map_err(|e| format!("Couldn't run {{cmd}}: {e}"))?;
+    let (stdin, mut stdout, stderr) = (child.stdin.take(), child.stdout.take(), child.stderr.take());
+    {
+        let mut g = stop.0.lock().unwrap_or_else(|e| e.into_inner());
+        if g.1 {
+            let _ = child.kill();
+        }
+        g.0 = Some(child);
     }
-    let out = child.wait_with_output().map_err(|e| e.to_string())?;
-    if !out.status.success() {
-        let msg = String::from_utf8_lossy(&out.stdout).trim().to_string() + String::from_utf8_lossy(&out.stderr).trim();
-        return Err(format!("claude failed: {msg}"));
+    if let Some(mut stdin) = stdin {
+        let _ = stdin.write_all(input.as_bytes()); // dropped here: EOF
     }
-    Ok(clean_message(&String::from_utf8_lossy(&out.stdout)))
+    // stderr on its own thread: a full stderr pipe must not block stdout.
+    let err = std::thread::spawn(move || {
+        let mut s = String::new();
+        if let Some(mut e) = stderr {
+            let _ = e.read_to_string(&mut s);
+        }
+        s
+    });
+    let mut out = String::new();
+    if let Some(o) = stdout.as_mut() {
+        let _ = o.read_to_string(&mut out);
+    }
+    let err = err.join().unwrap_or_default();
+    let (child, stopped) = {
+        let mut g = stop.0.lock().unwrap_or_else(|e| e.into_inner());
+        (g.0.take(), g.1)
+    };
+    let status = child.map(|mut c| c.wait()).transpose().map_err(|e| e.to_string())?;
+    if stopped {
+        return Err("Stopped".into());
+    }
+    if !status.is_some_and(|s| s.success()) {
+        return Err(format!("{{cmd}} failed: {}{}", out.trim(), err.trim()));
+    }
+    Ok(out)
+}
+
+const NAME_PROMPT: &str = "You name coding sessions from the task a developer is about to give an agent. Reply with \
+exactly two lines and nothing else:\nname: <a session name of 2 to 5 words, sentence case, no quotes>\nbranch: <a git \
+branch slug of 2 to 5 lowercase words joined by hyphens, without a type prefix such as feat/ or fix/>";
+
+/// A session name and a branch slug for a first prompt (`claude -p`, Haiku; see `claude_p`); `stop` kills it.
+/// Blocking.
+pub fn name_session(prompt: &str, stop: &Stop) -> Result<(String, String), String> {
+    let input: String = prompt.chars().take(4000).collect();
+    let out = claude_p(NAME_PROMPT, "Name the session for this task.", &input, stop)?;
+    parse_name(&out).ok_or_else(|| format!("Unexpected reply: {}", out.trim()))
+}
+
+/// `name: …` / `branch: …` lines → (name, slug); the slug goes through `projects::slug` (never a `/`).
+fn parse_name(out: &str) -> Option<(String, String)> {
+    let field = |key: &str| {
+        out.lines().find_map(|l| {
+            let l = l.trim().trim_start_matches(['-', '*', ' ']);
+            let v = l.get(..key.len()).filter(|h| h.eq_ignore_ascii_case(key)).map(|_| &l[key.len()..])?;
+            Some(v.trim_matches(|c: char| c.is_whitespace() || matches!(c, '"' | '`' | '\'' | '*')).to_string())
+                .filter(|v| !v.is_empty())
+        })
+    };
+    let name: String = field("name:")?.chars().take(60).collect();
+    let slug = crate::projects::slug(&field("branch:").unwrap_or_else(|| name.clone()));
+    (!slug.is_empty()).then_some((name, slug))
 }
 
 /// Drops attribution lines and code fences a model may add anyway.
@@ -350,6 +432,42 @@ fn clean_message(raw: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_stopped_run_ends_at_once() {
+        let sleeper = || {
+            let mut c = Command::new("sh");
+            c.args(["-c", "cat >/dev/null; exec sleep 30"]);
+            c
+        };
+        assert_eq!(run_stoppable(Command::new("cat"), "hi", &Stop::default()), Ok("hi".into()));
+        let early = Stop::default();
+        early.kill(); // before the process exists
+        let t = std::time::Instant::now();
+        assert_eq!(run_stoppable(sleeper(), "x", &early), Err("Stopped".into()));
+        let stop = Stop::default();
+        let s2 = stop.clone();
+        let run = std::thread::spawn(move || run_stoppable(sleeper(), "x", &s2));
+        stop.kill(); // whether it started yet or not
+        assert_eq!(run.join().unwrap(), Err("Stopped".into()));
+        assert!(t.elapsed() < std::time::Duration::from_secs(10), "{:?}", t.elapsed());
+        let failed = run_stoppable(Command::new("false"), "", &Stop::default()).unwrap_err();
+        assert!(failed.starts_with("{cmd} failed"), "{failed}");
+    }
+
+    #[test]
+    fn parses_generated_names() {
+        let out = "name: Branch prefix dropdown\nbranch: feat/branch-prefix-dropdown\n";
+        assert_eq!(parse_name(out), Some(("Branch prefix dropdown".into(), "feat-branch-prefix-dropdown".into())));
+        let out = "Sure!\n- **Name:** \"Esc interrupt\"\n- Branch: `esc-interrupt`";
+        assert_eq!(parse_name(out), Some(("Esc interrupt".into(), "esc-interrupt".into())));
+        assert_eq!(
+            parse_name("name: Fix login"),
+            Some(("Fix login".into(), "fix-login".into())),
+            "no branch: from name"
+        );
+        assert_eq!(parse_name("I can't help with that."), None);
+    }
 
     #[test]
     fn sequences_retry_the_rest() {

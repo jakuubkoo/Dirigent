@@ -317,8 +317,11 @@ mod tests {
         assert!(parse(&args(&["a", "b"])).unwrap_err().contains("only one path"));
     }
 
+    /// Per process (like the other test helpers): two test runs at once (CI shards, a run while another is going)
+    /// would otherwise delete and rebind each other's sockets.
     fn tmp(name: &str) -> PathBuf {
-        let d = Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/../../target/tmp")).join(name);
+        let d = Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/../../target/tmp"))
+            .join(format!("{name}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&d);
         std::fs::create_dir_all(d.join("real/sub")).unwrap();
         std::fs::write(d.join("real/sub/f.rs"), "fn main() {}\n").unwrap();
@@ -343,6 +346,7 @@ mod tests {
         assert_eq!(r.dir, None, "no path, no flags: only start/focus");
         let r = request(&Cmd { claude: true, ..Default::default() }, &d, None).unwrap();
         assert_eq!(r.dir, Some(d.clone()), "--claude alone: here");
+        let _ = std::fs::remove_dir_all(&d);
     }
 
     #[test]
@@ -367,6 +371,26 @@ mod tests {
         assert_eq!(pick(&req(b, false, true), &tabs, 0, &[0, 1, 2]), None);
         let alt = Request { dir: Some("/real/a".into()), alt_dir: Some(a.into()), ..Default::default() };
         assert_eq!(pick(&alt, &tabs, 1, &[1, 0, 2]), Some(0), "symlinked cwd matches the typed path");
+    }
+
+    /// A socket file nobody listens on, made by another process that then exits. Not bound and closed here: another
+    /// test spawning a process at that moment hands the child a copy of the listener until the child's exec, and a
+    /// connect in that window succeeds instead of being refused (it failed under load).
+    fn stale_socket(path: &Path) {
+        let made = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", "cli::tests::make_stale_socket", "--ignored", "--quiet"])
+            .env("DIRIGENT_TEST_STALE_SOCKET", path)
+            .output()
+            .unwrap();
+        assert!(made.status.success() && path.exists(), "{}", String::from_utf8_lossy(&made.stdout));
+    }
+
+    #[test]
+    #[ignore = "helper: run in its own process by socket_round_trip_stale_race_and_timeout"]
+    fn make_stale_socket() {
+        if let Some(p) = std::env::var_os("DIRIGENT_TEST_STALE_SOCKET") {
+            drop(bind(Path::new(&p)).unwrap());
+        }
     }
 
     #[test]
@@ -394,8 +418,7 @@ mod tests {
 
         // Stale: the file stays, nobody accepts → removed, then binding works again.
         let stale = d.join("stale.sock");
-        drop(bind(&stale).unwrap());
-        assert!(stale.exists());
+        stale_socket(&stale);
         assert!(matches!(send(&stale, &req), Ok(Sent::NotRunning)));
         assert!(!stale.exists());
         drop(bind(&stale).unwrap());
@@ -406,5 +429,6 @@ mod tests {
         let t = std::time::Instant::now();
         assert!(send(&hang, &req).unwrap_err().contains("didn't answer"));
         assert!(t.elapsed() < Duration::from_secs(7));
+        let _ = std::fs::remove_dir_all(&d);
     }
 }

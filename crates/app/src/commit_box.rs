@@ -8,8 +8,7 @@ use std::path::PathBuf;
 use std::rc::Rc;
 
 use gpui::{
-    Bounds, ClickEvent, ClipboardItem, Context, FocusHandle, HighlightStyle, KeyDownEvent, MouseButton, MouseDownEvent,
-    MouseMoveEvent, StyledText, TextLayout, WeakEntity, Window, canvas, div, fill, prelude::*, size,
+    ClickEvent, ClipboardItem, Context, FocusHandle, KeyDownEvent, TextLayout, WeakEntity, Window, div, prelude::*,
 };
 
 use crate::text_area::{Key, TextArea};
@@ -28,7 +27,6 @@ pub struct CommitBox {
     focus: FocusHandle,
     /// This frame's line layouts (for clicks and the cursor).
     layouts: Rc<RefCell<Vec<TextLayout>>>,
-    dragging: bool,
     workspace: WeakEntity<Workspace>,
     /// Pushed by the workspace with each panel sync.
     pub props: Props,
@@ -53,7 +51,6 @@ impl CommitBox {
             generating: false,
             focus: cx.focus_handle(),
             layouts: Default::default(),
-            dragging: false,
             workspace,
             props: Props::default(),
         }
@@ -132,84 +129,6 @@ impl CommitBox {
         cx.stop_propagation();
         cx.notify();
     }
-
-    /// The byte offset under a mouse position on line `line`.
-    fn offset_at(&self, line: usize, pos: gpui::Point<gpui::Pixels>) -> usize {
-        let layouts = self.layouts.borrow();
-        let col = layouts.get(line).map_or(0, |l| match l.index_for_position(pos) {
-            Ok(i) | Err(i) => i,
-        });
-        self.area.offset(line, col)
-    }
-
-    fn lines(&self, focused: bool, cx: &mut Context<Self>) -> Vec<gpui::AnyElement> {
-        let t = theme::get();
-        let sel = self.area.selection();
-        let (cur_line, cur_col) = self.area.line_col(self.area.cursor());
-        let mut layouts = self.layouts.borrow_mut();
-        layouts.clear();
-        let mut start = 0;
-        let mut out = Vec::new();
-        for (i, line) in self.area.text.split('\n').enumerate() {
-            let end = start + line.len();
-            // Selected part of this line (the newline shows as one selected space at the end).
-            let mut hl = Vec::new();
-            let (a, b) = (sel.start.max(start), sel.end.min(end + 1));
-            if a < b {
-                let shown_end = (b - start).min(line.len() + 1);
-                hl.push((
-                    a - start..shown_end,
-                    HighlightStyle { background_color: Some(t.bg.selected_focus.into()), ..Default::default() },
-                ));
-            }
-            // A trailing space keeps empty lines measurable and shows a selected newline.
-            let text = StyledText::new(format!("{line} ")).with_highlights(hl);
-            let layout = text.layout().clone();
-            layouts.push(layout.clone());
-            let cursor = (focused && i == cur_line).then_some(cur_col);
-            let color = t.accent;
-            out.push(
-                div()
-                    .relative()
-                    .w_full()
-                    .whitespace_nowrap()
-                    .overflow_hidden()
-                    .on_mouse_down(
-                        MouseButton::Left,
-                        cx.listener(move |b: &mut Self, ev: &MouseDownEvent, window, cx| {
-                            let at = b.offset_at(i, ev.position);
-                            b.area.click(at, ev.modifiers.shift);
-                            b.dragging = true;
-                            window.focus(&b.focus, cx);
-                            cx.notify();
-                        }),
-                    )
-                    .on_mouse_move(cx.listener(move |b: &mut Self, ev: &MouseMoveEvent, _, cx| {
-                        if b.dragging && ev.pressed_button == Some(MouseButton::Left) {
-                            let at = b.offset_at(i, ev.position);
-                            b.area.click(at, true);
-                            cx.notify();
-                        }
-                    }))
-                    .child(text)
-                    .children(cursor.map(|col| {
-                        canvas(
-                            |_, _, _| {},
-                            move |_, _, window, _| {
-                                if let Some(p) = layout.position_for_index(col) {
-                                    window.paint_quad(fill(Bounds::new(p, size(z(1.5), layout.line_height())), color));
-                                }
-                            },
-                        )
-                        .absolute()
-                        .size_full()
-                    }))
-                    .into_any_element(),
-            );
-            start = end + 1;
-        }
-        out
-    }
 }
 
 impl Render for CommitBox {
@@ -217,40 +136,34 @@ impl Render for CommitBox {
         let t = theme::get();
         let focused = self.focus.is_focused(window);
         let line_h = window.line_height();
-        let n = self.area.text.split('\n').count().clamp(MIN_LINES, MAX_LINES);
         let empty = self.area.text.is_empty();
-        let lines = self.lines(focused, cx);
-        let editor = div()
-            .id("commit-message")
-            .track_focus(&self.focus)
-            .key_context("CommitBox")
-            .on_key_down(cx.listener(Self::key))
-            .on_mouse_up(MouseButton::Left, cx.listener(|b: &mut Self, _, _, _| b.dragging = false))
-            .cursor_text()
-            .relative()
-            .h(line_h * n as f32 + z(space::SM * 2.))
-            .overflow_y_scroll()
-            .px(z(space::MD))
-            .py(z(space::SM))
-            .rounded(z(radius::MD))
-            .bg(t.bg.input)
-            .border_1()
-            .border_color(if focused { t.accent } else { t.border.subtle })
-            .font_family(MONO_FONT)
-            .text_size(z(text_size::SM))
-            .text_color(t.text.primary)
-            .children(lines)
-            .when(empty && !focused, |d| {
-                d.child(
-                    div()
-                        .absolute()
-                        .top(z(space::SM))
-                        .left(z(space::MD))
-                        .font_family(theme::UI_FONT)
-                        .text_color(t.text.faint)
-                        .child(if self.amend { "Amended message" } else { "Message (Ctrl+Enter commits)" }),
-                )
-            });
+        let editor = ui::text_area_box(
+            "commit-message",
+            &self.area,
+            &self.layouts,
+            focused,
+            (MIN_LINES, MAX_LINES),
+            false,
+            line_h,
+            |b: &mut Self| Some(&mut b.area),
+            |b, window, cx| window.focus(&b.focus, cx),
+            cx,
+        )
+        .track_focus(&self.focus)
+        .key_context("CommitBox")
+        .on_key_down(cx.listener(Self::key))
+        .font_family(MONO_FONT)
+        .when(empty && !focused, |d| {
+            d.child(
+                div()
+                    .absolute()
+                    .top(z(space::SM))
+                    .left(z(space::MD))
+                    .font_family(theme::UI_FONT)
+                    .text_color(t.text.faint)
+                    .child(if self.amend { "Amended message" } else { "Message (Ctrl+Enter commits)" }),
+            )
+        });
         let p = &self.props;
         let ws = self.workspace.clone();
         let can = self.can_commit();

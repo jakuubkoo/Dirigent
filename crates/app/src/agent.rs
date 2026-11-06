@@ -416,10 +416,40 @@ fn sh_quote(p: &Path) -> String {
     format!("'{}'", p.display().to_string().replace('\'', r"'\''"))
 }
 
-/// `claude` shim: runs the next `claude` on PATH with our settings (hooks + statusLine) layered on top.
+/// Names a file whose text the shim passes to claude as the first prompt (then the file and the variable go).
+pub const PROMPT_ENV: &str = "DIRIGENT_PROMPT_FILE";
+
+/// A new file for tab `tab`'s first prompt in this run's runtime dir (`start_line`, then the shim reads it).
+pub fn prompt_file(tab: usize) -> PathBuf {
+    let nanos = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_nanos());
+    runtime_dir().join(format!("prompt-{tab}-{nanos}.txt"))
+}
+
+/// Writes a first prompt for the shim (only you can read it). Blocking: call off the UI thread.
+pub fn write_prompt(path: &Path, prompt: &str) -> std::io::Result<()> {
+    use std::io::Write;
+    use std::os::unix::fs::OpenOptionsExt;
+    let mut f = std::fs::OpenOptions::new().write(true).create_new(true).mode(0o600).open(path)?;
+    f.write_all(prompt.as_bytes())
+}
+
+/// `claude` shim: runs the next `claude` on PATH with our settings (hooks + statusLine) layered on top. POSIX sh, so
+/// a first prompt in a file (`DIRIGENT_PROMPT_FILE`) reaches claude intact whatever your shell and aliases are.
 const SHIM: &str = r#"#!/bin/sh
 # dirigent: run the real claude with dirigent hooks + statusLine (--settings). Your settings stay untouched.
 self_dir=$(dirname "$0")
+# A first prompt from the New session dialog: the file's text is the prompt (newlines and quotes intact), then the
+# file and the variable go (claude and what it runs never see it). Run again from history, the file is gone: claude
+# starts without it.
+if [ -n "${DIRIGENT_PROMPT_FILE:-}" ]; then
+  prompt_file=$DIRIGENT_PROMPT_FILE
+  unset DIRIGENT_PROMPT_FILE
+  if [ -f "$prompt_file" ]; then
+    prompt=$(cat "$prompt_file")
+    rm -f "$prompt_file"
+    set -- "$@" -- "$prompt"
+  fi
+fi
 IFS=:
 for d in $PATH; do
   [ -z "$d" ] || [ "$d" = "$self_dir" ] && continue
@@ -799,6 +829,53 @@ mod tests {
         assert_eq!(std::fs::read_to_string(&reported).unwrap(), "--model|a b|", "argv reported before exec");
         // Settings gone (app quit): plain claude, never a broken --settings.
         assert_eq!(run(&d.join("missing.json")), "real --model a b\n");
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn shim_passes_a_prompt_file_intact_through_aliases_and_deletes_it() {
+        let d = std::env::temp_dir().join(format!("dirigent-shim-prompt-test-{}", std::process::id()));
+        let (shim_dir, real_dir) = (d.join("shim"), d.join("real"));
+        std::fs::create_dir_all(&shim_dir).unwrap();
+        std::fs::create_dir_all(&real_dir).unwrap();
+        write_exec(&shim_dir.join("claude"), SHIM).unwrap();
+        // Each argument in brackets (one per prompt, exactly as written), then whether the variable reached claude.
+        write_exec(
+            &real_dir.join("claude"),
+            "#!/bin/sh\nprintf '[%s]' \"$@\"\nprintf '{%s}' \"${DIRIGENT_PROMPT_FILE-unset}\"\n",
+        )
+        .unwrap();
+        let prompt = "Branch: feat/x\n\nFix the 'login' \"bug\": $HOME `id` \\n\n  - keep it\n-starts with a dash";
+        let file = d.join("prompt-1-1.txt");
+        let line = crate::projects::start_line(None, true, &["--effort".into(), "high".into()], Some(&file)).unwrap();
+        // The line as a session's shell runs it, after an alias that adds flags of its own.
+        let script = d.join("typed.sh");
+        std::fs::write(&script, format!("alias claude='claude --model \"a b\"'\n{line}\n")).unwrap();
+        let shells: [(&str, &[&str]); 3] = [("sh", &[]), ("bash", &["-O", "expand_aliases"]), ("zsh", &["-f"])];
+        let mut ran = 0;
+        for (shell, flags) in shells {
+            if std::process::Command::new(shell).arg("-c").arg("true").status().is_err() {
+                continue; // not installed
+            }
+            let run = || {
+                let out = std::process::Command::new(shell)
+                    .args(flags)
+                    .arg(&script)
+                    .env("PATH", format!("{}:{}:/usr/bin:/bin", shim_dir.display(), real_dir.display()))
+                    .env_remove("DIRIGENT_CLAUDE_SETTINGS")
+                    .env_remove(PROMPT_ENV)
+                    .output()
+                    .unwrap();
+                String::from_utf8(out.stdout).unwrap()
+            };
+            write_prompt(&file, prompt).unwrap();
+            assert_eq!(run(), format!("[--model][a b][--effort][high][--][{prompt}]{{unset}}"), "{shell}");
+            assert!(!file.exists(), "{shell}: deleted once read");
+            assert_eq!(run(), "[--model][a b][--effort][high]{unset}", "{shell}: again (history): no prompt, no error");
+            ran += 1;
+        }
+        assert!(ran > 0, "no shell to test with");
+        assert!(write_prompt(&file, "x").is_ok() && write_prompt(&file, "y").is_err(), "never overwrites");
         let _ = std::fs::remove_dir_all(&d);
     }
 

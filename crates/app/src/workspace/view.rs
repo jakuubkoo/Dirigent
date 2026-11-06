@@ -1169,20 +1169,20 @@ impl Workspace {
                                         })),
                                 )
                                 .child(label("Claude flags (e.g. --model opus --effort high). Only flags safe to replay are kept; permission bypasses never."))
-                                .child(setup::text_input(&d.flags, d.focus == 1, "--model opus"))
+                                .child(defaults_field(setup::text_input(&d.flags, d.focus == 1, "--model opus"), 1, cx))
                                 .when(!dropped.is_empty(), |e| {
                                     e.child(div().text_size(z(text_size::XS)).text_color(t.state.needs_you).child(format!("Will be dropped (not allowed): {}", dropped.join(" "))))
                                 })
                                 .child(label("Setup command for new worktrees (runs in the session before claude)"))
-                                .child(setup::text_input(&d.setup, d.focus == 2, "e.g. pnpm install"))
+                                .child(defaults_field(setup::text_input(&d.setup, d.focus == 2, "e.g. pnpm install"), 2, cx))
                                 .child(label("Where new worktrees go (empty: <repo>-worktrees next to the repo)"))
-                                .child(setup::text_input(&d.wt_dir, d.focus == 3, "~/worktrees/project"))
+                                .child(defaults_field(setup::text_input(&d.wt_dir, d.focus == 3, "~/worktrees/project"), 3, cx))
                                 .child(div().text_size(z(text_size::XS)).text_color(t.text.dim).child("Tab next field · Space toggles · Enter save · Esc cancel")),
                         )
                         .into_any_element(),
                 )
             }
-            Some(Modal::Setup(s)) => Some(scrim().child(self.setup_view(s, cx)).into_any_element()),
+            Some(Modal::Setup(s)) => Some(scrim().child(self.setup_view(s, window, cx)).into_any_element()),
             Some(Modal::CloseWorktree(c)) => Some(scrim().child(self.close_wt_view(c, cx)).into_any_element()),
             Some(Modal::Worktrees(l)) => Some(scrim().child(self.worktrees_view(l, cx)).into_any_element()),
             Some(Modal::Branches(b)) => Some(scrim().child(self.branches_view(b, window, cx)).into_any_element()),
@@ -1220,9 +1220,17 @@ fn text_field(edit: &LineEdit) -> impl IntoElement {
         .border_1()
         .border_color(t.accent)
         .text_size(z(text_size::MD))
-        .child(edit.before_cursor().to_string())
-        .child(div().w(z(1.5)).h(z(16.)).bg(t.accent))
-        .child(edit.after_cursor().to_string())
+        .child(ui::line_text(edit, true, ""))
+}
+
+/// A Project defaults input that takes keyboard focus on click (`n`: its `Defaults::focus`).
+fn defaults_field(input: gpui::AnyElement, n: u8, cx: &mut Context<Workspace>) -> impl IntoElement {
+    div().id(("defaults-field", n as usize)).child(input).on_click(cx.listener(move |w, _: &ClickEvent, _, cx| {
+        if let Some(Modal::ProjectDefaults(d)) = &mut w.modal {
+            d.focus = n;
+            cx.notify();
+        }
+    }))
 }
 
 /// Collapsed-state key of a group (`""` for "Other").

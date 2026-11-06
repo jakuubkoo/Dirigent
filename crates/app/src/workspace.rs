@@ -758,6 +758,27 @@ impl Workspace {
             .detach();
         }
 
+        if let Ok(spec) = std::env::var("DIRIGENT_PERF_SETUP") {
+            // Screenshot harness: `<ms>|<project>|<first prompt, \n = new line>` opens the New session dialog in
+            // worktree mode with that prompt (naming runs as when typed); the prefix list opens 6 s later.
+            let mut parts = spec.splitn(3, '|');
+            let ms = parts.next().and_then(|v| v.parse().ok()).unwrap_or(500);
+            let project = PathBuf::from(parts.next().unwrap_or("."));
+            let prompt = parts.next().unwrap_or("").replace("\\n", "\n");
+            cx.spawn_in(window, async move |this, cx| {
+                cx.background_executor().timer(Duration::from_millis(ms)).await;
+                let _ = this.update_in(cx, |w, window, cx| w.perf_setup(project, &prompt, window, cx));
+                cx.background_executor().timer(Duration::from_secs(6)).await;
+                let _ = this.update(cx, |w, cx| {
+                    if let Some(Modal::Setup(s)) = &mut w.modal {
+                        s.prefix_open = true;
+                        cx.notify();
+                    }
+                });
+            })
+            .detach();
+        }
+
         if let Some(ms) = std::env::var("DIRIGENT_PERF_REORDER").ok().and_then(|v| v.parse().ok()) {
             // Test harness: after 1 s the active group's last session moves to its top (as a drop would), then the
             // window closes `ms` later (before the save throttle fires when short).
@@ -1312,14 +1333,34 @@ impl Workspace {
         self.mark_dirty(cx);
         let claude = opts.claude.unwrap_or(project.auto_claude);
         let setup = project.setup_cmd.as_deref().filter(|_| opts.setup);
+        let prompt = opts.prompt.filter(|p| claude && !p.trim().is_empty());
+        let prompt_file = prompt.as_ref().map(|_| agent::prompt_file(self.tabs[i].id));
         if let (Some(line), Some(v)) = (
-            crate::projects::start_line(setup, claude, &project.claude_args, opts.prompt.as_deref()),
+            crate::projects::start_line(setup, claude, &project.claude_args, prompt_file.as_deref()),
             &self.tabs[i].view,
         ) {
             // Our shim is first on the session's PATH: claude starts with our hooks. The PTY holds the line until the
             // shell has read its rc files.
             let session = v.read(cx).session.clone();
-            session.write(format!("{line}\r").as_bytes());
+            let line = format!("{line}\r");
+            match (prompt_file, prompt) {
+                // The prompt file first (off the UI thread), then the line that names it.
+                (Some(path), Some(prompt)) => {
+                    let session = session.clone();
+                    cx.spawn(async move |_, cx| {
+                        let p = path.clone();
+                        let written =
+                            cx.background_executor().spawn(async move { agent::write_prompt(&p, &prompt) }).await;
+                        if let Err(e) = written {
+                            // The shim then starts claude without it.
+                            eprintln!("dirigent: couldn't write the first prompt to {}: {e}", path.display());
+                        }
+                        session.write(line.as_bytes());
+                    })
+                    .detach();
+                }
+                _ => session.write(line.as_bytes()),
+            }
             // A folder claude hasn't seen asks "Do you trust the files in this folder?" with "No, exit" selected:
             // Down + Enter picks "Yes, I trust this folder". Only for this start, within 30 s; a trusted folder never
             // shows it and the watch expires. Off in Settings → General.
@@ -1645,17 +1686,9 @@ impl Workspace {
                 return;
             }
         };
-        let result = if ks.modifiers.control && ks.key == "v" {
-            if let Some(text) = cx.read_from_clipboard().and_then(|c| c.text()) {
-                edit.insert(text.trim());
-            }
-            Edit::Changed
-        } else {
-            edit.key(&ks.key, ks.key_char.as_deref(), ks.modifiers.control || ks.modifiers.platform)
-        };
-        match result {
+        match edit.key(ks, cx) {
             Edit::Ignored => return,
-            Edit::Changed => {}
+            Edit::Changed | Edit::Moved => {}
             Edit::Cancel => self.close_modal(window, cx),
             Edit::Submit => match self.modal.take() {
                 rename @ Some(Modal::Rename { .. }) => {
