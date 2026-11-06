@@ -21,7 +21,7 @@ use crate::settings::{
 };
 use crate::theme::{self, height, radius, space, text_size, z};
 use crate::ui::{self, icon, tip};
-use crate::workspace::{Workspace, sh_word, tilde};
+use crate::workspace::{Workspace, home, sh_word, tilde};
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum Cat {
@@ -267,7 +267,8 @@ fn show(item: &Item, v: Val) -> String {
     match (v, &item.ctl) {
         (Val::Bool(b), _) => if b { "on" } else { "off" }.into(),
         (Val::Choice(i), Ctl::Choice(labels)) => labels.get(i).copied().unwrap_or_default().into(),
-        (Val::Num(n), _) => format!("{n}"),
+        // Through f32 (font size is one): 13.52 shows as typed, not 13.520000457763672. Every number fits exactly.
+        (Val::Num(n), _) => format!("{}", n as f32),
         _ => String::new(),
     }
 }
@@ -321,8 +322,9 @@ fn parse_num(k: Key, text: &str) -> Result<f64, String> {
 }
 
 /// What has keyboard focus on the page.
-#[derive(Clone, PartialEq, Debug)]
+#[derive(Clone, PartialEq, Debug, Default)]
 enum Field {
+    #[default]
     Search,
     Item(Key),
     /// A project's 0 auto claude, 1 flags, 2 setup command, 3 worktree dir.
@@ -370,6 +372,12 @@ pub struct SettingsView {
     focus: FocusHandle,
     search: LineEdit,
     cat: Cat,
+    form: Form,
+}
+
+/// Which row has keyboard focus and the value being typed there (no gpui: unit-tested).
+#[derive(Default)]
+struct Form {
     field: Field,
     /// The text field being edited (number or project field): its buffer.
     edit: Option<LineEdit>,
@@ -390,9 +398,7 @@ impl SettingsView {
             focus: cx.focus_handle(),
             search: LineEdit::new(""),
             cat: Cat::General,
-            field: Field::Search,
-            edit: None,
-            error: None,
+            form: Form::default(),
         }
     }
 
@@ -469,6 +475,81 @@ impl SettingsView {
         v
     }
 
+    fn focus_field(&mut self, f: Field, s: &Settings, projects: &[Project]) -> Option<Apply> {
+        self.form.focus_field(f, s, projects)
+    }
+
+    fn key(&mut self, ev: &KeyDownEvent, s: &Settings, projects: &[Project], cx: &mut Context<Self>) -> Option<Apply> {
+        let ks = &ev.keystroke;
+        let m = &ks.modifiers;
+        let key = ks.key.as_str();
+        cx.notify();
+        if key == "tab"
+            || (matches!(key, "down" | "up") && self.form.edit.is_none() && self.form.field != Field::Search)
+            || (key == "down" && self.form.field == Field::Search)
+        {
+            let fields = self.fields(projects);
+            let at = fields.iter().position(|f| *f == self.form.field).unwrap_or(0);
+            let back = (key == "tab" && m.shift) || key == "up";
+            let next = if back { (at + fields.len() - 1) % fields.len() } else { (at + 1) % fields.len() };
+            return self.focus_field(fields[next].clone(), s, projects);
+        }
+        if key == "escape" {
+            if self.form.edit.is_some() {
+                self.form.edit = None; // drop the typed value
+                self.form.error = None;
+                return None;
+            }
+            if self.form.field == Field::Search && !self.search.text.is_empty() {
+                self.search = LineEdit::new("");
+                return None;
+            }
+            return Some(Apply::Close);
+        }
+        let paste = (m.control && key == "v").then(|| cx.read_from_clipboard().and_then(|c| c.text())).flatten();
+        // Text: the search field or an edited value.
+        let target = if self.form.field == Field::Search { Some(&mut self.search) } else { self.form.edit.as_mut() };
+        if let Some(edit) = target {
+            if let Some(text) = paste {
+                edit.insert(text.trim());
+                self.form.error = None;
+                return None;
+            }
+            return match edit.key(key, ks.key_char.as_deref(), m.control || m.platform) {
+                Edit::Submit if self.form.field != Field::Search => self.form.submit(s, projects),
+                Edit::Changed => {
+                    self.form.error = None;
+                    if self.form.field == Field::Search {
+                        self.cat = self.shown(projects).first().copied().unwrap_or(self.cat);
+                    }
+                    None
+                }
+                _ => None,
+            };
+        }
+        // Toggles and choices.
+        match self.form.field.clone() {
+            Field::Item(k) => {
+                let next = match (get(s, k), &ITEMS.iter().find(|i| i.key == k)?.ctl) {
+                    (Val::Bool(b), _) if matches!(key, "space" | "enter") => Val::Bool(!b),
+                    (Val::Choice(i), Ctl::Choice(l)) if matches!(key, "right" | "space" | "enter") => {
+                        Val::Choice((i + 1) % l.len())
+                    }
+                    (Val::Choice(i), Ctl::Choice(l)) if key == "left" => Val::Choice((i + l.len() - 1) % l.len()),
+                    _ => return None,
+                };
+                Some(Apply::Settings(k, next))
+            }
+            Field::Proj(root, 0) if matches!(key, "space" | "enter") => {
+                let p = projects.iter().find(|p| p.root == root)?;
+                Some(Apply::Project(root, Defaults { auto: !p.auto_claude, ..Defaults::of(p) }))
+            }
+            _ => None,
+        }
+    }
+}
+
+impl Form {
     /// Moves keyboard focus; an edit in progress is committed first (or dropped with a note if refused).
     fn focus_field(&mut self, f: Field, s: &Settings, projects: &[Project]) -> Option<Apply> {
         let apply = self.commit(s, projects);
@@ -513,78 +594,25 @@ impl SettingsView {
         }
     }
 
-    fn key(&mut self, ev: &KeyDownEvent, s: &Settings, projects: &[Project], cx: &mut Context<Self>) -> Option<Apply> {
-        let ks = &ev.keystroke;
-        let m = &ks.modifiers;
-        let key = ks.key.as_str();
-        cx.notify();
-        if key == "tab"
-            || (matches!(key, "down" | "up") && self.edit.is_none() && self.field != Field::Search)
-            || (key == "down" && self.field == Field::Search)
-        {
-            let fields = self.fields(projects);
-            let at = fields.iter().position(|f| *f == self.field).unwrap_or(0);
-            let back = (key == "tab" && m.shift) || key == "up";
-            let next = if back { (at + fields.len() - 1) % fields.len() } else { (at + 1) % fields.len() };
-            return self.focus_field(fields[next].clone(), s, projects);
-        }
-        if key == "escape" {
-            if self.edit.is_some() {
-                self.edit = None; // drop the typed value
-                self.error = None;
-                return None;
-            }
-            if self.field == Field::Search && !self.search.text.is_empty() {
-                self.search = LineEdit::new("");
-                return None;
-            }
-            return Some(Apply::Close);
-        }
-        let paste = (m.control && key == "v").then(|| cx.read_from_clipboard().and_then(|c| c.text())).flatten();
-        // Text: the search field or an edited value.
-        let target = if self.field == Field::Search { Some(&mut self.search) } else { self.edit.as_mut() };
-        if let Some(edit) = target {
-            if let Some(text) = paste {
-                edit.insert(text.trim());
-                self.error = None;
-                return None;
-            }
-            return match edit.key(key, ks.key_char.as_deref(), m.control || m.platform) {
-                Edit::Submit if self.field != Field::Search => {
-                    let a = self.commit(s, projects);
-                    let f = self.field.clone();
-                    self.focus_field(f, s, projects); // back to editing the (new) value
-                    a
+    /// Enter in a value, or a click anywhere on the page: the typed value is applied and the same field stays
+    /// focused, showing the value as applied (not the one before it). Focus never moves by itself.
+    fn submit(&mut self, s: &Settings, projects: &[Project]) -> Option<Apply> {
+        let apply = self.commit(s, projects);
+        let (mut s, mut projects) = (s.clone(), projects.to_vec());
+        match &apply {
+            Some(Apply::Settings(k, v)) => set(&mut s, *k, *v),
+            Some(Apply::Project(root, d)) => {
+                if let Some(p) = projects.iter_mut().find(|p| &p.root == root) {
+                    p.apply_defaults(
+                        &Typed { auto: d.auto, flags: &d.flags, setup: &d.setup, wt_dir: &d.wt_dir },
+                        &home(),
+                    );
                 }
-                Edit::Changed => {
-                    self.error = None;
-                    if self.field == Field::Search {
-                        self.cat = self.shown(projects).first().copied().unwrap_or(self.cat);
-                    }
-                    None
-                }
-                _ => None,
-            };
-        }
-        // Toggles and choices.
-        match self.field.clone() {
-            Field::Item(k) => {
-                let next = match (get(s, k), &ITEMS.iter().find(|i| i.key == k)?.ctl) {
-                    (Val::Bool(b), _) if matches!(key, "space" | "enter") => Val::Bool(!b),
-                    (Val::Choice(i), Ctl::Choice(l)) if matches!(key, "right" | "space" | "enter") => {
-                        Val::Choice((i + 1) % l.len())
-                    }
-                    (Val::Choice(i), Ctl::Choice(l)) if key == "left" => Val::Choice((i + l.len() - 1) % l.len()),
-                    _ => return None,
-                };
-                Some(Apply::Settings(k, next))
             }
-            Field::Proj(root, 0) if matches!(key, "space" | "enter") => {
-                let p = projects.iter().find(|p| p.root == root)?;
-                Some(Apply::Project(root, Defaults { auto: !p.auto_claude, ..Defaults::of(p) }))
-            }
-            _ => None,
+            _ => {}
         }
+        self.focus_field(self.field.clone(), &s, &projects);
+        apply
     }
 }
 
@@ -654,7 +682,7 @@ impl Render for SettingsView {
                 .child(ui::icon(icon::SEARCH, 13., t.text.dim))
                 .child(div().flex_1().max_w(z(480.)).child(ui::text_input(
                     &self.search,
-                    self.field == Field::Search,
+                    self.form.field == Field::Search,
                     "Search settings",
                 )))
                 .on_click(move |_: &ClickEvent, window, cx| {
@@ -804,15 +832,9 @@ impl Render for SettingsView {
                 act(&view2, &ws2, window, cx, |v, s, p, cx| v.key(ev, s, p, cx));
                 cx.stop_propagation();
             })
-            // A click anywhere commits a value being edited (a control's own click then takes focus).
+            // A click anywhere commits a value being edited; focus stays (a control's own click then moves it).
             .on_mouse_down(MouseButton::Left, move |_, window, cx| {
-                act(&view3, &ws3, window, cx, |v, s, p, _| {
-                    let a = v.commit(s, p);
-                    if v.field != Field::Search {
-                        v.field = Field::Search;
-                    }
-                    a
-                })
+                act(&view3, &ws3, window, cx, |v, s, p, _| v.form.submit(s, p))
             })
             .child(header)
             .child(search)
@@ -914,8 +936,8 @@ impl SettingsView {
         let t = theme::get();
         let (val, def) = (get(s, item.key), get(&Settings::default(), item.key));
         let field = Field::Item(item.key);
-        let focused = self.field == field;
-        let error = self.error.as_ref().filter(|(f, _)| *f == field).map(|(_, e)| e);
+        let focused = self.form.field == field;
+        let error = self.form.error.as_ref().filter(|(f, _)| *f == field).map(|(_, e)| e);
         let focus_click = |view: WeakEntity<SettingsView>, ws: WeakEntity<Workspace>, f: Field| {
             move |_: &ClickEvent, window: &mut Window, cx: &mut gpui::App| {
                 act(&view, &ws, window, cx, |v, s, p, _| v.focus_field(f.clone(), s, p))
@@ -957,7 +979,7 @@ impl SettingsView {
                     .into_any_element()
             }
             Ctl::Number => {
-                let shown = match (&self.edit, focused) {
+                let shown = match (&self.form.edit, focused) {
                     (Some(e), true) => ui::text_input(e, true, ""),
                     _ => ui::text_input(&LineEdit::new(show(item, val)), false, ""),
                 };
@@ -991,7 +1013,7 @@ impl SettingsView {
                     if val != def {
                         act(&view, &ws, window, cx, |v, s, p, _| {
                             v.focus_field(Field::Item(k), s, p);
-                            v.edit = None;
+                            v.form.edit = None;
                             Some(Apply::Settings(k, def))
                         })
                     }
@@ -1011,9 +1033,9 @@ impl SettingsView {
         let root = p.root.clone();
         let is_default = !d.auto && d.flags.is_empty() && d.setup.is_empty() && d.wt_dir.is_empty();
         let id = |s: &str| gpui::ElementId::Name(format!("{s}-{}", root.display()).into());
-        let focused = |i: u8| self.field == Field::Proj(root.clone(), i);
+        let focused = |i: u8| self.form.field == Field::Proj(root.clone(), i);
         let input = |i: u8, value: &str, placeholder: &'static str| -> gpui::AnyElement {
-            let el = match (&self.edit, focused(i)) {
+            let el = match (&self.form.edit, focused(i)) {
                 (Some(e), true) => ui::text_input(e, true, placeholder),
                 _ => ui::text_input(&LineEdit::new(value), false, placeholder),
             };
@@ -1029,7 +1051,7 @@ impl SettingsView {
         };
         let label = |text: &'static str| div().text_size(z(text_size::XS)).text_color(t.text.muted).child(text);
         // Live like the defaults dialog: what the allowlist would drop from the flags being typed.
-        let typed_flags = match (&self.edit, focused(1)) {
+        let typed_flags = match (&self.form.edit, focused(1)) {
             (Some(e), true) => e.text.clone(),
             _ => d.flags.clone(),
         };
@@ -1081,7 +1103,7 @@ impl SettingsView {
                         if !is_default {
                             let root = root_r.clone();
                             act(&view_r, &ws_r, window, cx, |v, _, _, _| {
-                                v.edit = None;
+                                v.form.edit = None;
                                 Some(Apply::Project(root, Defaults::default()))
                             })
                         }
@@ -1181,6 +1203,35 @@ mod tests {
         assert!(parse_num(Key::Zoom, "40").is_err());
         assert_eq!(parse_num(Key::LeftWidth, "260 px"), Ok(260.));
         assert!(parse_num(Key::RightWidth, "50").is_err());
+    }
+
+    /// Enter, then a click anywhere (also on empty space): focus stays on the edited field, never back to the
+    /// search box, and the field shows the value just applied, not the one before it.
+    #[test]
+    fn typing_a_value_and_applying_it_keeps_focus_on_the_field() {
+        let mut s = Settings::default();
+        let mut f = Form::default();
+        assert!(f.focus_field(Field::Item(Key::FontSize), &s, &[]).is_none());
+        for (typed, want) in [("20", 20f32), ("13.52", 13.52)] {
+            f.edit = Some(LineEdit::new(typed));
+            let applied = f.submit(&s, &[]); // Enter
+            assert!(
+                matches!(applied, Some(Apply::Settings(Key::FontSize, Val::Num(n))) if n as f32 == want),
+                "{typed} applied"
+            );
+            set(&mut s, Key::FontSize, Val::Num(want as f64)); // what the workspace does with it
+            assert_eq!(f.field, Field::Item(Key::FontSize), "Enter on {typed}");
+            assert_eq!(f.edit.as_ref().map(|e| e.text.as_str()), Some(typed), "shown after Enter");
+            assert!(f.submit(&s, &[]).is_none(), "a click with nothing new typed applies nothing");
+            assert_eq!(f.field, Field::Item(Key::FontSize), "a click on the page after {typed}");
+            assert_eq!(f.edit.as_ref().map(|e| e.text.as_str()), Some(typed), "shown after the click");
+        }
+        // A refused value keeps the field and the old value, with the note.
+        f.edit = Some(LineEdit::new("99"));
+        assert!(f.submit(&s, &[]).is_none());
+        assert_eq!(f.field, Field::Item(Key::FontSize));
+        assert_eq!(f.edit.as_ref().map(|e| e.text.as_str()), Some("13.52"));
+        assert!(f.error.is_some());
     }
 
     #[test]
