@@ -22,6 +22,9 @@ All notable changes to Dirigent are recorded here. The format follows
 
 - Dirigent started from a terminal inside Dirigent used that session's Claude hook file as its settings.json
   ("Settings: 2 problems") and wrote into it. Settings are never read from or written to Dirigent's runtime folder.
+- Settings: typing into a number field (e.g. Font size) no longer jumps back to the search box. After Enter or a
+  click elsewhere the field keeps focus and shows the value just applied (it showed the previous one), and 13.52
+  no longer shows as 13.520000457763672.
 
 ## [0.2.0] - 2026-11-06
 
