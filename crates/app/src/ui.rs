@@ -15,6 +15,7 @@ pub mod icon {
     pub const EXTERNAL: &str = "icons/external-link.svg";
     pub const CHEVRON_RIGHT: &str = "icons/chevron-right.svg";
     pub const CHEVRON_DOWN: &str = "icons/chevron-down.svg";
+    pub const CHEVRON_UP: &str = "icons/chevron-up.svg";
     pub const PLUS: &str = "icons/plus.svg";
     pub const CLOSE: &str = "icons/x.svg";
     pub const MINIMIZE: &str = "icons/minus.svg";
@@ -65,6 +66,7 @@ pub const ALL_ICONS: &[&str] = &[
     icon::EXTERNAL,
     icon::CHEVRON_RIGHT,
     icon::CHEVRON_DOWN,
+    icon::CHEVRON_UP,
     icon::PLUS,
     icon::CLOSE,
     icon::MINIMIZE,

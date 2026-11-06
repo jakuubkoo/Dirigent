@@ -4677,6 +4677,7 @@ dependencies = [
  "alacritty_terminal",
  "async-channel",
  "portable-pty",
+ "regex-syntax",
 ]
 
 [[package]]

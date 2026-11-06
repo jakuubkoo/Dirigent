@@ -1,19 +1,23 @@
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
 use std::rc::Rc;
-use std::time::Duration;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::{Duration, Instant};
 
 use gpui::{
-    Bounds, ClipboardItem, Context, FocusHandle, Focusable, KeyDownEvent, Modifiers, ModifiersChangedEvent,
+    Bounds, ClickEvent, ClipboardItem, Context, FocusHandle, Focusable, KeyDownEvent, Modifiers, ModifiersChangedEvent,
     MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels, Point, ScrollEvent, Task, WeakEntity, Window,
     div, prelude::*,
 };
 use session::alacritty_terminal::index::Side;
 use session::alacritty_terminal::term::TermMode;
+use session::find::{self, Found, Match, Query, RegexSearch};
 use session::keys::{Mods, encode};
 use session::links::{self, Link, Target};
 use session::mouse::{self, Button, Kind};
 use session::{Session, Size, select};
 
+use crate::line_edit::{Edit, LineEdit};
 use crate::terminal_element::{Metrics, TerminalElement};
 use crate::theme::{self, MONO_FONT, radius, space, text_size, z};
 use crate::ui::{self, icon};
@@ -44,7 +48,43 @@ pub struct TerminalView {
     scrolling: bool,
     _autoscroll: Option<Task<()>>,
     drag_at: Point<Pixels>,
+    /// The find bar (Ctrl+Alt+F); None = closed, nothing extra runs.
+    find: Option<FindBar>,
     _wakeups: Task<()>,
+}
+
+/// After new output the whole scrollback is searched again once output was quiet this long, or at the latest
+/// `RESCAN_MAX` after the first new output (Claude's spinner never goes quiet; a flood scans every 2 s), but never
+/// sooner than `RESCAN_GAP` after the previous scan (spinner frames ~300 ms apart: 100k lines cost ~110 ms a scan).
+const RESCAN_QUIET: Duration = Duration::from_millis(150);
+const RESCAN_MAX: Duration = Duration::from_secs(2);
+const RESCAN_GAP: Duration = Duration::from_secs(1);
+
+struct FindBar {
+    edit: LineEdit,
+    focus: FocusHandle,
+    case: bool,
+    regex: bool,
+    /// Built from the query; None = empty or invalid (`error`). The element matches the viewport with it each paint.
+    re: Option<Rc<RefCell<RegexSearch>>>,
+    error: Option<String>,
+    /// The last whole-scrollback scan: the count and Enter / Shift+Enter targets.
+    found: Found,
+    current: Option<usize>,
+    /// A scan is running (its `cancel` flag).
+    scanning: bool,
+    cancel: Arc<AtomicBool>,
+    /// First new output since the last scan started (the `RESCAN_MAX` deadline).
+    dirty_since: Option<Instant>,
+    last_scan: Instant,
+    _scan: Option<Task<()>>,
+    _rescan: Option<Task<()>>,
+}
+
+impl FindBar {
+    fn current_match(&self) -> Option<Match> {
+        self.current.and_then(|i| self.found.matches.get(i).cloned())
+    }
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -88,6 +128,9 @@ impl TerminalView {
                         if let Some((pos, ctrl)) = this.pointer {
                             this.hover = this.link_at(pos, ctrl);
                         }
+                        if this.find.is_some() {
+                            this.output_changed(cx);
+                        }
                         cx.notify();
                     }
                     (visible, this.session.take_cwd_change(), cx.entity_id())
@@ -120,6 +163,7 @@ impl TerminalView {
             scrolling: false,
             _autoscroll: None,
             drag_at: Point::default(),
+            find: None,
             _wakeups: wakeups,
         }
     }
@@ -540,6 +584,277 @@ impl TerminalView {
     }
 }
 
+/// Find in the terminal: the bar's state, scans off the UI thread, stepping through matches.
+impl TerminalView {
+    /// Ctrl+Alt+F: opens the bar (prefilled with `query`, else a one-line selection) or focuses it again.
+    pub fn open_find(&mut self, query: Option<String>, window: &mut Window, cx: &mut Context<Self>) {
+        if self.find.is_none() {
+            let prefill = query
+                .or_else(|| select::text(&self.session.term.lock()).filter(|s| !s.contains('\n') && s.len() <= 200));
+            self.find = Some(FindBar {
+                edit: LineEdit::new(prefill.unwrap_or_default()),
+                focus: cx.focus_handle(),
+                case: false,
+                regex: false,
+                re: None,
+                error: None,
+                found: Found::default(),
+                current: None,
+                scanning: false,
+                cancel: Default::default(),
+                dirty_since: None,
+                last_scan: Instant::now(),
+                _scan: None,
+                _rescan: None,
+            });
+            self.requery(cx);
+        }
+        if let Some(f) = &self.find {
+            window.focus(&f.focus, cx);
+        }
+        cx.notify();
+    }
+
+    fn close_find(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(f) = self.find.take() {
+            f.cancel.store(true, Ordering::Relaxed);
+        }
+        window.focus(&self.focus, cx);
+        cx.notify();
+    }
+
+    /// The text or an option changed: new regex, new scan, the current match chosen afresh.
+    fn requery(&mut self, cx: &mut Context<Self>) {
+        let Some(f) = self.find.as_mut() else { return };
+        let q = Query { text: f.edit.text.clone(), case: f.case, regex: f.regex };
+        (f.re, f.error) = match q.build() {
+            Ok(re) => (re.map(|r| Rc::new(RefCell::new(r))), None),
+            Err(e) => (None, Some(e)),
+        };
+        f.found = Found::default();
+        f.current = None;
+        self.scan(false, cx);
+    }
+
+    /// New output while the bar is open: the viewport highlights follow by themselves (matched each paint); the
+    /// whole-scrollback scan (count, Enter targets) re-runs after `RESCAN_QUIET` of quiet, at most `RESCAN_MAX`
+    /// late. A running scan finishes (a few lines of drift beat a scan that never ends).
+    fn output_changed(&mut self, cx: &mut Context<Self>) {
+        let Some(f) = self.find.as_mut() else { return };
+        if f.re.is_none() {
+            return;
+        }
+        let now = Instant::now();
+        let since = *f.dirty_since.get_or_insert(now);
+        let gap = (f.last_scan + RESCAN_GAP).saturating_duration_since(now);
+        let wait = RESCAN_QUIET.max(gap).min((since + RESCAN_MAX).saturating_duration_since(now));
+        f._rescan = Some(cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(wait).await;
+            let _ = this.update(cx, |v, cx| v.scan(true, cx));
+        }));
+    }
+
+    /// Scans the screen and scrollback on the background executor. `keep`: stay on the match nearest the current
+    /// one (re-scan after output); else pick the first current match and scroll to it.
+    fn scan(&mut self, keep: bool, cx: &mut Context<Self>) {
+        let Some(f) = self.find.as_mut() else { return };
+        f.cancel.store(true, Ordering::Relaxed);
+        f._rescan = None;
+        f.dirty_since = None;
+        f.last_scan = Instant::now();
+        let Some(re) = f.re.as_ref() else {
+            f.scanning = false;
+            f._scan = None;
+            return cx.notify();
+        };
+        let mut re = re.borrow().clone();
+        let cancel = Arc::new(AtomicBool::new(false));
+        f.cancel = cancel.clone();
+        f.scanning = true;
+        let term = self.session.term.clone();
+        let started = Instant::now();
+        crate::perf::event("find start");
+        let scan = cx.background_spawn(async move { find::search(&term, &mut re, &cancel) });
+        f._scan = Some(cx.spawn(async move |this, cx| {
+            let Some(found) = scan.await else { return };
+            let _ = this.update(cx, |v, cx| {
+                crate::perf::event_with(|| {
+                    format!("find done {} matches {} ms", found.matches.len(), started.elapsed().as_millis())
+                });
+                let Some(f) = v.find.as_mut() else { return };
+                let old = f.current_match();
+                f.current = match old {
+                    Some(m) if keep => find::nearest(&found.matches, *m.start()),
+                    _ => find::initial(&v.session.term.lock(), &found.matches),
+                };
+                f.found = found;
+                f.scanning = false;
+                if !keep {
+                    v.reveal_current();
+                }
+                cx.notify();
+            });
+        }));
+        cx.notify();
+    }
+
+    fn reveal_current(&mut self) {
+        if let Some(m) = self.find.as_ref().and_then(FindBar::current_match) {
+            find::scroll_to(&mut self.session.term.lock(), &m);
+        }
+    }
+
+    /// Enter (+1, newer) / Shift+Enter (-1, older), wrapping around.
+    fn step(&mut self, dir: isize, cx: &mut Context<Self>) {
+        let Some(f) = self.find.as_mut() else { return };
+        let n = f.found.matches.len();
+        if n == 0 {
+            return;
+        }
+        f.current = Some(match f.current {
+            Some(i) => (i as isize + dir).rem_euclid(n as isize) as usize,
+            None => find::initial(&self.session.term.lock(), &f.found.matches).unwrap_or(0),
+        });
+        self.reveal_current();
+        cx.notify();
+    }
+
+    pub fn toggle_find(&mut self, which: char, cx: &mut Context<Self>) {
+        let Some(f) = self.find.as_mut() else { return };
+        match which {
+            'c' => f.case = !f.case,
+            _ => f.regex = !f.regex,
+        }
+        self.requery(cx);
+    }
+
+    fn find_key(&mut self, ev: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
+        let ks = &ev.keystroke;
+        let m = ks.modifiers;
+        let Some(f) = self.find.as_mut() else { return };
+        match ks.key.as_str() {
+            "enter" if !m.control && !m.alt => self.step(if m.shift { -1 } else { 1 }, cx),
+            "escape" => self.close_find(window, cx),
+            "c" | "r" if m.alt && !m.control => self.toggle_find(ks.key.chars().next().unwrap_or('r'), cx),
+            _ => {
+                let before = f.edit.text.clone();
+                let result = if m.control && !m.alt && ks.key == "v" {
+                    match cx.read_from_clipboard().and_then(|c| c.text()) {
+                        Some(text) => {
+                            f.edit.insert(text.lines().next().unwrap_or(""));
+                            Edit::Changed
+                        }
+                        None => Edit::Ignored,
+                    }
+                } else {
+                    f.edit.key(&ks.key, ks.key_char.as_deref(), m.control)
+                };
+                match result {
+                    Edit::Changed if f.edit.text != before => self.requery(cx),
+                    Edit::Changed => cx.notify(), // the caret moved
+                    // Unhandled keys stay in the bar (bound shortcuts were matched before this handler).
+                    Edit::Ignored | Edit::Cancel | Edit::Submit => {}
+                }
+            }
+        }
+        cx.stop_propagation();
+    }
+
+    fn find_bar(&self, f: &FindBar, window: &Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let t = theme::get();
+        let focused = f.focus.is_focused(window);
+        let n = f.found.matches.len();
+        let count = match (&f.error, f.re.is_some(), n, f.current) {
+            (Some(_), ..) => "Invalid regex".to_string(),
+            (_, false, ..) => String::new(),
+            (_, _, 0, _) if f.scanning => "…".into(),
+            (_, _, 0, _) => "No results".into(),
+            (_, _, n, cur) => format!(
+                "{} / {n}{}",
+                cur.map_or("?".into(), |i| (i + 1).to_string()),
+                if f.found.capped { "+" } else { "" }
+            ),
+        };
+        let button = |id: &'static str, glyph: &'static str, hint: &'static str| {
+            div()
+                .id(id)
+                .flex_none()
+                .size(z(22.))
+                .flex()
+                .items_center()
+                .justify_center()
+                .rounded(z(radius::SM))
+                .cursor_pointer()
+                .hover(|s| s.bg(t.bg.hover))
+                .child(ui::icon(glyph, 14., t.text.muted))
+                .tooltip(ui::tip(hint))
+        };
+        let input = div()
+            .id("find-input")
+            .flex_1()
+            .min_w_0()
+            .child(ui::text_input(&f.edit, focused, "Find in terminal"))
+            .when_some(f.error.clone(), |d, e| d.tooltip(ui::tip(e)));
+        div()
+            .absolute()
+            .top(z(space::MD))
+            .right(z(space::XL))
+            .w(z(420.))
+            .flex()
+            .items_center()
+            .gap(z(space::XS))
+            .p(z(space::XS))
+            .rounded(z(radius::LG))
+            .bg(t.bg.elevated)
+            .border_1()
+            .border_color(if f.error.is_some() { t.state.error } else { t.border.strong })
+            .text_size(z(text_size::SM))
+            .text_color(t.text.primary)
+            .cursor_default()
+            .track_focus(&f.focus)
+            .on_key_down(cx.listener(Self::find_key))
+            // Clicks on the bar stay on the bar (the grid below would take focus and start a selection).
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|v, _, window, cx| {
+                    if let Some(f) = &v.find {
+                        window.focus(&f.focus, cx);
+                    }
+                    cx.stop_propagation();
+                }),
+            )
+            .child(input)
+            .child(
+                div()
+                    .flex_none()
+                    .min_w(z(64.))
+                    .text_size(z(text_size::XS))
+                    .text_color(if f.error.is_some() { t.state.error } else { t.text.dim })
+                    .child(count),
+            )
+            .child(
+                ui::toggle("find-case", "Aa", f.case, "Match case  Alt+C")
+                    .on_click(cx.listener(|v, _: &ClickEvent, _, cx| v.toggle_find('c', cx))),
+            )
+            .child(
+                ui::toggle("find-regex", ".*", f.regex, "Regular expression  Alt+R")
+                    .on_click(cx.listener(|v, _: &ClickEvent, _, cx| v.toggle_find('r', cx))),
+            )
+            .child(
+                button("find-prev", icon::CHEVRON_UP, "Previous (older)  Shift+Enter")
+                    .on_click(cx.listener(|v, _: &ClickEvent, _, cx| v.step(-1, cx))),
+            )
+            .child(
+                button("find-next", icon::CHEVRON_DOWN, "Next (newer)  Enter")
+                    .on_click(cx.listener(|v, _: &ClickEvent, _, cx| v.step(1, cx))),
+            )
+            .child(
+                button("find-close", icon::CLOSE, "Close  Esc")
+                    .on_click(cx.listener(|v, _: &ClickEvent, window, cx| v.close_find(window, cx))),
+            )
+    }
+}
+
 impl Focusable for TerminalView {
     fn focus_handle(&self, _: &gpui::App) -> FocusHandle {
         self.focus.clone()
@@ -547,7 +862,7 @@ impl Focusable for TerminalView {
 }
 
 impl Render for TerminalView {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         crate::perf::event("term view render");
         let t = theme::get();
         let banner = self.banner.as_ref().map(|b| {
@@ -634,9 +949,11 @@ impl Render for TerminalView {
                         self.grid_bounds.clone(),
                         self.hover.as_ref().map(|l| (l.start, l.end)),
                         self.press.is_some().then(|| cx.entity().downgrade()),
+                        self.find.as_ref().and_then(|f| Some((f.re.clone()?, f.current_match()))),
                     )),
             )
             .children(exited)
+            .children(self.find.as_ref().map(|f| self.find_bar(f, window, cx)))
     }
 }
 

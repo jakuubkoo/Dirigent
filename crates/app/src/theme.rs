@@ -165,6 +165,8 @@ pub struct Theme {
     pub danger_hover: Rgba,
     /// A search match (Search panel results, the matched text in the preview).
     pub search_match: Rgba,
+    /// The current match of the terminal's find bar (the others use `search_match`).
+    pub search_current: Rgba,
 }
 
 pub static DARK: Theme = Theme {
@@ -263,6 +265,7 @@ pub static DARK: Theme = Theme {
     },
     danger_hover: hex(0xc4314b),
     search_match: hex(0x5c4a14),
+    search_current: hex(0x96700f),
 };
 
 pub fn get() -> &'static Theme {

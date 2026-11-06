@@ -113,6 +113,7 @@ impl Render for Workspace {
             .on_action(cx.listener(|w, _: &QuickOpen, window, cx| w.open_cc("", window, cx)))
             .on_action(cx.listener(|w, _: &CommandPalette, window, cx| w.open_cc(">", window, cx)))
             .on_action(cx.listener(|w, _: &FindInFiles, window, cx| w.open_cc("#", window, cx)))
+            .on_action(cx.listener(|w, _: &FindInTerminal, window, cx| w.find_in_terminal(None, window, cx)))
             .on_action(cx.listener(|w, _: &GitSync, _, cx| w.git_active(crate::git_ops::Job::Sync, cx)))
             .on_action(cx.listener(|w, _: &GitFetch, _, cx| w.git_active(crate::git_ops::Job::Fetch, cx)))
             .on_action(cx.listener(|w, _: &GitPull, _, cx| w.git_active(crate::git_ops::Job::Pull, cx)))
