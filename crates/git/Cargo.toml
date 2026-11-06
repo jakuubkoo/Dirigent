@@ -8,3 +8,6 @@ license.workspace = true
 notify.workspace = true
 ignore = "0.4.22"
 imara-diff = "=0.2.0"
+# Content search; both already in the dependency graph (via ignore).
+regex = "1"
+memchr = "2"
