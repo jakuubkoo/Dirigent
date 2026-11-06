@@ -11,9 +11,10 @@ All notable changes to Dirigent are recorded here. The format follows
 - New session dialog: a branch prefix dropdown (`feat/`, `fix/`, `chore/`, `docs/`, none) next to the branch field,
   `feat/` by default and remembered per project. The slug made from the session name never takes a `/` from it
   (`esc-ctrl-c`, not `esc/ctrl-c`).
-- New session dialog: while Name is empty, the first prompt names the session and its branch as you type (its first
-  words at once, then `claude -p` on Haiku off the UI thread: no tools, no saved session). A name you type stays;
-  a `Branch: x` line in the prompt gives the branch as written.
+- New session dialog: while Name is empty, the first prompt names the session and its branch: its first words as you
+  type, then `claude -p` on Haiku (off the UI thread, no tools, no saved session) when you leave the prompt or press
+  Create. One call at a time; closing the dialog stops it. A name you type stays; a `Branch: x` line in the prompt
+  gives the branch as written.
 
 ### Changed
 

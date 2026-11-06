@@ -36,9 +36,15 @@ pub(super) struct Setup {
     name_edited: bool,
     /// The name and branch slug claude made from the first prompt (None: its first words).
     generated: Option<(String, String)>,
-    /// Bumped by every prompt change: a slower naming run for an older prompt is dropped.
+    /// Bumped by every prompt change: a naming run for an older prompt is dropped.
     gen_seq: u64,
+    /// The running naming call (at most one: a new one or closing the dialog kills it) and the prompt version it
+    /// names; `named_for`: the last version a call finished for (named, or failed: the first words stay).
+    naming_run: Option<(crate::git_ops::Stop, u64)>,
+    named_for: Option<u64>,
     pub naming: bool,
+    /// Create pressed while the name still comes from the prompt: creates once the naming call is done.
+    create_pending: bool,
     pub worktree: bool,
     /// `PREFIXES` index put before the branch field's text.
     pub prefix: usize,
@@ -70,7 +76,10 @@ impl Setup {
             name_edited: false,
             generated: None,
             gen_seq: 0,
+            naming_run: None,
+            named_for: None,
             naming: false,
+            create_pending: false,
             worktree: false,
             prefix: prefix_saved,
             prefix_saved,
@@ -128,6 +137,11 @@ impl Setup {
         }
     }
 
+    /// The name still comes from the prompt and no naming call finished for this version of it.
+    fn wants_name(&self) -> bool {
+        self.claude && !self.name_edited && !self.prompt.text.trim().is_empty() && self.named_for != Some(self.gen_seq)
+    }
+
     /// The branch to create: the prefix and the branch field.
     fn full_branch(&self) -> String {
         format!("{}{}", PREFIXES[self.prefix], self.branch.text.trim())
@@ -163,6 +177,15 @@ impl Setup {
             let b = if self.branch.text.trim().is_empty() { "new".to_string() } else { self.full_branch() };
             let p = projects::worktree_path(&self.project, worktrees_dir, &b);
             self.location = LineEdit::new(tilde(&p));
+        }
+    }
+}
+
+/// Closing the dialog stops a naming call still running.
+impl Drop for Setup {
+    fn drop(&mut self) {
+        if let Some((stop, _)) = self.naming_run.take() {
+            stop.kill();
         }
     }
 }
@@ -231,19 +254,24 @@ impl Workspace {
             s.focus = Field::Prompt;
         }
         self.setup_prompt_changed(cx);
+        self.setup_name(window, cx);
     }
 
     pub(super) fn setup_key(&mut self, ev: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
         cx.stop_propagation();
         let Some(Modal::Setup(s)) = &mut self.modal else { return };
-        if s.busy {
-            return; // creating the worktree: wait
-        }
         let ks = &ev.keystroke;
+        if s.create_pending && ks.key == "escape" {
+            return self.close_modal(window, cx); // closing kills the naming call
+        }
+        if s.busy || s.create_pending {
+            return; // creating the worktree, or naming before it: wait
+        }
         let m = ks.modifiers;
         let ctrl = m.control || m.platform;
         let key = ks.key.as_str();
         let cur = s.prefix;
+        let was = s.focus;
         if s.prefix_open {
             match key {
                 "up" => return self.setup_pick_prefix(s_prev(cur), false, cx),
@@ -310,6 +338,12 @@ impl Workspace {
                 }
             }
         }
+        if let Some(Modal::Setup(s)) = &self.modal
+            && was == Field::Prompt
+            && s.focus != Field::Prompt
+        {
+            self.setup_name(window, cx); // left First prompt (Tab, Shift+Tab)
+        }
         cx.notify();
     }
 
@@ -350,56 +384,73 @@ impl Workspace {
         }
     }
 
-    /// The first prompt changed (or Name was cleared): name and branch from its first words now, and from
-    /// `claude -p` once typing pauses (off the UI thread; dropped if the prompt changed meanwhile or Name was typed).
+    /// The first prompt changed (or Name was cleared): name and branch from its first words now; claude names it
+    /// when you leave the field or press Create (`setup_name`).
     fn setup_prompt_changed(&mut self, cx: &mut Context<Self>) {
         let Some(Modal::Setup(s)) = &mut self.modal else { return };
         s.gen_seq += 1;
-        let (seq, prompt) = (s.gen_seq, s.prompt.text.trim().to_string());
-        if prompt.is_empty() {
+        if s.prompt.text.trim().is_empty() {
             s.generated = None;
         }
-        s.naming = false;
-        let run = !s.name_edited && !prompt.is_empty();
         self.setup_derive();
         cx.notify();
-        if !run {
-            return;
+    }
+
+    /// Focus moves to `f` (click or key); leaving First prompt names the session.
+    pub(super) fn setup_focus(&mut self, f: Field, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(Modal::Setup(s)) = &mut self.modal else { return };
+        let left = s.focus == Field::Prompt && f != Field::Prompt;
+        s.focus = f;
+        if left {
+            self.setup_name(window, cx);
         }
-        let current =
-            move |w: &Workspace| matches!(&w.modal, Some(Modal::Setup(s)) if s.gen_seq == seq && !s.name_edited);
-        cx.spawn(async move |this, cx| {
-            cx.background_executor().timer(Duration::from_millis(700)).await;
-            let go = this
-                .update(cx, |w, cx| {
-                    let go = current(w);
-                    if let (true, Some(Modal::Setup(s))) = (go, &mut w.modal) {
-                        s.naming = true;
-                        cx.notify();
-                    }
-                    go
-                })
-                .unwrap_or(false);
-            if !go {
-                return;
-            }
-            let result = cx.background_executor().spawn(async move { crate::git_ops::name_session(&prompt) }).await;
-            let _ = this.update(cx, |w, cx| {
-                if !current(w) {
-                    return;
+    }
+
+    /// Asks claude (`claude -p`, Haiku, off the UI thread) for a name and branch slug for the prompt as it is now,
+    /// unless one is running or done for it. A call still running for an older prompt is killed first: at most one.
+    /// False when nothing is needed.
+    fn setup_name(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
+        let Some(Modal::Setup(s)) = &mut self.modal else { return false };
+        if !s.wants_name() {
+            return false;
+        }
+        let seq = s.gen_seq;
+        if s.naming_run.as_ref().is_some_and(|(_, at)| *at == seq) {
+            return true; // already naming this prompt
+        }
+        if let Some((old, _)) = s.naming_run.take() {
+            old.kill();
+        }
+        let stop = crate::git_ops::Stop::default();
+        s.naming_run = Some((stop.clone(), seq));
+        s.naming = true;
+        let prompt = s.prompt.text.trim().to_string();
+        cx.notify();
+        cx.spawn_in(window, async move |this, cx| {
+            let result =
+                cx.background_executor().spawn(async move { crate::git_ops::name_session(&prompt, &stop) }).await;
+            let _ = this.update_in(cx, |w, window, cx| {
+                let Some(Modal::Setup(s)) = &mut w.modal else { return };
+                if s.naming_run.as_ref().is_none_or(|(_, at)| *at != seq) {
+                    return; // replaced by a newer call (this one was killed)
                 }
-                if let Some(Modal::Setup(s)) = &mut w.modal {
-                    s.naming = false;
-                    // No claude or no answer: the first words stay.
-                    if let Ok(g) = result {
-                        s.generated = Some(g);
-                    }
+                s.naming_run = None;
+                s.naming = false;
+                s.named_for = Some(seq);
+                // No claude or no answer: the first words stay. Typed meanwhile: dropped.
+                if let (Ok(g), true) = (result, s.gen_seq == seq && !s.name_edited) {
+                    s.generated = Some(g);
                 }
+                let create = std::mem::take(&mut s.create_pending);
                 w.setup_derive();
                 cx.notify();
+                if create {
+                    w.setup_create(window, cx);
+                }
             });
         })
         .detach();
+        true
     }
 
     /// A prefix picked (list, ↑↓ in the open list, ←/→): remembered for the project; `close` closes the list.
@@ -423,6 +474,13 @@ impl Workspace {
 
     /// Enter: a shared session now, or `git worktree add` off-thread and then the session in it.
     pub(super) fn setup_create(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        // The name still comes from the prompt: name it first, then create (Esc meanwhile cancels).
+        if self.setup_name(window, cx) {
+            if let Some(Modal::Setup(s)) = &mut self.modal {
+                s.create_pending = true;
+            }
+            return cx.notify();
+        }
         let Some(Modal::Setup(s)) = &mut self.modal else { return };
         let name = Some(s.name.text.trim().to_string()).filter(|n| !n.is_empty());
         let prompt = Some(s.prompt.text.trim().to_string()).filter(|p| s.claude && !p.is_empty());
@@ -754,12 +812,12 @@ impl Workspace {
                     .child(div().flex_1().min_w_0().flex().flex_col().gap(z(space::XS)).child(control).children(
                         err_for(f).map(|e| div().text_size(z(text_size::XS)).text_color(t.state.error).child(e)),
                     ))
-                    .on_click(cx.listener(move |w, _: &ClickEvent, _, cx| {
+                    .on_click(cx.listener(move |w, _: &ClickEvent, window, cx| {
                         if let Some(Modal::Setup(s)) = &mut w.modal {
-                            s.focus = f;
                             s.prefix_open = false;
-                            cx.notify();
                         }
+                        w.setup_focus(f, window, cx);
+                        cx.notify();
                     }))
             };
         let mut rows: Vec<AnyElement> = Vec::new();
@@ -772,8 +830,10 @@ impl Workspace {
             .when(from_prompt, |d| {
                 d.child(div().text_size(z(text_size::XS)).text_color(t.text.dim).child(if s.naming {
                     "From the first prompt · claude is naming it…"
-                } else {
+                } else if s.named_for == Some(s.gen_seq) {
                     "From the first prompt (typing here keeps your name)"
+                } else {
+                    "From the first prompt's first words; claude names it when you leave the prompt or create"
                 }))
             });
         rows.push(row(Field::Name, "Name", name.into_any_element()).into_any_element());
@@ -883,13 +943,13 @@ impl Workspace {
                         .child(prefix_label(s.prefix))
                         .child(ui::icon(icon::CHEVRON_DOWN, 12., t.text.dim))
                         .tooltip(ui::tip("Branch prefix (remembered for this project) · ←/→ or Space"))
-                        .on_click(cx.listener(|w, _: &ClickEvent, _, cx| {
+                        .on_click(cx.listener(|w, _: &ClickEvent, window, cx| {
                             cx.stop_propagation();
                             if let Some(Modal::Setup(s)) = &mut w.modal {
                                 s.prefix_open = !s.prefix_open;
-                                s.focus = Field::Prefix;
-                                cx.notify();
                             }
+                            w.setup_focus(Field::Prefix, window, cx);
+                            cx.notify();
                         })),
                 )
                 .when(s.prefix_open, |d| d.child(deferred(list).with_priority(1)));
@@ -986,13 +1046,13 @@ impl Workspace {
             }));
         rows.push(
             row(Field::Claude, "Claude", check.into_any_element())
-                .on_click(cx.listener(|w, _: &ClickEvent, _, cx| {
+                .on_click(cx.listener(|w, _: &ClickEvent, window, cx| {
                     if let Some(Modal::Setup(s)) = &mut w.modal {
                         s.claude = !s.claude;
-                        s.focus = Field::Claude;
-                        w.setup_derive();
-                        cx.notify();
                     }
+                    w.setup_focus(Field::Claude, window, cx);
+                    w.setup_derive();
+                    cx.notify();
                 }))
                 .into_any_element(),
         );
@@ -1030,6 +1090,8 @@ impl Workspace {
             .children(general.map(|e| div().text_size(z(text_size::SM)).text_color(t.state.error).child(e)))
             .child(div().text_size(z(text_size::XS)).text_color(t.text.dim).child(if s.busy {
                 "Creating worktree…"
+            } else if s.create_pending {
+                "Naming the session, then creating it… · Esc cancel"
             } else if s.focus == Field::Prompt {
                 "Enter new line · Ctrl+Enter create · Tab next field · Esc cancel"
             } else {
@@ -1376,6 +1438,24 @@ mod tests {
         s.name_edited = false;
         s.derive(None);
         assert_eq!(s.name.text, "", "no claude: no first prompt");
+    }
+
+    #[test]
+    fn claude_names_once_per_prompt_version() {
+        let mut s = setup();
+        assert!(!s.wants_name(), "no prompt");
+        prompt(&mut s, "Fix the Esc key");
+        s.gen_seq += 1; // as a prompt change does
+        assert!(s.wants_name());
+        s.named_for = Some(s.gen_seq); // the call finished (named or failed)
+        assert!(!s.wants_name(), "leaving the field again or Create: no second call");
+        s.gen_seq += 1;
+        assert!(s.wants_name(), "the prompt changed since");
+        s.name_edited = true;
+        assert!(!s.wants_name(), "a typed name");
+        s.name_edited = false;
+        s.claude = false;
+        assert!(!s.wants_name(), "no claude: no prompt");
     }
 
     #[test]
