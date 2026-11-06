@@ -6,6 +6,51 @@ All notable changes to Dirigent are recorded here. The format follows
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-11-06
+
+A redesigned git workflow (branches, sync, push and pull, pull and merge requests) and sessions that name
+themselves.
+
+### Added
+
+- **Automatic session names**
+  - Sessions name themselves instead of "Session N": Claude Code's own title (`claude -n`, `/rename`, or the title
+    it generates after the first response), else the first prompt shortened to a readable title, else the
+    worktree's branch or the directory name.
+  - A name you set yourself always wins and is never replaced; "Reset to automatic name" in the session menu
+    brings the automatic one back.
+  - A new Claude session in the same tab (a new `claude`, `/clear`) may update the automatic name.
+  - Long names are cut with an ellipsis; the full name shows in a tooltip.
+- **Branches** (Ctrl+Shift+O): switch, search, create, or check out a remote branch. Uncommitted changes that
+  would move along ask first. The status bar shows the branch with ahead/behind counts.
+- **Sync**: one button in the Changes panel that does the safe next step: Publish, Push, Pull, or tells you the
+  branch has diverged or is up to date. Fetch, pull and push are also in the panel's ⋯ menu.
+  - Pull is fast-forward only; Sync never merges or rebases.
+  - Network commands run without a terminal, never prompt or store credentials, and can be cancelled (120 s
+    timeout).
+  - Optional background fetch (`git.fetch_minutes` in settings.json, off by default).
+- **Pull requests and merge requests**
+  - GitHub: with `gh` logged in, the panel shows the PR's number, state and checks, and creates a PR; without it,
+    it opens the compare page.
+  - GitLab: the merge request is created by the push itself; the state comes from `glab` when installed.
+  - Commit & push and Commit, push & create PR from the commit button's menu.
+- **Host mapping**: `git.hosts` in settings.json maps an SSH host (for example a self-hosted GitLab behind a
+  separate SSH name) to its forge and web address.
+
+### Changed
+
+- A cleaner Changes panel: a repo bar with the branch, Sync and a ⋯ menu; checkboxes that stage and unstage; one
+  commit button that follows the "This agent | All" choice; one view menu in the diff header.
+- When a branch's remote was deleted (usually after a merge), Sync, Push and Create PR refuse to publish it again
+  and offer "Switch to the default branch and pull" instead.
+- settings.json keeps sections and keys it doesn't know, so an older or newer version of Dirigent never deletes
+  your settings.
+
+### Fixed
+
+- The dock width fields in Settings → Layout can be typed into again.
+- The APT repository build no longer fails when the release workflow passes relative paths.
+
 ## [0.1.1] - 2026-11-06
 
 Install and update Dirigent with apt.
@@ -78,6 +123,7 @@ The first release: a native Linux app (Wayland and X11) for running many Claude 
   - Prebuilt Linux x86_64 tarballs with `install.sh --prebuilt` and SHA256 checksums.
   - CI checks formatting, clippy, tests, licenses and RustSec advisories.
 
-[Unreleased]: https://github.com/jakuubkoo/Dirigent/compare/v0.1.1...HEAD
+[Unreleased]: https://github.com/jakuubkoo/Dirigent/compare/v0.2.0...HEAD
+[0.2.0]: https://github.com/jakuubkoo/Dirigent/compare/v0.1.1...v0.2.0
 [0.1.1]: https://github.com/jakuubkoo/Dirigent/compare/v0.1.0...v0.1.1
 [0.1.0]: https://github.com/jakuubkoo/Dirigent/releases/tag/v0.1.0

@@ -4,7 +4,7 @@ members = ["crates/session", "crates/app", "crates/hook", "crates/git", "crates/
 
 [workspace.package]
 # The one version of everything (semver); see RELEASING.md.
-version = "0.1.1"
+version = "0.2.0"
 edition = "2024"
 rust-version = "1.99"
 publish = false
