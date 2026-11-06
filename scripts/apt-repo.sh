@@ -13,7 +13,8 @@ if (($# != 4)); then
     echo "usage: apt-repo.sh <debs dir> <site dir> <key fingerprint> <public key .asc>" >&2
     exit 2
 fi
-debs="$1" site="$2" fpr="$3" pub="$4"
+# Absolute paths: the script works inside the site directory later on.
+debs="$(realpath "$1")" site="$(realpath -m "$2")" fpr="$3" pub="$(realpath "$4")"
 url="${SITE_URL:-https://jakuubkoo.github.io/Dirigent}"
 
 rm -rf "$site"
