@@ -371,7 +371,8 @@ impl GitPanel {
 }
 
 /// A small bordered button for the panel's bars.
-fn bar_button(id: &'static str) -> gpui::Stateful<gpui::Div> {
+/// `strong`: the accent look (the next step to take). Sets the hover itself: gpui allows one hover style.
+fn bar_button(id: &'static str, strong: bool) -> gpui::Stateful<gpui::Div> {
     let t = theme::get();
     div()
         .id(id)
@@ -388,7 +389,10 @@ fn bar_button(id: &'static str) -> gpui::Stateful<gpui::Div> {
         .text_size(z(text_size::SM))
         .text_color(t.text.primary)
         .cursor_pointer()
-        .hover(|s| s.bg(t.bg.hover))
+        .map(|d| match strong {
+            true => d.bg(t.accent).border_color(t.accent).text_color(t.text.on_accent).hover(|s| s.opacity(0.85)),
+            false => d.hover(|s| s.bg(t.bg.hover)),
+        })
 }
 
 impl GitPanel {
@@ -429,10 +433,7 @@ impl GitPanel {
             root.to_path_buf(),
             root.to_path_buf(),
         );
-        let sync = bar_button("git-sync")
-            .when(strong && enabled, |d| {
-                d.bg(t.accent).border_color(t.accent).text_color(t.text.on_accent).hover(|s| s.opacity(0.85))
-            })
+        let sync = bar_button("git-sync", strong && enabled)
             .when(!enabled, |d| d.text_color(t.text.faint).cursor_not_allowed())
             .when(label == "Diverged" || gone, |d| d.text_color(t.state.needs_you))
             .child(label)
@@ -454,7 +455,7 @@ impl GitPanel {
             .px(z(space::MD))
             .py(z(space::SM))
             .child(
-                bar_button("git-branch")
+                bar_button("git-branch", false)
                     .flex_1()
                     .min_w_0()
                     .child(ui::icon(icon::BRANCH, 13., t.accent))
@@ -467,7 +468,7 @@ impl GitPanel {
             )
             .child(sync)
             .child(
-                bar_button("git-more")
+                bar_button("git-more", false)
                     .px(z(space::XS))
                     .child(ui::icon(icon::MORE, 14., t.text.muted))
                     .tooltip(tip("Fetch, pull, push, PR status, forget the agent's files"))
@@ -566,7 +567,7 @@ impl GitPanel {
         };
         let (ws, r) = (self.workspace.clone(), root.to_path_buf());
         let create = move || {
-            bar_button("pr-create")
+            bar_button("pr-create", false)
                 .h(z(22.))
                 .text_size(z(text_size::XS))
                 .when(!enabled, |d| d.text_color(t.text.faint).cursor_not_allowed())

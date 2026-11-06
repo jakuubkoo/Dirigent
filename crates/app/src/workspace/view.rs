@@ -383,8 +383,12 @@ impl Workspace {
                 .menu
                 .as_ref()
                 .is_some_and(|m| !matches!(m.kind, projects_ui::MenuKind::Session(_)) && Some(&m.root) == key.as_ref());
-            // Hover buttons: + (a session per the project default; Shift: the opposite), ▾ (with/without claude),
+            // Hover buttons: + (per `plus_opens`, by default the setup dialog), ▾ (with/without claude),
             // ⋯ (pin, rename, defaults, remove). Never toggle the group.
+            let plus_hint = match self.settings.plus_opens {
+                crate::settings::PlusOpens::Dialog => "New session… (Shift: start one right away)",
+                _ => "New session here (Shift: the other claude choice)",
+            };
             let buttons = key.clone().map(|root| {
                 let b = |id: &'static str, glyph: &'static str, hint: &'static str| {
                     div()
@@ -407,12 +411,12 @@ impl Workspace {
                     .flex()
                     .items_center()
                     .when(!menu_here, |d| d.opacity(0.).group_hover(gname.clone(), |s| s.opacity(1.)))
-                    .child(b("g-plus", icon::PLUS, "New session here (Shift: the other claude choice)").on_click(
-                        cx.listener(move |w, ev: &ClickEvent, window, cx| {
+                    .child(b("g-plus", icon::PLUS, plus_hint).on_click(cx.listener(
+                        move |w, ev: &ClickEvent, window, cx| {
                             cx.stop_propagation();
                             w.group_plus(r1.clone(), ev.modifiers().shift, window, cx);
-                        }),
-                    ))
+                        },
+                    )))
                     .child(b("g-new", icon::CHEVRON_DOWN, "New session…").on_click(cx.listener(
                         move |w, ev: &ClickEvent, _, cx| {
                             cx.stop_propagation();
