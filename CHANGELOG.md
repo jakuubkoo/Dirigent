@@ -6,11 +6,9 @@ All notable changes to Dirigent are recorded here. The format follows
 
 ## [Unreleased]
 
-### Changed
+## [0.3.0] - 2026-11-06
 
-- The PR/MR strip shows check progress ("checks 3/5 · 1 failing", "all 5 passed") with each check's state and
-  duration in a tooltip; clicking it opens the checks page. While checks run and the Changes panel is visible, the
-  strip refreshes every 30 s. GitLab (with `glab`) lists the pipeline's jobs.
+Find in the terminal, check progress in the PR/MR strip, and a round of fixes.
 
 ### Added
 
@@ -20,6 +18,9 @@ All notable changes to Dirigent are recorded here. The format follows
 
 ### Changed
 
+- The PR/MR strip shows check progress ("checks 3/5 · 1 failing", "all 5 passed") with each check's state and
+  duration in a tooltip; clicking it opens the checks page. While checks run and the Changes panel is visible, the
+  strip refreshes every 30 s. GitLab (with `glab`) lists the pipeline's jobs.
 - The `+` on a project group header opens the New session setup dialog (name, git worktree, first prompt) for that
   project; Shift+click starts a session right away. The old instant behavior stays available as "Plain + opens" in
   Settings (Project default, Shell, Claude).
@@ -156,7 +157,8 @@ The first release: a native Linux app (Wayland and X11) for running many Claude 
   - Prebuilt Linux x86_64 tarballs with `install.sh --prebuilt` and SHA256 checksums.
   - CI checks formatting, clippy, tests, licenses and RustSec advisories.
 
-[Unreleased]: https://github.com/jakuubkoo/Dirigent/compare/v0.2.0...HEAD
+[Unreleased]: https://github.com/jakuubkoo/Dirigent/compare/v0.3.0...HEAD
+[0.3.0]: https://github.com/jakuubkoo/Dirigent/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/jakuubkoo/Dirigent/compare/v0.1.1...v0.2.0
 [0.1.1]: https://github.com/jakuubkoo/Dirigent/compare/v0.1.0...v0.1.1
 [0.1.0]: https://github.com/jakuubkoo/Dirigent/releases/tag/v0.1.0
