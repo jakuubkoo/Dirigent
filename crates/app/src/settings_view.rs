@@ -271,6 +271,11 @@ fn show(item: &Item, v: Val) -> String {
     }
 }
 
+/// Whether `k` is edited by typing: every number field (a key list here once missed the dock widths).
+fn typed(k: Key) -> bool {
+    ITEMS.iter().any(|i| i.key == k && matches!(i.ctl, Ctl::Number))
+}
+
 /// A typed number for `k`, or what's wrong with it.
 fn parse_num(k: Key, text: &str) -> Result<f64, String> {
     let t = text.trim();
@@ -467,7 +472,7 @@ impl SettingsView {
     fn focus_field(&mut self, f: Field, s: &Settings, projects: &[Project]) -> Option<Apply> {
         let apply = self.commit(s, projects);
         self.edit = match &f {
-            Field::Item(k @ (Key::Zoom | Key::FontSize | Key::Scrollback | Key::FetchMinutes)) => {
+            Field::Item(k) if typed(*k) => {
                 let item = ITEMS.iter().find(|i| i.key == *k)?;
                 Some(LineEdit::new(show(item, get(s, *k))))
             }
@@ -1159,6 +1164,10 @@ mod tests {
 
     #[test]
     fn typed_numbers_are_checked() {
+        for k in [Key::Zoom, Key::FontSize, Key::Scrollback, Key::LeftWidth, Key::RightWidth, Key::FetchMinutes] {
+            assert!(typed(k), "{k:?} can't be typed into");
+        }
+        assert!(!typed(Key::Trust));
         assert_eq!(parse_num(Key::FontSize, " 15.5 "), Ok(15.5));
         assert!(parse_num(Key::FontSize, "40").is_err());
         assert!(parse_num(Key::Scrollback, "1.5").is_err());
