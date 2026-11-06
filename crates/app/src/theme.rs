@@ -105,6 +105,8 @@ pub struct Terminal {
     pub bg: Rgba,
     pub fg: Rgba,
     pub cursor: Rgba,
+    /// Background of selected text (the text keeps its color).
+    pub selection: Rgba,
     pub ansi: [Rgba; 16],
 }
 
@@ -218,6 +220,7 @@ pub static DARK: Theme = Theme {
         bg: hex(0x0c0c0e),
         fg: hex(0xd6d6dc),
         cursor: hex(0xececf1),
+        selection: hex(0x2b3b63),
         ansi: [
             hex(0x24242a), hex(0xf0707a), hex(0x8fd18a), hex(0xe9c46a),
             hex(0x6aa8f7), hex(0xc792ea), hex(0x5ccfe6), hex(0xc8c8ce),

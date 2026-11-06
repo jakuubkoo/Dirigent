@@ -2033,6 +2033,31 @@ impl Workspace {
         cx.notify();
     }
 
+    /// Ctrl+click on a path printed in a session: resolved against that session's directory (`~/` from home),
+    /// checked off-thread, then shown in the preview at `line`. Not a file: a status-bar note.
+    pub fn open_path_from(&mut self, view_id: EntityId, raw: String, line: Option<u32>, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(i) = self.tab_of_view(view_id) else { return };
+        let joined = match raw.strip_prefix("~/") {
+            Some(rest) => home().join(rest),
+            None => self.tabs[i].cwd.join(&raw),
+        };
+        let path: PathBuf = joined.components().filter(|c| !matches!(c, std::path::Component::CurDir)).collect();
+        cx.spawn_in(window, async move |this, cx| {
+            let p = path.clone();
+            let is_file = cx.background_executor().spawn(async move { p.is_file() }).await;
+            let _ = this.update_in(cx, |w, window, cx| {
+                if !is_file {
+                    return w.flash(format!("Not a file: {}", tilde(&path)), cx);
+                }
+                w.open_file(path, false, window, cx);
+                if let (Some(line), Some(Overlay::File(f))) = (line, &w.overlay) {
+                    f.update(cx, |f, cx| f.go_to_line(line as usize, cx));
+                }
+            });
+        })
+        .detach();
+    }
+
     /// The active session's project for quick open / content search: its repo root (else its directory), and its
     /// file list. Everything that may block (the walk, the slot's lock: the watcher thread holds it while patching)
     /// happens off the UI thread. A repo's list is built once and kept live; other directories and the "include

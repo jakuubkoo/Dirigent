@@ -1,11 +1,18 @@
+use std::cell::Cell;
 use std::rc::Rc;
+use std::time::Duration;
 
 use gpui::{
-    Context, FocusHandle, Focusable, KeyDownEvent, Pixels, ScrollEvent, Task, WeakEntity, Window, div, prelude::*,
+    Bounds, ClipboardItem, Context, FocusHandle, Focusable, KeyDownEvent, Modifiers, ModifiersChangedEvent,
+    MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels, Point, ScrollEvent, Task, WeakEntity, Window,
+    div, prelude::*,
 };
-use session::{Session, Size};
+use session::alacritty_terminal::index::Side;
 use session::alacritty_terminal::term::TermMode;
 use session::keys::{Mods, encode};
+use session::links::{self, Link, Target};
+use session::mouse::{self, Button, Kind};
+use session::{Session, Size, select};
 
 use crate::terminal_element::{Metrics, TerminalElement};
 use crate::theme::{z, self, MONO_FONT, radius, space, text_size};
@@ -23,7 +30,31 @@ pub struct TerminalView {
     banner: Option<Banner>,
     /// The grid size the workspace gives every session; this view's PTY gets one row less while a banner shows.
     grid: Size,
+    /// Where the grid was last laid out (set by the element in prepaint).
+    grid_bounds: Rc<Cell<Bounds<Pixels>>>,
+    /// The link under the pointer (underlined; Ctrl+click opens it). Paths count only while Ctrl is held.
+    hover: Option<Link>,
+    /// Pointer position over the grid and whether Ctrl was down (to refresh `hover` on output and Ctrl changes).
+    pointer: Option<(Point<Pixels>, bool)>,
+    /// A button held in the grid: selecting, or reporting to the app.
+    press: Option<Press>,
+    /// Last cell (and side) a drag / motion was handled at: repeats in the same cell do nothing.
+    last_cell: Option<(usize, usize, Side)>,
+    /// Auto-scroll while a selection drag is past the top/bottom edge.
+    scrolling: bool,
+    _autoscroll: Option<Task<()>>,
+    drag_at: Point<Pixels>,
     _wakeups: Task<()>,
+}
+
+#[derive(Clone, Copy, PartialEq)]
+enum Press {
+    Select,
+    Report(Button),
+}
+
+fn mods(m: Modifiers) -> Mods {
+    Mods { ctrl: m.control, alt: m.alt, shift: m.shift }
 }
 
 #[derive(Clone, PartialEq)]
@@ -53,6 +84,10 @@ impl TerminalView {
                     let visible = this.session.is_visible();
                     crate::perf::event(if visible { "wakeup (visible)" } else { "wakeup (unread flip)" });
                     if visible {
+                        // The text under the pointer may have changed: look again (no extra frame, this one paints).
+                        if let Some((pos, ctrl)) = this.pointer {
+                            this.hover = this.link_at(pos, ctrl);
+                        }
                         cx.notify();
                     }
                     (visible, this.session.take_cwd_change(), cx.entity_id())
@@ -69,7 +104,24 @@ impl TerminalView {
             let _ = ws.update(cx, |_, cx| cx.notify());
         });
         let grid = session.size();
-        Self { session, focus: cx.focus_handle(), metrics, scroll_px: 0., workspace, banner: None, grid, _wakeups: wakeups }
+        Self {
+            session,
+            focus: cx.focus_handle(),
+            metrics,
+            scroll_px: 0.,
+            workspace,
+            banner: None,
+            grid,
+            grid_bounds: Default::default(),
+            hover: None,
+            pointer: None,
+            press: None,
+            last_cell: None,
+            scrolling: false,
+            _autoscroll: None,
+            drag_at: Point::default(),
+            _wakeups: wakeups,
+        }
     }
 
     pub fn banner(&self) -> Option<&Banner> {
@@ -124,6 +176,16 @@ impl TerminalView {
             cx.stop_propagation();
             return;
         }
+        // Ctrl+Shift+C / V: our copy and text paste (plain Ctrl+V stays ^V: Claude Code pastes images with it).
+        if m.shift && m.control && !m.alt && (ks.key.eq_ignore_ascii_case("c") || ks.key.eq_ignore_ascii_case("v")) {
+            if ks.key.eq_ignore_ascii_case("c") {
+                self.copy(cx);
+            } else {
+                self.paste_clipboard(cx);
+            }
+            cx.stop_propagation();
+            return;
+        }
         if m.shift && !m.control && !m.alt && matches!(ks.key.as_str(), "pageup" | "pagedown") {
             let page = self.session.size().rows as i32 - 1;
             self.session.scroll(if ks.key == "pageup" { page } else { -page });
@@ -152,6 +214,15 @@ impl TerminalView {
         }
         self.scroll_px -= lines as f32 * f32::from(line_h);
         let mode = *self.session.term.lock().mode();
+        if mode.intersects(TermMode::MOUSE_MODE) && !ev.modifiers.shift {
+            // The app takes the wheel: one report per line.
+            let (col, row, ..) = self.cell_at(ev.position);
+            let button = if lines > 0 { Button::WheelUp } else { Button::WheelDown };
+            if let Some(bytes) = mouse::report(button, Kind::Press, col, row, mods(ev.modifiers), mode) {
+                self.session.write(&bytes.repeat(lines.unsigned_abs() as usize));
+            }
+            return;
+        }
         if mode.contains(TermMode::ALT_SCREEN | TermMode::ALTERNATE_SCROLL) {
             // Full-screen apps without mouse reporting get arrow keys (like xterm's alternateScroll).
             let key: &[u8] = match (lines > 0, mode.contains(TermMode::APP_CURSOR)) {
@@ -164,6 +235,297 @@ impl TerminalView {
         } else {
             self.session.scroll(lines);
             cx.notify();
+        }
+    }
+}
+
+/// Mouse, selection, clipboard, links.
+impl TerminalView {
+    /// The cell under `pos` (clamped into the grid), which half of it, and whether `pos` is above (-1) / below (1)
+    /// the grid.
+    fn cell_at(&self, pos: Point<Pixels>) -> (usize, usize, Side, i32) {
+        let b = self.grid_bounds.get();
+        let size = self.session.size();
+        let (cols, rows) = (size.cols.max(1) as usize, size.rows.max(1) as usize);
+        let x = f32::from(pos.x - b.origin.x).max(0.) / f32::from(self.metrics.cell_width);
+        let y = f32::from(pos.y - b.origin.y) / f32::from(self.metrics.line_height);
+        let col = (x as usize).min(cols - 1);
+        let side = if x as usize >= cols || x.fract() >= 0.5 { Side::Right } else { Side::Left };
+        let edge = if y < 0. { -1 } else if y >= rows as f32 { 1 } else { 0 };
+        (col, (y.max(0.) as usize).min(rows - 1), side, edge)
+    }
+
+    fn link_at(&self, pos: Point<Pixels>, ctrl: bool) -> Option<Link> {
+        let (col, row, _, edge) = self.cell_at(pos);
+        if edge != 0 {
+            return None;
+        }
+        let term = self.session.term.lock();
+        links::at(&term, select::grid_point(&term, col, row), ctrl)
+    }
+
+    /// Sets the hovered link; repaints only when it changed.
+    fn set_hover(&mut self, link: Option<Link>, cx: &mut Context<Self>) {
+        let key = |l: &Option<Link>| l.as_ref().map(|l| (l.start, l.end));
+        if key(&link) != key(&self.hover) {
+            self.hover = link;
+            cx.notify();
+        }
+    }
+
+    pub fn has_selection(&self) -> bool {
+        self.session.term.lock().selection.is_some()
+    }
+
+    pub fn copy(&mut self, cx: &mut Context<Self>) {
+        let text = select::text(&self.session.term.lock());
+        if let Some(text) = text {
+            cx.write_to_clipboard(ClipboardItem::new_string(text));
+        }
+    }
+
+    pub fn paste_clipboard(&mut self, cx: &mut Context<Self>) {
+        if let Some(text) = cx.read_from_clipboard().and_then(|c| c.text()) {
+            self.paste(&text, cx);
+        }
+    }
+
+    fn paste_primary(&mut self, cx: &mut Context<Self>) {
+        #[cfg(any(target_os = "linux", target_os = "freebsd"))]
+        if let Some(text) = cx.read_from_primary().and_then(|c| c.text()) {
+            self.paste(&text, cx);
+        }
+    }
+
+    fn paste(&mut self, text: &str, cx: &mut Context<Self>) {
+        if text.is_empty() || self.session.is_exited() {
+            return;
+        }
+        let bracketed = self.session.term.lock().mode().contains(TermMode::BRACKETED_PASTE);
+        if self.session.term.lock().grid().display_offset() != 0 {
+            self.session.scroll_to_bottom();
+            cx.notify();
+        }
+        self.session.write(&mouse::paste(text, bracketed));
+    }
+
+    pub fn select_all(&mut self, cx: &mut Context<Self>) {
+        select::select_all(&mut self.session.term.lock());
+        cx.notify();
+    }
+
+    fn open_link(&mut self, target: Target, window: &mut Window, cx: &mut Context<Self>) {
+        let (path, line) = match target {
+            Target::Url(url) => match url.strip_prefix("file://") {
+                // file://host/path: the path starts at the first '/'.
+                Some(rest) => (rest.find('/').map(|i| rest[i..].to_string()).unwrap_or_default(), None),
+                None if ["http://", "https://", "mailto:"].iter().any(|s| url.starts_with(s)) => return cx.open_url(&url),
+                None => return,
+            },
+            Target::Path { path, line, .. } => (path, line),
+        };
+        if path.is_empty() {
+            return;
+        }
+        let id = cx.entity_id();
+        let _ = self.workspace.update(cx, |w, cx| w.open_path_from(id, path, line, window, cx));
+    }
+
+    fn mouse_down(&mut self, ev: &MouseDownEvent, window: &mut Window, cx: &mut Context<Self>) {
+        window.focus(&self.focus, cx);
+        if self.session.is_exited() {
+            return;
+        }
+        let (col, row, side, _) = self.cell_at(ev.position);
+        let m = ev.modifiers;
+        // Ctrl+click on a link is always ours, also while the app takes the mouse.
+        if m.control && ev.button == MouseButton::Left
+            && let Some(link) = self.link_at(ev.position, true)
+        {
+            return self.open_link(link.target, window, cx);
+        }
+        let mode = *self.session.term.lock().mode();
+        if mode.intersects(TermMode::MOUSE_MODE) && !m.shift {
+            let button = match ev.button {
+                MouseButton::Left => Button::Left,
+                MouseButton::Middle => Button::Middle,
+                MouseButton::Right => Button::Right,
+                _ => return,
+            };
+            if let Some(bytes) = mouse::report(button, Kind::Press, col, row, mods(m), mode) {
+                self.session.write(&bytes);
+            }
+            self.press = Some(Press::Report(button));
+            self.last_cell = Some((col, row, side));
+            cx.notify(); // the next paint follows the drag past the grid's edge
+            return;
+        }
+        match ev.button {
+            MouseButton::Left => {
+                {
+                    let mut term = self.session.term.lock();
+                    let p = select::grid_point(&term, col, row);
+                    if !(m.shift && select::extend(&mut term, p, side)) {
+                        select::start(&mut term, ev.click_count, p, side);
+                    }
+                }
+                self.press = Some(Press::Select);
+                self.last_cell = Some((col, row, side));
+                cx.notify();
+            }
+            MouseButton::Middle => self.paste_primary(cx),
+            MouseButton::Right => {
+                let (id, at) = (cx.entity_id(), ev.position);
+                let _ = self.workspace.update(cx, |w, cx| w.open_terminal_menu(id, at, cx));
+            }
+            _ => {}
+        }
+    }
+
+    /// A move anywhere in the window while a button is held in the grid (registered by the element).
+    pub fn drag_to(&mut self, pos: Point<Pixels>, m: Modifiers, held: bool, cx: &mut Context<Self>) {
+        let Some(press) = self.press else { return };
+        if !held {
+            // The release happened before a frame carried the window listener: end it here.
+            return self.release(pos, m, cx);
+        }
+        let (col, row, side, edge) = self.cell_at(pos);
+        self.drag_at = pos;
+        match press {
+            Press::Report(button) => {
+                if self.last_cell.is_some_and(|(c, r, _)| (c, r) == (col, row)) {
+                    return;
+                }
+                self.last_cell = Some((col, row, side));
+                let mode = *self.session.term.lock().mode();
+                if let Some(bytes) = mouse::report(button, Kind::Motion, col, row, mods(m), mode) {
+                    self.session.write(&bytes);
+                }
+            }
+            Press::Select => {
+                if edge != 0 {
+                    self.start_autoscroll(cx);
+                }
+                if self.last_cell == Some((col, row, side)) {
+                    return;
+                }
+                self.last_cell = Some((col, row, side));
+                {
+                    let mut term = self.session.term.lock();
+                    let p = select::grid_point(&term, col, row);
+                    select::extend(&mut term, p, side);
+                }
+                cx.notify();
+            }
+        }
+    }
+
+    /// Past the top/bottom edge: scroll 1–3 lines every 50 ms (faster further out) and extend the selection.
+    /// Ends when the pointer comes back, or on release.
+    fn start_autoscroll(&mut self, cx: &mut Context<Self>) {
+        if self.scrolling {
+            return;
+        }
+        self.scrolling = true;
+        self._autoscroll = Some(cx.spawn(async move |this, cx| {
+            loop {
+                cx.background_executor().timer(Duration::from_millis(50)).await;
+                let Ok(true) = this.update(cx, |v, cx| v.autoscroll_step(cx)) else { break };
+            }
+        }));
+    }
+
+    fn autoscroll_step(&mut self, cx: &mut Context<Self>) -> bool {
+        let (col, row, side, edge) = self.cell_at(self.drag_at);
+        if self.press != Some(Press::Select) || edge == 0 {
+            self.scrolling = false;
+            return false;
+        }
+        let b = self.grid_bounds.get();
+        let lh = f32::from(self.metrics.line_height);
+        let out = if edge < 0 { f32::from(b.origin.y - self.drag_at.y) } else { f32::from(self.drag_at.y - b.bottom()) };
+        let lines = 1 + ((out / lh) as i32).min(2);
+        self.session.scroll(if edge < 0 { lines } else { -lines });
+        {
+            let mut term = self.session.term.lock();
+            let p = select::grid_point(&term, col, row);
+            select::extend(&mut term, p, side);
+        }
+        self.last_cell = None;
+        cx.notify();
+        true
+    }
+
+    /// The release of a button held in the grid, wherever it happens.
+    pub fn mouse_up(&mut self, ev: &MouseUpEvent, _: &mut Window, cx: &mut Context<Self>) {
+        self.release(ev.position, ev.modifiers, cx);
+    }
+
+    fn release(&mut self, pos: Point<Pixels>, m: Modifiers, cx: &mut Context<Self>) {
+        let Some(press) = self.press.take() else { return };
+        self.scrolling = false;
+        self._autoscroll = None;
+        self.last_cell = None;
+        match press {
+            Press::Report(button) => {
+                let (col, row, ..) = self.cell_at(pos);
+                let mode = *self.session.term.lock().mode();
+                if let Some(bytes) = mouse::report(button, Kind::Release, col, row, mods(m), mode) {
+                    self.session.write(&bytes);
+                }
+            }
+            Press::Select => {
+                let text = {
+                    let mut term = self.session.term.lock();
+                    if select::finish(&mut term) { select::text(&term) } else { None }
+                };
+                // Linux: a selection is the primary selection (middle click pastes it anywhere).
+                #[cfg(any(target_os = "linux", target_os = "freebsd"))]
+                if let Some(text) = text {
+                    cx.write_to_primary(ClipboardItem::new_string(text));
+                }
+            }
+        }
+        cx.notify();
+    }
+
+    /// Hover over the grid (no button held): links, and motion reports for apps that want every move (1003).
+    fn mouse_move(&mut self, ev: &MouseMoveEvent, _: &mut Window, cx: &mut Context<Self>) {
+        if self.press.is_some() {
+            return; // the element's window listener has it
+        }
+        self.pointer = Some((ev.position, ev.modifiers.control));
+        let mode = *self.session.term.lock().mode();
+        if mode.contains(TermMode::MOUSE_MOTION) && !ev.modifiers.shift {
+            let (col, row, side, _) = self.cell_at(ev.position);
+            if self.last_cell.is_none_or(|(c, r, _)| (c, r) != (col, row)) {
+                self.last_cell = Some((col, row, side));
+                if let Some(bytes) = mouse::report(Button::None, Kind::Motion, col, row, mods(ev.modifiers), mode) {
+                    self.session.write(&bytes);
+                }
+            }
+        }
+        let link = self.link_at(ev.position, ev.modifiers.control);
+        self.set_hover(link, cx);
+    }
+
+    /// Ctrl pressed / released over the grid: paths start / stop being links.
+    fn modifiers_changed(&mut self, ev: &ModifiersChangedEvent, _: &mut Window, cx: &mut Context<Self>) {
+        let Some((pos, ctrl)) = self.pointer else { return };
+        if ctrl != ev.modifiers.control {
+            self.pointer = Some((pos, ev.modifiers.control));
+            let link = self.link_at(pos, ev.modifiers.control);
+            self.set_hover(link, cx);
+        }
+    }
+
+    fn hover_changed(&mut self, hovered: &bool, _: &mut Window, cx: &mut Context<Self>) {
+        if !hovered {
+            self.pointer = None;
+            if self.press.is_none() {
+                self.last_cell = None;
+            }
+            self.set_hover(None, cx);
         }
     }
 }
@@ -239,11 +601,28 @@ impl Render for TerminalView {
             .children(banner)
             .child(
                 div()
+                    .id("grid")
                     .flex_1()
                     .min_h_0()
                     .pl(z(PADDING))
                     .pt(z(PADDING))
-                    .child(TerminalElement::new(self.session.clone(), self.metrics.clone())),
+                    .map(|d| if self.hover.is_some() { d.cursor_pointer() } else { d.cursor_text() })
+                    .on_mouse_down(MouseButton::Left, cx.listener(Self::mouse_down))
+                    .on_mouse_down(MouseButton::Middle, cx.listener(Self::mouse_down))
+                    .on_mouse_down(MouseButton::Right, cx.listener(Self::mouse_down))
+                    .on_mouse_move(cx.listener(Self::mouse_move))
+                    .on_mouse_up(MouseButton::Left, cx.listener(Self::mouse_up))
+                    .on_mouse_up(MouseButton::Middle, cx.listener(Self::mouse_up))
+                    .on_mouse_up(MouseButton::Right, cx.listener(Self::mouse_up))
+                    .on_modifiers_changed(cx.listener(Self::modifiers_changed))
+                    .on_hover(cx.listener(Self::hover_changed))
+                    .child(TerminalElement::new(
+                        self.session.clone(),
+                        self.metrics.clone(),
+                        self.grid_bounds.clone(),
+                        self.hover.as_ref().map(|l| (l.start, l.end)),
+                        self.press.is_some().then(|| cx.entity().downgrade()),
+                    )),
             )
             .children(exited)
     }

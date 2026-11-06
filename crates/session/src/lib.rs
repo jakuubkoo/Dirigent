@@ -1,6 +1,9 @@
 //! One agent session: a PTY running a shell plus its terminal state. No UI dependencies.
 
 pub mod keys;
+pub mod links;
+pub mod mouse;
+pub mod select;
 pub mod expect;
 pub mod osc7;
 

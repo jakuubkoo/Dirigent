@@ -83,6 +83,10 @@ group.
 | Ctrl+Shift+N | New session in the current project |
 | Ctrl+Shift+W / middle click / hover x | Close session (asks first while claude runs in it) |
 | Shift+F10 / Menu key / right click | Session menu (arrows, Enter, Esc) |
+| Drag / double click / triple click | Select text / a word / a line in the terminal (Shift+click extends; hold Shift while an app uses the mouse) |
+| Ctrl+Shift+C / Ctrl+Shift+V | Copy the selection / paste text (Ctrl+V stays the app's, e.g. image paste in Claude Code) |
+| Middle click | Paste the last selection (primary selection) |
+| Ctrl+click | Open a link in the browser, or a path like `src/main.rs:42` in the preview |
 | Ctrl+Tab / Ctrl+Shift+Tab | Next / previous session |
 | Ctrl+1..9 | Jump to session |
 | Ctrl+Shift+J | Next session that needs you |
