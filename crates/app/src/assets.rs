@@ -16,7 +16,8 @@ pub const APP_ICON_SVG: &[u8] = include_bytes!("../assets/icon/dirigent.svg");
 pub const APP_ICON_PNG: &[u8] = include_bytes!("../assets/icon/dirigent-256.png");
 
 static ICONS: &[(&str, &[u8])] = icons![
-    "chevron-right", "chevron-down", "plus", "x", "minus", "square", "copy", "panel-left-close", "panel-left-open",
+    "chevron-right", "chevron-down", "plus", "x", "minus", "square", "copy", "panel-left-close",
+    "panel-right-close", "list",
     "files", "git-compare", "circle-check", "loader-circle", "moon", "triangle-alert", "git-branch",
     "refresh-cw", "rotate-ccw", "eye", "eye-off", "folder", "folder-open", "file", "file-code", "file-text",
     "file-json", "file-cog", "file-lock", "file-image", "file-terminal", "file-archive", "terminal",

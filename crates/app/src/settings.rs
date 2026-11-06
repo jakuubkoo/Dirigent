@@ -9,6 +9,8 @@ use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
+use crate::layout::{self, Dock, Layout};
+
 /// How the diff view lays out changes.
 #[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq, Default)]
 #[serde(rename_all = "lowercase")]
@@ -79,6 +81,7 @@ pub struct Settings {
     pub diff_mode: DiffMode,
     pub split_style: SplitStyle,
     pub diff_engine: DiffEngine,
+    pub layout: Layout,
 }
 
 pub const FONT_SIZE: (f32, f32) = (8., 32.);
@@ -115,6 +118,7 @@ impl Default for Settings {
             diff_mode: DiffMode::Unified,
             split_style: SplitStyle::Clean,
             diff_engine: DiffEngine::Auto,
+            layout: Layout::default(),
         }
     }
 }
@@ -125,6 +129,7 @@ const KEYS: &[(&str, &[&str])] = &[
     ("terminal", &["font_size", "scrollback"]),
     ("notifications", &["needs_you", "done", "sound"]),
     ("diff", &["mode", "split_style", "engine"]),
+    ("layout", &["sessions", "files", "changes", "search", "left_width", "right_width"]),
 ];
 
 impl Settings {
@@ -141,6 +146,14 @@ impl Settings {
                     "sound": s.notifications.sound,
                 },
                 "diff": { "mode": s.diff_mode, "split_style": s.split_style, "engine": s.diff_engine },
+                "layout": {
+                    "sessions": s.layout.sessions,
+                    "files": s.layout.files,
+                    "changes": s.layout.changes,
+                    "search": s.layout.search,
+                    "left_width": s.layout.left_width,
+                    "right_width": s.layout.right_width,
+                },
             })
         };
         let (mine, defaults) = (all(self), all(Settings::default()));
@@ -203,6 +216,17 @@ pub fn parse(text: &str, fallback: &Settings) -> Parsed {
         diff_mode: g.get("diff", "mode", d.diff_mode, "\"unified\" or \"split\"", |_| true),
         split_style: g.get("diff", "split_style", d.split_style, "\"classic\" or \"clean\"", |_| true),
         diff_engine: g.get("diff", "engine", d.diff_engine, "\"structural\" or \"word\"", |_| true),
+        layout: {
+            let dl = d.layout;
+            let mut dock = |key, def: Dock| g.get("layout", key, def, "\"left\" or \"right\"", |_| true);
+            let (sessions, files, changes, search) =
+                (dock("sessions", dl.sessions), dock("files", dl.files), dock("changes", dl.changes), dock("search", dl.search));
+            let mut width = |key, def| {
+                g.get("layout", key, def, "a whole number 100–2000 (pixels)", |n: &u32| (layout::WIDTH.0..=layout::WIDTH.1).contains(n))
+            };
+            let (left_width, right_width) = (width("left_width", dl.left_width), width("right_width", dl.right_width));
+            Layout { sessions, files, changes, search, left_width, right_width }
+        },
     };
     for (sec, val) in v.as_object().into_iter().flatten() {
         match KEYS.iter().find(|(s, _)| s == sec) {
@@ -291,6 +315,20 @@ pub fn load(path: &Path, state_path: &Path) -> Loaded {
             text: None,
         },
     }
+}
+
+/// Dock widths used to live in the state file (`sidebar.width`, `git_panel.width`): a settings file without a
+/// `layout` section takes them over once (true: something changed, write the file). Broken text: nothing.
+pub fn adopt_widths(s: &mut Settings, text: Option<&str>, left: f32, right: f32) -> bool {
+    let Some(v) = text.and_then(|t| serde_json::from_str::<Value>(t).ok()) else { return false };
+    if !v.is_object() || v.get("layout").is_some() {
+        return false;
+    }
+    let before = s.layout;
+    let fit = |w: f32| (w.round() as u32).clamp(layout::WIDTH.0, layout::WIDTH.1);
+    s.layout.left_width = fit(left);
+    s.layout.right_width = fit(right);
+    s.layout != before
 }
 
 /// The preference fields of a state file from before settings.json (true: it had at least one).
@@ -384,6 +422,14 @@ mod tests {
             diff_mode: DiffMode::Split,
             split_style: SplitStyle::Classic,
             diff_engine: DiffEngine::Word,
+            layout: Layout {
+                sessions: Dock::Right,
+                files: Dock::Left,
+                changes: Dock::Right,
+                search: Dock::Left,
+                left_width: 300,
+                right_width: 400,
+            },
         };
         let p = parse(&s.to_json(), &Settings::default());
         assert_eq!(p, Parsed { settings: s, notes: vec![], broken: false });
@@ -394,6 +440,30 @@ mod tests {
         // A reset (back to the default) drops the key, so a later default change applies again.
         let back = Settings { scrollback: d_scroll(), ..Settings::default() }.to_json();
         assert_eq!(back, "{}\n");
+    }
+
+    #[test]
+    fn layout_section_only_non_defaults_bad_values_and_width_migration() {
+        let mut s = Settings::default();
+        s.layout.set_dock(layout::Panel::Files, Dock::Left);
+        s.layout.left_width = 260;
+        assert_eq!(
+            serde_json::from_str::<Value>(&s.to_json()).unwrap(),
+            json!({ "layout": { "files": "left", "left_width": 260 } })
+        );
+        let p = parse(r#"{"layout":{"sessions":"top","left_width":5,"right_width":500}}"#, &Settings::default());
+        assert_eq!(p.settings.layout, Layout { right_width: 500, ..Layout::default() });
+        assert_eq!(p.notes.len(), 2, "{:?}", p.notes);
+        // The state file's widths come over once, only into a file without a layout section.
+        let mut s = Settings::default();
+        assert!(adopt_widths(&mut s, Some("{}\n"), 250.4, 420.));
+        assert_eq!((s.layout.left_width, s.layout.right_width), (250, 420));
+        let mut s = Settings::default();
+        assert!(!adopt_widths(&mut s, Some("{}"), 220., 340.), "defaults: nothing to write");
+        assert!(!adopt_widths(&mut s, Some(r#"{"layout":{}}"#), 250., 420.), "already has a layout section");
+        assert!(!adopt_widths(&mut s, Some("{ half"), 250., 420.), "broken file: untouched");
+        assert!(!adopt_widths(&mut s, None, 250., 420.));
+        assert_eq!(s, Settings::default());
     }
 
     #[test]

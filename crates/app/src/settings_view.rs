@@ -13,6 +13,7 @@ use gpui::{
 };
 
 use crate::git_panel::{segment, segmented};
+use crate::layout::{self, Dock, Layout, Panel};
 use crate::line_edit::{Edit, LineEdit};
 use crate::projects::{Project, Typed};
 use crate::settings::{DiffEngine, DiffMode, FONT_SIZE, PlusOpens, SCROLLBACK, Settings, SplitStyle, UI_ZOOM};
@@ -24,15 +25,17 @@ use crate::workspace::{Workspace, sh_word, tilde};
 enum Cat {
     General,
     Terminal,
+    Layout,
     Notifications,
     Diff,
     Projects,
     Keyboard,
 }
 
-const CATS: [(Cat, &str); 6] = [
+const CATS: [(Cat, &str); 7] = [
     (Cat::General, "General"),
     (Cat::Terminal, "Terminal"),
+    (Cat::Layout, "Layout"),
     (Cat::Notifications, "Notifications"),
     (Cat::Diff, "Diff"),
     (Cat::Projects, "Projects"),
@@ -52,6 +55,9 @@ enum Key {
     DiffMode,
     SplitStyle,
     Engine,
+    Dock(Panel),
+    LeftWidth,
+    RightWidth,
 }
 
 enum Ctl {
@@ -93,7 +99,18 @@ const ITEMS: &[Item] = &[
     Item { key: Key::Engine, cat: Cat::Diff, label: "Engine",
         desc: "Structural: syntax-aware (moved code, reformatting ignored), word diff where it can't. Word: always the word diff.",
         ctl: Ctl::Choice(&["Structural", "Word"]) },
+    Item { key: Key::Dock(Panel::Sessions), cat: Cat::Layout, label: "Sessions",
+        desc: "Which side of the terminal the session list docks on. Also: drag its tab, or right click it.", ctl: DOCKS },
+    Item { key: Key::Dock(Panel::Files), cat: Cat::Layout, label: "Files", desc: "The file tree's dock.", ctl: DOCKS },
+    Item { key: Key::Dock(Panel::Changes), cat: Cat::Layout, label: "Changes", desc: "The git changes' dock.", ctl: DOCKS },
+    Item { key: Key::Dock(Panel::Search), cat: Cat::Layout, label: "Search", desc: "The search results' dock.", ctl: DOCKS },
+    Item { key: Key::LeftWidth, cat: Cat::Layout, label: "Left dock width",
+        desc: "In px at 100 % zoom (100–2000; never narrower than its panels need). Dragging the divider sets it too.", ctl: Ctl::Number },
+    Item { key: Key::RightWidth, cat: Cat::Layout, label: "Right dock width",
+        desc: "In px at 100 % zoom (100–2000; never narrower than its panels need). Dragging the divider sets it too.", ctl: Ctl::Number },
 ];
+
+const DOCKS: Ctl = Ctl::Choice(&["Left", "Right"]);
 
 #[derive(Clone, Copy, PartialEq, Debug)]
 enum Val {
@@ -116,6 +133,9 @@ fn get(s: &Settings, k: Key) -> Val {
         Key::DiffMode => Val::Choice((s.diff_mode == DiffMode::Split) as usize),
         Key::SplitStyle => Val::Choice((s.split_style == SplitStyle::Clean) as usize),
         Key::Engine => Val::Choice((s.diff_engine == DiffEngine::Word) as usize),
+        Key::Dock(p) => Val::Choice(s.layout.dock_of(p).ix()),
+        Key::LeftWidth => Val::Num(s.layout.left_width as f64),
+        Key::RightWidth => Val::Num(s.layout.right_width as f64),
     }
 }
 
@@ -132,6 +152,9 @@ fn set(s: &mut Settings, k: Key, v: Val) {
         (Key::DiffMode, Val::Choice(i)) => s.diff_mode = if i == 1 { DiffMode::Split } else { DiffMode::Unified },
         (Key::SplitStyle, Val::Choice(i)) => s.split_style = if i == 1 { SplitStyle::Clean } else { SplitStyle::Classic },
         (Key::Engine, Val::Choice(i)) => s.diff_engine = if i == 1 { DiffEngine::Word } else { DiffEngine::Auto },
+        (Key::Dock(p), Val::Choice(i)) => s.layout.set_dock(p, if i == 1 { Dock::Right } else { Dock::Left }),
+        (Key::LeftWidth, Val::Num(n)) => s.layout.set_width(Dock::Left, n as u32),
+        (Key::RightWidth, Val::Num(n)) => s.layout.set_width(Dock::Right, n as u32),
         _ => {}
     }
 }
@@ -153,6 +176,9 @@ fn parse_num(k: Key, text: &str) -> Result<f64, String> {
             .ok_or_else(|| format!("Needs a number from {} to {}", FONT_SIZE.0, FONT_SIZE.1)),
         Key::Zoom => t.trim_end_matches('%').trim().parse::<u32>().ok().filter(|n| (UI_ZOOM.0..=UI_ZOOM.1).contains(n)).map(|n| n as f64)
             .ok_or_else(|| format!("Needs a whole number from {} to {}", UI_ZOOM.0, UI_ZOOM.1)),
+        Key::LeftWidth | Key::RightWidth => t.trim_end_matches("px").trim().parse::<u32>().ok()
+            .filter(|n| (layout::WIDTH.0..=layout::WIDTH.1).contains(n)).map(|n| n as f64)
+            .ok_or_else(|| format!("Needs a whole number from {} to {}", layout::WIDTH.0, layout::WIDTH.1)),
         _ => t.parse::<usize>().ok().filter(|n| (SCROLLBACK.0..=SCROLLBACK.1).contains(n)).map(|n| n as f64)
             .ok_or_else(|| format!("Needs a whole number from {} to {}", SCROLLBACK.0, SCROLLBACK.1)),
     }
@@ -171,6 +197,7 @@ enum Field {
 enum Apply {
     Settings(Key, Val),
     Project(PathBuf, Defaults),
+    ResetLayout,
     Close,
 }
 
@@ -430,6 +457,7 @@ fn act(
         None => {}
         Some(Apply::Close) => w.update(cx, |w, cx| w.close_overlay(window, cx)),
         Some(Apply::Settings(k, v)) => w.update(cx, |w, cx| w.change_settings(|s| set(s, k, v), cx)),
+        Some(Apply::ResetLayout) => w.update(cx, |w, cx| w.change_settings(|s| s.layout = Layout::default(), cx)),
         Some(Apply::Project(root, d)) => w.update(cx, |w, cx| {
             let typed = Typed { auto: d.auto, flags: &d.flags, setup: &d.setup, wt_dir: &d.wt_dir };
             w.set_project_defaults(&root, &typed, cx)
@@ -556,6 +584,9 @@ impl Render for SettingsView {
                     for item in self.items_of(c, &q) {
                         rows.push(self.item_row(item, &s, &view, &ws));
                     }
+                    if c == Cat::Layout {
+                        rows.push(Self::reset_layout(s.layout != Layout::default(), &view, &ws));
+                    }
                 }
             }
         }
@@ -615,6 +646,39 @@ impl SettingsView {
             .child(ui::icon(icon::RESTART, 13., if enabled { t.text.muted } else { t.text.faint }))
             .when(enabled, |d| d.cursor_pointer().hover(|s| s.bg(t.bg.hover)).tooltip(tip("Reset to default")))
             .when(!enabled, |d| d.cursor_not_allowed())
+    }
+
+    /// "Reset layout": every panel back to its default dock, both widths to their defaults.
+    fn reset_layout(enabled: bool, view: &WeakEntity<SettingsView>, ws: &WeakEntity<Workspace>) -> gpui::AnyElement {
+        let t = theme::get();
+        let (view, ws) = (view.clone(), ws.clone());
+        div()
+            .pt(z(space::MD))
+            .flex()
+            .child(
+                div()
+                    .id("reset-layout")
+                    .flex()
+                    .items_center()
+                    .gap(z(space::SM))
+                    .px(z(space::MD))
+                    .h(z(height::LIST_ROW + space::XS))
+                    .rounded(z(radius::MD))
+                    .border_1()
+                    .border_color(t.border.subtle)
+                    .text_size(z(text_size::SM))
+                    .text_color(if enabled { t.text.primary } else { t.text.faint })
+                    .child(ui::icon(icon::RESTART, 13., if enabled { t.text.muted } else { t.text.faint }))
+                    .child("Reset layout")
+                    .when(!enabled, |d| d.cursor_not_allowed())
+                    .when(enabled, |d| {
+                        d.cursor_pointer()
+                            .hover(|s| s.bg(t.bg.hover))
+                            .tooltip(tip("Sessions left, the other panels right, default widths"))
+                            .on_click(move |_: &ClickEvent, window, cx| act(&view, &ws, window, cx, |_, _, _, _| Some(Apply::ResetLayout)))
+                    }),
+            )
+            .into_any_element()
     }
 
     fn row_text(label: String, desc: &str, default: String, error: Option<&String>, focused: bool) -> gpui::Div {
@@ -822,7 +886,7 @@ mod tests {
             let other = match (v, &item.ctl) {
                 (Val::Bool(b), _) => Val::Bool(!b),
                 (Val::Choice(i), Ctl::Choice(l)) => Val::Choice((i + 1) % l.len()),
-                (Val::Num(_), _) => Val::Num(match item.key { Key::FontSize => 16., Key::Zoom => 150., _ => 500. }),
+                (Val::Num(_), _) => Val::Num(match item.key { Key::FontSize => 16., Key::Zoom => 150., Key::LeftWidth | Key::RightWidth => 300., _ => 500. }),
                 _ => panic!("{} has a mismatched control", item.label),
             };
             set(&mut s, item.key, other);
@@ -840,6 +904,8 @@ mod tests {
         assert_eq!(parse_num(Key::Scrollback, "0"), Ok(0.));
         assert_eq!(parse_num(Key::Zoom, "120 %"), Ok(120.));
         assert!(parse_num(Key::Zoom, "40").is_err());
+        assert_eq!(parse_num(Key::LeftWidth, "260 px"), Ok(260.));
+        assert!(parse_num(Key::RightWidth, "50").is_err());
     }
 
     #[test]

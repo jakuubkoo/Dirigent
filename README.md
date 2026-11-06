@@ -12,7 +12,7 @@ stay at zero lag and 0 % CPU when idle. Linux (Wayland and X11) for now.
 
 ## Features
 
-- **Sessions:** a sidebar grouped by project, agent states (working / needs you / done) with desktop notifications,
+- **Sessions:** a list grouped by project, agent states (working / needs you / done) with desktop notifications,
   Claude usage limits, sessions restored and resumed after a restart.
 - **Projects:** a fuzzy project picker, pinned projects, and per-project defaults (start claude automatically, its flags).
 - **Worktrees:** give a session its own branch and directory in one dialog; when you close it, keep it or remove it
@@ -20,6 +20,8 @@ stay at zero lag and 0 % CPU when idle. Linux (Wayland and X11) for now.
 - **Git:** changes and diffs (word-level, split, syntax-highlighted, structural with moved code), per-agent change
   tracking, staging per file or hunk, commits with an optional generated message.
 - **Files:** a file tree and a file preview.
+- **Layout:** two docks around the terminal; Sessions, Files, Changes and Search go in either one (drag a tab to the
+  other dock, or right click it). Settings → Layout sets docks and widths, and resets them.
 - **Settings:** a searchable page (Ctrl+,) over `settings.json`; hand edits of the file apply live.
 - **From the terminal:** `dirigent .` opens a session in the running app (single instance).
 
@@ -92,7 +94,7 @@ group.
 | Ctrl+Shift+J | Next session that needs you |
 | Ctrl+Shift+R | Resume all saved Claude sessions |
 | F2 / double click | Rename session |
-| Ctrl+Shift+B | Toggle sidebar |
+| Ctrl+Shift+B | Show / hide Sessions (in whichever dock it lives) |
 | Ctrl+Shift+G / Ctrl+Shift+E | Show Changes / Files |
 | Ctrl+Shift+D | Unified / split diff |
 | Ctrl+Enter | Commit (in the commit box) |

@@ -20,7 +20,8 @@ use crate::files_panel::{Content, FileView, FilesPanel, TreeData};
 use crate::git_panel::{self, DiffView, GitPanel, PanelView, Repos};
 use crate::line_edit::{Edit, LineEdit};
 use crate::notify;
-use crate::persist::{self, PanelTab, State as Saved, TabState, WindowMode, WindowState};
+use crate::layout::{self, Dock, Panel};
+use crate::persist::{self, State as Saved, TabState, WindowMode, WindowState};
 use crate::settings::{self, Settings};
 use crate::window_chrome::{self, Chrome};
 use crate::terminal_element::Metrics;
@@ -36,7 +37,6 @@ actions!(
 
 const DIVIDER: f32 = 4.;
 const COLLAPSED: f32 = 10.;
-const MIN_SIDEBAR: f32 = 180.;
 const RESIZE_DEBOUNCE: Duration = Duration::from_millis(100);
 const SAVE_DEBOUNCE: Duration = Duration::from_millis(500);
 /// The second option of claude's folder trust dialog (2.1.318), answered when we start claude in a new session.
@@ -204,11 +204,22 @@ fn reorder(n: usize, slots: &[usize], from: usize, to: usize) -> Vec<usize> {
     order
 }
 
+/// A dock's divider being dragged.
 #[derive(Clone)]
-struct SidebarDrag;
+struct DockDrag(Dock);
 
+/// A dock's panel tab being dragged to the other dock.
 #[derive(Clone)]
-struct GitPanelDrag;
+struct PanelDrag(Panel);
+
+/// One dock's live state: open, the panel it shows, its width at 100 % (settings.json's value; follows the
+/// pointer during a divider drag, written back on release).
+#[derive(Clone, Copy)]
+struct DockUi {
+    open: bool,
+    active: Panel,
+    width: f32,
+}
 
 struct DragGhost;
 impl Render for DragGhost {
@@ -223,9 +234,10 @@ pub struct Workspace {
     next_id: usize,
     metrics: Metrics,
     focus: FocusHandle,
-    /// Width at 100 % zoom (drawn ×zoom, so the sidebar scales with everything else).
-    sidebar_width: f32,
-    sidebar_open: bool,
+    /// Left and right dock (`Dock::ix`). Widths at 100 % zoom (drawn ×zoom, so docks scale with everything else).
+    docks: [DockUi; 2],
+    /// A panel tab is being dragged: empty or collapsed docks show a drop strip.
+    panel_drag: bool,
     dragging: bool,
     flush_resize: bool,
     applied: Size,
@@ -291,9 +303,6 @@ pub struct Workspace {
     /// Status Arc pointer per repo as of the last re-render: a refresh with an unchanged status re-renders nothing.
     repos_seen: HashMap<PathBuf, usize>,
     git_panel: Entity<GitPanel>,
-    git_open: bool,
-    /// Width at 100 % zoom, like `sidebar_width`.
-    git_width: f32,
     overlay: Option<Overlay>,
     _overlay_task: Option<Task<()>>,
     /// Bumped per overlay read: a stale read sees it changed (a `git diff` is killed) and is dropped.
@@ -310,7 +319,6 @@ pub struct Workspace {
     search_panel: Entity<crate::search_panel::SearchPanel>,
     /// Where the Command Center box was last drawn (its dropdown hangs under it).
     cc_anchor: command_center::Anchor,
-    panel_tab: PanelTab,
     show_ignored: bool,
     /// Directory listings shown by any spawned tab's tree.
     tree_cache: file_tree::Cache,
@@ -384,8 +392,14 @@ impl Workspace {
             active: 0,
             next_id: 1,
             focus: cx.focus_handle(),
-            sidebar_width: saved.sidebar.width.clamp(MIN_SIDEBAR, 2000.),
-            sidebar_open: saved.sidebar.open,
+            docks: {
+                let l = loaded.parsed.settings.layout;
+                [
+                    DockUi { open: saved.sidebar.open, active: saved.sidebar.tab, width: l.left_width as f32 },
+                    DockUi { open: saved.git_panel.open, active: saved.git_panel.tab, width: l.right_width as f32 },
+                ]
+            },
+            panel_drag: false,
             dragging: false,
             flush_resize: false,
             applied: Size { cols: 80, rows: 24, cell_width: 8, cell_height: 16 },
@@ -433,8 +447,6 @@ impl Workspace {
             _repos_task: repos_task,
             repos_seen: HashMap::new(),
             git_panel,
-            git_open: saved.git_panel.open,
-            git_width: saved.git_panel.width.clamp(git_panel::MIN_WIDTH, 2000.),
             overlay: None,
             _overlay_task: None,
             overlay_gen: Arc::new(AtomicU64::new(0)),
@@ -445,7 +457,6 @@ impl Workspace {
             files_panel,
             search_panel,
             cc_anchor: Default::default(),
-            panel_tab: saved.git_panel.tab,
             show_ignored: saved.git_panel.show_ignored,
             tree_cache: Default::default(),
             tree_pending: HashMap::new(),
@@ -700,6 +711,32 @@ impl Workspace {
             .detach();
         }
 
+        if let Ok(spec) = std::env::var("DIRIGENT_PERF_LAYOUT") {
+            // Perf/screenshot harness: `<ms>:<panel>:<dock>[,<panel>:<dock>…]` moves panels (as a tab drop), the
+            // first after `ms` milliseconds, then one per second.
+            let (ms, moves) = spec.split_once(':').unwrap_or(("500", &spec));
+            let ms = ms.parse().unwrap_or(500);
+            fn word<T: serde::de::DeserializeOwned>(w: &str) -> Option<T> {
+                serde_json::from_value(serde_json::Value::String(w.trim().to_string())).ok()
+            }
+            let moves: Vec<(Panel, Dock)> = moves
+                .split(',')
+                .filter_map(|m| m.split_once(':').and_then(|(p, d)| Some((word(p)?, word(d)?))))
+                .collect();
+            cx.spawn_in(window, async move |this, cx| {
+                let mut wait = ms;
+                for (p, d) in moves {
+                    cx.background_executor().timer(Duration::from_millis(wait)).await;
+                    wait = 1000;
+                    eprintln!("[perf] layout move {p:?} → {d:?}");
+                    if this.update(cx, |w, cx| w.move_panel(p, d, cx)).is_err() {
+                        return;
+                    }
+                }
+            })
+            .detach();
+        }
+
         if let Ok(spec) = std::env::var("DIRIGENT_PERF_SETTINGS") {
             // Screenshot harness: `<ms>[:<category or search>]` opens Settings there after `ms` milliseconds.
             let (ms, what) = spec.split_once(':').unwrap_or((&spec, ""));
@@ -797,8 +834,7 @@ impl Workspace {
                             return None;
                         }
                         if started.is_none() {
-                            w.panel_tab = PanelTab::Files;
-                            w.git_open = true;
+                            w.show_panel(Panel::Files, cx);
                             let dirs: Vec<PathBuf> =
                                 dir.ancestors().take_while(|a| a.starts_with(&root) && *a != root).map(Path::to_path_buf).collect();
                             started = Some(Instant::now());
@@ -843,8 +879,8 @@ impl Workspace {
     /// Terminal grid size for the current window and sidebar width.
     fn grid_size(&self, window: &Window) -> Size {
         let vp = window.viewport_size();
-        let side = if self.sidebar_open { z(self.sidebar_width + DIVIDER) } else { z(COLLAPSED) };
-        let right = if self.git_open { z(self.git_width + DIVIDER) } else { z(0.) };
+        let side = z(self.dock_taken(Dock::Left));
+        let right = z(self.dock_taken(Dock::Right));
         let m = &self.metrics;
         let chrome = Chrome::of(window);
         let w = vp.width - side - right - z(PADDING) - chrome.horizontal();
@@ -1636,14 +1672,14 @@ impl Workspace {
                 })
                 .collect(),
             active: self.active.min(self.tabs.len().saturating_sub(1)),
-            sidebar: persist::SidebarState { width: self.sidebar_width, open: self.sidebar_open },
+            sidebar: persist::SidebarState { width: self.docks[0].width, open: self.docks[0].open, tab: self.docks[0].active },
             window: self.window_state,
             last_dir: Some(self.last_dir.clone()),
             collapsed_groups: self.collapsed.iter().cloned().collect(),
             git_panel: persist::PanelState {
-                width: self.git_width,
-                open: self.git_open,
-                tab: self.panel_tab,
+                width: self.docks[1].width,
+                open: self.docks[1].open,
+                tab: self.docks[1].active,
                 show_ignored: self.show_ignored,
             },
             projects: Some(self.projects.0.clone()),
@@ -1790,11 +1826,13 @@ impl Workspace {
         }));
     }
 
+    /// Ctrl+Shift+B / the brand's collapse button: Sessions shown → its dock collapses; else it is shown.
     fn toggle_sidebar(&mut self, cx: &mut Context<Self>) {
-        self.sidebar_open = !self.sidebar_open;
-        self.flush_resize = true;
-        self.mark_dirty(cx);
-        cx.notify();
+        if self.panel_visible(Panel::Sessions) {
+            self.set_dock_open(self.settings.layout.sessions, false, cx);
+        } else {
+            self.show_panel(Panel::Sessions, cx);
+        }
     }
 
 }
@@ -1943,7 +1981,7 @@ impl Workspace {
             Some(Overlay::Diff(d)) => Some(d.read(cx).file.path.clone()),
             _ => None,
         };
-        let narrow = self.git_width < git_panel::LEGEND_WIDTH;
+        let narrow = self.dock_width(self.settings.layout.changes) < git_panel::LEGEND_WIDTH;
         self.git_panel.update(cx, |p, cx| p.set(view, selected, narrow, cx));
         self.sync_files(false, cx);
     }
@@ -2100,6 +2138,13 @@ impl Workspace {
         }
         if (old.diff_mode, old.split_style, old.diff_engine) != (new.diff_mode, new.split_style, new.diff_engine) {
             self.sync_diff_mode(cx);
+        }
+        if old.layout != new.layout {
+            for d in [Dock::Left, Dock::Right] {
+                self.docks[d.ix()].width = new.layout.width(d) as f32;
+            }
+            self.flush_resize = true; // one PTY resize at the next render
+            self.sync_panel(cx); // the Changes legend follows its dock's width
         }
         self.sync_settings_view(cx);
         cx.notify();
@@ -2727,37 +2772,72 @@ impl Workspace {
         }
     }
 
-    /// Ctrl+Shift+G / Ctrl+Shift+E: show that tab (Files also takes focus); again closes the panel.
-    fn show_panel_tab(&mut self, tab: PanelTab, window: &mut Window, cx: &mut Context<Self>) {
+    /// Ctrl+Shift+G / Ctrl+Shift+E: show that panel in whichever dock holds it (Files also takes focus); again
+    /// collapses that dock.
+    fn show_panel_tab(&mut self, tab: Panel, window: &mut Window, cx: &mut Context<Self>) {
         let files_focused = self.files_panel.focus_handle(cx).is_focused(window);
-        let shown = self.git_open && self.panel_tab == tab;
-        if shown && (tab == PanelTab::Changes || files_focused) {
-            self.git_open = false;
-            self.flush_resize = true;
+        if self.panel_visible(tab) && (tab != Panel::Files || files_focused) {
+            self.set_dock_open(self.settings.layout.dock_of(tab), false, cx);
             self.focus_main(window, cx);
         } else {
-            if !self.git_open {
-                self.git_open = true;
-                self.flush_resize = true;
-            }
-            self.panel_tab = tab;
-            if tab == PanelTab::Files {
+            self.show_panel(tab, cx);
+            if tab == Panel::Files {
                 let f = self.files_panel.focus_handle(cx);
                 window.focus(&f, cx);
             }
         }
-        self.mark_dirty(cx);
-        cx.notify();
     }
 
-    /// Shows the right panel on `tab` (never hides it).
-    fn reveal_panel_tab(&mut self, tab: PanelTab, cx: &mut Context<Self>) {
-        if !self.git_open {
-            self.git_open = true;
+    /// Shows `tab` in its dock (never hides it).
+    fn reveal_panel_tab(&mut self, tab: Panel, cx: &mut Context<Self>) {
+        self.show_panel(tab, cx);
+    }
+
+    /// Opens `p`'s dock on it.
+    fn show_panel(&mut self, p: Panel, cx: &mut Context<Self>) {
+        let d = self.settings.layout.dock_of(p);
+        self.set_dock_open(d, true, cx);
+        self.set_panel_tab(p, cx);
+    }
+
+    fn set_dock_open(&mut self, d: Dock, open: bool, cx: &mut Context<Self>) {
+        if self.docks[d.ix()].open != open {
+            self.docks[d.ix()].open = open;
             self.flush_resize = true;
+            self.mark_dirty(cx);
+            cx.notify();
         }
-        self.set_panel_tab(tab, cx);
-        self.mark_dirty(cx);
+    }
+
+    /// The panel's dock is open and shows it.
+    fn panel_visible(&self, p: Panel) -> bool {
+        let d = self.settings.layout.dock_of(p);
+        self.docks[d.ix()].open && self.dock_shown(d) == Some(p)
+    }
+
+    /// What dock `d` shows (None: no panel lives there).
+    fn dock_shown(&self, d: Dock) -> Option<Panel> {
+        self.settings.layout.shown(d, self.docks[d.ix()].active)
+    }
+
+    /// Drawn width at 100 %: the live width, never under its panels' minimum.
+    fn dock_width(&self, d: Dock) -> f32 {
+        self.docks[d.ix()].width.max(self.settings.layout.min_width(d))
+    }
+
+    /// Width the dock takes beside the terminal (at 100 %).
+    fn dock_taken(&self, d: Dock) -> f32 {
+        let u = self.docks[d.ix()];
+        self.settings.layout.taken(d, u.open, u.width, DIVIDER, COLLAPSED)
+    }
+
+    /// A tab dragged (or "Move to … dock") to `to`: saved in settings.json, shown there. One relayout, one PTY resize.
+    pub(super) fn move_panel(&mut self, p: Panel, to: Dock, cx: &mut Context<Self>) {
+        self.panel_drag = false;
+        if self.settings.layout.dock_of(p) != to {
+            self.change_settings(|s| s.layout.set_dock(p, to), cx);
+        }
+        self.show_panel(p, cx);
         cx.notify();
     }
 
@@ -2769,9 +2849,10 @@ impl Workspace {
         }
     }
 
-    fn set_panel_tab(&mut self, tab: PanelTab, cx: &mut Context<Self>) {
-        if self.panel_tab != tab {
-            self.panel_tab = tab;
+    fn set_panel_tab(&mut self, tab: Panel, cx: &mut Context<Self>) {
+        let d = self.settings.layout.dock_of(tab);
+        if self.docks[d.ix()].active != tab {
+            self.docks[d.ix()].active = tab;
             self.mark_dirty(cx);
             cx.notify();
         }
@@ -2779,10 +2860,22 @@ impl Workspace {
 }
 
 impl Workspace {
+    /// Mouse up: a divider drag ends (one PTY resize, the width saved), a panel drag that hit no dock is dropped.
     fn end_drag(&mut self, cx: &mut Context<Self>) {
+        if std::mem::take(&mut self.panel_drag) {
+            cx.notify();
+        }
         if self.dragging {
             self.dragging = false;
             self.flush_resize = true;
+            let widths = self.docks.map(|d| d.width.round() as u32);
+            self.change_settings(
+                |s| {
+                    s.layout.left_width = widths[0].clamp(layout::WIDTH.0, layout::WIDTH.1);
+                    s.layout.right_width = widths[1].clamp(layout::WIDTH.0, layout::WIDTH.1);
+                },
+                cx,
+            );
             self.mark_dirty(cx);
             cx.notify();
         }
