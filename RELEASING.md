@@ -24,8 +24,15 @@ The same run attaches `dirigent_X.Y.Z_amd64.deb` to the release. It then rebuild
 Pages from the `.deb`s of the last 5 releases and signs it with the repository key. Re-running the workflow by hand
 (Actions → Release → Run workflow) only rebuilds and redeploys the repository.
 
-A pushed tag is never moved or deleted. If a release turns out broken, fix it on `main` and release the next patch
-version.
+A tag from which a release was published is never moved or deleted. If that release turns out broken, fix it on
+`main` and release the next patch version. A tag whose Release workflow failed before publishing anything (no GitHub
+Release, no APT repository deploy) may be deleted and pushed again once the cause is fixed, for example a tag pushed
+before the version bump was merged:
+
+```sh
+gh release view vX.Y.Z                  # must say "release not found"
+git push origin :refs/tags/vX.Y.Z && git tag -d vX.Y.Z
+```
 
 ## APT repository key
 

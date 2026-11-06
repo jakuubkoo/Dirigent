@@ -1088,7 +1088,7 @@ dependencies = [
 
 [[package]]
 name = "dirigent"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "async-channel",
  "git",
@@ -1716,7 +1716,7 @@ checksum = "1033caf0b349c518623b5396bfb2cf0bddf44f0306d543a250e5743297aafd10"
 
 [[package]]
 name = "git"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "ignore",
  "imara-diff",
@@ -2255,7 +2255,7 @@ dependencies = [
 
 [[package]]
 name = "hook"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "serde",
  "serde_json",
@@ -4671,7 +4671,7 @@ dependencies = [
 
 [[package]]
 name = "session"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "alacritty_terminal",
  "async-channel",
@@ -4994,7 +4994,7 @@ dependencies = [
 
 [[package]]
 name = "syntax"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "imara-diff",
  "tree-sitter",
