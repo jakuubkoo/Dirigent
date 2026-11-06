@@ -1,0 +1,7 @@
+remote: 
+remote: View merge request for dirigent/mr-test:        
+remote:   https://gitlab.jakuubkoo.me/jakuubkoo/testingprojectlol/-/merge_requests/1        
+remote: 
+To https://gitlab.jakuubkoo.me/jakuubkoo/testingprojectlol.git
+ * [new branch]      HEAD -> dirigent/mr-test
+branch 'dirigent/mr-test' set up to track 'origin/dirigent/mr-test'.

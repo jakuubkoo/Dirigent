@@ -4,6 +4,7 @@
 mod fs;
 pub mod index;
 pub mod layout;
+pub mod remote;
 pub mod search;
 pub mod text;
 mod watch;
@@ -107,6 +108,10 @@ pub fn discover(dir: &Path) -> Discovery {
 pub struct Status {
     /// Branch name, or `(detached abc1234)`.
     pub branch: String,
+    /// The branch's upstream (`origin/main`); None when it has none.
+    pub upstream: Option<String>,
+    /// (ahead, behind) vs the upstream; None without one or when the upstream ref is gone.
+    pub ab: Option<(u32, u32)>,
     pub files: Vec<FileChange>,
     /// Changed files beyond `MAX_FILES` (not listed, not counted in the line totals).
     pub more: usize,
@@ -192,6 +197,11 @@ fn parse_status(out: &[u8]) -> (Status, bool) {
             match h.split_once(' ') {
                 Some(("oid", v)) => oid = v.to_string(),
                 Some(("head", v)) => head = v.to_string(),
+                Some(("upstream", v)) => st.upstream = Some(v.to_string()),
+                Some(("ab", v)) => {
+                    let mut it = v.split(' ').map(|n| n.trim_start_matches(['+', '-']).parse::<u32>().unwrap_or(0));
+                    st.ab = Some((it.next().unwrap_or(0), it.next().unwrap_or(0)));
+                }
                 _ => {}
             }
             continue;
@@ -427,6 +437,18 @@ mod tests {
         assert_eq!(st.files.len(), 1);
         let (st, _) = parse_status(b"# branch.oid deadbeefcafe\0# branch.head (detached)\0");
         assert_eq!(st.branch, "(detached deadbee)");
+        assert_eq!((st.upstream, st.ab), (None, None));
+    }
+
+    #[test]
+    fn upstream_ahead_behind() {
+        let (st, _) =
+            parse_status(b"# branch.oid abc\0# branch.head main\0# branch.upstream origin/main\0# branch.ab +2 -13\0");
+        assert_eq!(st.upstream.as_deref(), Some("origin/main"));
+        assert_eq!(st.ab, Some((2, 13)));
+        // Upstream configured but its ref is gone (deleted on the remote and pruned): no `branch.ab` line.
+        let (st, _) = parse_status(b"# branch.oid abc\0# branch.head f\0# branch.upstream origin/f\0");
+        assert_eq!((st.upstream.as_deref(), st.ab), (Some("origin/f"), None));
     }
 
     #[test]

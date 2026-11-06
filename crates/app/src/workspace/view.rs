@@ -113,6 +113,11 @@ impl Render for Workspace {
             .on_action(cx.listener(|w, _: &QuickOpen, window, cx| w.open_cc("", window, cx)))
             .on_action(cx.listener(|w, _: &CommandPalette, window, cx| w.open_cc(">", window, cx)))
             .on_action(cx.listener(|w, _: &FindInFiles, window, cx| w.open_cc("#", window, cx)))
+            .on_action(cx.listener(|w, _: &GitSync, _, cx| w.git_active(crate::git_ops::Job::Sync, cx)))
+            .on_action(cx.listener(|w, _: &GitFetch, _, cx| w.git_active(crate::git_ops::Job::Fetch, cx)))
+            .on_action(cx.listener(|w, _: &GitPull, _, cx| w.git_active(crate::git_ops::Job::Pull, cx)))
+            .on_action(cx.listener(|w, _: &GitPush, _, cx| w.git_active(crate::git_ops::Job::Push, cx)))
+            .on_action(cx.listener(|w, _: &SwitchBranch, window, cx| w.open_branches(window, cx)))
             .on_action(cx.listener(|w, _: &Activate1, window, cx| w.activate_nth(0, window, cx)))
             .on_action(cx.listener(|w, _: &Activate2, window, cx| w.activate_nth(1, window, cx)))
             .on_action(cx.listener(|w, _: &Activate3, window, cx| w.activate_nth(2, window, cx)))
@@ -903,7 +908,7 @@ impl Workspace {
         };
         let needs = self.needs_you_count();
         let branch = match self.tabs.get(self.active).map(|t| &t.repo) {
-            Some(TabRepo::Repo(root)) => self.repos.status(root).map(|s| s.branch.clone()),
+            Some(TabRepo::Repo(root)) => self.repos.status(root).map(|s| (s.branch.clone(), s.ab)),
             _ => None,
         };
         let n = self.tabs.len();
@@ -941,14 +946,20 @@ impl Workspace {
                         })),
                 )
             })
-            .children(branch.map(|b| {
+            .children(branch.map(|(b, ab)| {
                 div()
+                    .id("status-branch")
                     .flex()
                     .items_center()
                     .gap(z(space::XS))
                     .text_color(t.text.muted)
+                    .cursor_pointer()
+                    .hover(|s| s.text_color(t.text.primary))
                     .child(ui::icon(icon::BRANCH, 11., t.text.dim))
                     .child(b)
+                    .children(ab.map(ui::ahead_behind).filter(|s| !s.is_empty()))
+                    .tooltip(tip("Switch or create a branch (Ctrl+Shift+O)"))
+                    .on_click(cx.listener(|w, _: &ClickEvent, window, cx| w.open_branches(window, cx)))
             }))
             .child(div().text_color(t.text.dim).child(format!("{n} session{}", if n == 1 { "" } else { "s" })))
             .when(needs > 0, |d| {
@@ -1151,6 +1162,7 @@ impl Workspace {
             Some(Modal::Setup(s)) => Some(scrim().child(self.setup_view(s, cx)).into_any_element()),
             Some(Modal::CloseWorktree(c)) => Some(scrim().child(self.close_wt_view(c, cx)).into_any_element()),
             Some(Modal::Worktrees(l)) => Some(scrim().child(self.worktrees_view(l, cx)).into_any_element()),
+            Some(Modal::Branches(b)) => Some(scrim().child(self.branches_view(b, window, cx)).into_any_element()),
             _ => None,
         }
     }

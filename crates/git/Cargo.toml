@@ -12,3 +12,5 @@ imara-diff = "=0.2.0"
 # Content search; both already in the dependency graph (via ignore).
 regex = "1"
 memchr = "2"
+# setsid/kill for network commands (already in the graph).
+libc = "0.2"

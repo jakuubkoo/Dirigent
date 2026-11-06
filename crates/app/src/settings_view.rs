@@ -16,7 +16,9 @@ use crate::git_panel::{segment, segmented};
 use crate::layout::{self, Dock, Layout, Panel};
 use crate::line_edit::{Edit, LineEdit};
 use crate::projects::{Project, Typed};
-use crate::settings::{DiffEngine, DiffMode, FONT_SIZE, PlusOpens, SCROLLBACK, Settings, SplitStyle, UI_ZOOM};
+use crate::settings::{
+    DiffEngine, DiffMode, FETCH_MINUTES, FONT_SIZE, PlusOpens, SCROLLBACK, Settings, SplitStyle, UI_ZOOM,
+};
 use crate::theme::{self, height, radius, space, text_size, z};
 use crate::ui::{self, icon, tip};
 use crate::workspace::{Workspace, sh_word, tilde};
@@ -28,16 +30,18 @@ enum Cat {
     Layout,
     Notifications,
     Diff,
+    Git,
     Projects,
     Keyboard,
 }
 
-const CATS: [(Cat, &str); 7] = [
+const CATS: [(Cat, &str); 8] = [
     (Cat::General, "General"),
     (Cat::Terminal, "Terminal"),
     (Cat::Layout, "Layout"),
     (Cat::Notifications, "Notifications"),
     (Cat::Diff, "Diff"),
+    (Cat::Git, "Git"),
     (Cat::Projects, "Projects"),
     (Cat::Keyboard, "Keyboard"),
 ];
@@ -58,6 +62,7 @@ enum Key {
     Dock(Panel),
     LeftWidth,
     RightWidth,
+    FetchMinutes,
 }
 
 enum Ctl {
@@ -154,6 +159,13 @@ const ITEMS: &[Item] = &[
         ctl: Ctl::Choice(&["Structural", "Word"]),
     },
     Item {
+        key: Key::FetchMinutes,
+        cat: Cat::Git,
+        label: "Fetch in the background (minutes)",
+        desc: "Fetches every open repo this often, so ahead/behind and PR status stay current. 0 = off (fetch with Sync or … → Fetch).",
+        ctl: Ctl::Number,
+    },
+    Item {
         key: Key::Dock(Panel::Sessions),
         cat: Cat::Layout,
         label: "Sessions",
@@ -221,6 +233,7 @@ fn get(s: &Settings, k: Key) -> Val {
         Key::Dock(p) => Val::Choice(s.layout.dock_of(p).ix()),
         Key::LeftWidth => Val::Num(s.layout.left_width as f64),
         Key::RightWidth => Val::Num(s.layout.right_width as f64),
+        Key::FetchMinutes => Val::Num(s.fetch_minutes as f64),
     }
 }
 
@@ -244,6 +257,7 @@ fn set(s: &mut Settings, k: Key, v: Val) {
         (Key::Dock(p), Val::Choice(i)) => s.layout.set_dock(p, if i == 1 { Dock::Right } else { Dock::Left }),
         (Key::LeftWidth, Val::Num(n)) => s.layout.set_width(Dock::Left, n as u32),
         (Key::RightWidth, Val::Num(n)) => s.layout.set_width(Dock::Right, n as u32),
+        (Key::FetchMinutes, Val::Num(n)) => s.fetch_minutes = n as u32,
         _ => {}
     }
 }
@@ -255,6 +269,11 @@ fn show(item: &Item, v: Val) -> String {
         (Val::Num(n), _) => format!("{n}"),
         _ => String::new(),
     }
+}
+
+/// Whether `k` is edited by typing: every number field (a key list here once missed the dock widths).
+fn typed(k: Key) -> bool {
+    ITEMS.iter().any(|i| i.key == k && matches!(i.ctl, Ctl::Number))
 }
 
 /// A typed number for `k`, or what's wrong with it.
@@ -275,6 +294,14 @@ fn parse_num(k: Key, text: &str) -> Result<f64, String> {
             .filter(|n| (UI_ZOOM.0..=UI_ZOOM.1).contains(n))
             .map(|n| n as f64)
             .ok_or_else(|| format!("Needs a whole number from {} to {}", UI_ZOOM.0, UI_ZOOM.1)),
+        Key::FetchMinutes => t
+            .trim_end_matches("min")
+            .trim()
+            .parse::<u32>()
+            .ok()
+            .filter(|n| (FETCH_MINUTES.0..=FETCH_MINUTES.1).contains(n))
+            .map(|n| n as f64)
+            .ok_or_else(|| format!("Needs a whole number from {} to {} (0 = off)", FETCH_MINUTES.0, FETCH_MINUTES.1)),
         Key::LeftWidth | Key::RightWidth => t
             .trim_end_matches("px")
             .trim()
@@ -445,7 +472,7 @@ impl SettingsView {
     fn focus_field(&mut self, f: Field, s: &Settings, projects: &[Project]) -> Option<Apply> {
         let apply = self.commit(s, projects);
         self.edit = match &f {
-            Field::Item(k @ (Key::Zoom | Key::FontSize | Key::Scrollback)) => {
+            Field::Item(k) if typed(*k) => {
                 let item = ITEMS.iter().find(|i| i.key == *k)?;
                 Some(LineEdit::new(show(item, get(s, *k))))
             }
@@ -571,7 +598,7 @@ fn act(
     let Some(w) = ws.upgrade() else { return };
     let (s, projects) = {
         let w = w.read(cx);
-        (w.settings, w.projects.0.clone())
+        (w.settings.clone(), w.projects.0.clone())
     };
     let Ok(apply) = view.update(cx, |v, cx| {
         cx.notify();
@@ -597,7 +624,7 @@ impl Render for SettingsView {
         let Some(w) = self.workspace.upgrade() else { return div().into_any_element() };
         let (s, notes, file, projects) = {
             let w = w.read(cx);
-            (w.settings, w.settings_notes.clone(), w.settings_path.clone(), w.projects.0.clone())
+            (w.settings.clone(), w.settings_notes.clone(), w.settings_path.clone(), w.projects.0.clone())
         };
         let (view, ws) = (cx.entity().downgrade(), self.workspace.clone());
         let q = self.query();
@@ -919,7 +946,7 @@ impl SettingsView {
                     .when(focused, |d| d.border_color(t.accent))
                     .children(labels.iter().enumerate().map(|(i, l)| {
                         let (view, ws, k) = (view.clone(), ws.clone(), item.key);
-                        segment(l, l, i == cur, true).on_click(move |_: &ClickEvent, window, cx| {
+                        segment(l, *l, i == cur, true).on_click(move |_: &ClickEvent, window, cx| {
                             act(&view, &ws, window, cx, |v, s, p, _| {
                                 v.focus_field(Field::Item(k), s, p);
                                 Some(Apply::Settings(k, Val::Choice(i)))
@@ -1113,7 +1140,7 @@ mod tests {
     #[test]
     fn every_item_round_trips_and_resets() {
         let d = Settings::default();
-        let mut s = d;
+        let mut s = d.clone();
         for item in ITEMS {
             let v = get(&d, item.key);
             let other = match (v, &item.ctl) {
@@ -1123,6 +1150,7 @@ mod tests {
                     Key::FontSize => 16.,
                     Key::Zoom => 150.,
                     Key::LeftWidth | Key::RightWidth => 300.,
+                    Key::FetchMinutes => 15.,
                     _ => 500.,
                 }),
                 _ => panic!("{} has a mismatched control", item.label),
@@ -1136,6 +1164,10 @@ mod tests {
 
     #[test]
     fn typed_numbers_are_checked() {
+        for k in [Key::Zoom, Key::FontSize, Key::Scrollback, Key::LeftWidth, Key::RightWidth, Key::FetchMinutes] {
+            assert!(typed(k), "{k:?} can't be typed into");
+        }
+        assert!(!typed(Key::Trust));
         assert_eq!(parse_num(Key::FontSize, " 15.5 "), Ok(15.5));
         assert!(parse_num(Key::FontSize, "40").is_err());
         assert!(parse_num(Key::Scrollback, "1.5").is_err());

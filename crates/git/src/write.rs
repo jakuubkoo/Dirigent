@@ -18,6 +18,10 @@ pub enum GitError {
     /// git failed: its combined output (hook output for a failed commit).
     Failed(String),
     Io(std::io::Error),
+    /// The user stopped a network command.
+    Cancelled,
+    /// The branch and its upstream diverged: a fast-forward isn't possible.
+    NotFastForward,
 }
 
 impl std::fmt::Display for GitError {
@@ -26,6 +30,10 @@ impl std::fmt::Display for GitError {
             GitError::IndexLocked => f.write_str("Another git process holds the index (index.lock)"),
             GitError::Failed(out) => f.write_str(out.trim()),
             GitError::Io(e) => write!(f, "{e}"),
+            GitError::Cancelled => f.write_str("Cancelled"),
+            GitError::NotFastForward => f.write_str(
+                "Can't fast-forward: this branch and its upstream both have new commits. Merge or rebase in a terminal.",
+            ),
         }
     }
 }
@@ -34,7 +42,7 @@ type Result<T> = std::result::Result<T, GitError>;
 
 /// git for writes: the user's config applies (author, signing, hooks); no `--no-optional-locks` (writes take
 /// locks anyway); output captured for errors.
-fn run(root: &Path, args: &[&str], stdin: Option<&[u8]>) -> Result<String> {
+pub(crate) fn run(root: &Path, args: &[&str], stdin: Option<&[u8]>) -> Result<String> {
     let mut c = Command::new("git");
     c.args(args)
         .current_dir(root)
@@ -416,6 +424,69 @@ pub fn branches(root: &Path) -> Result<(String, Vec<String>)> {
     let current = run(root, &["branch", "--show-current"], None).unwrap_or_default().trim().to_string();
     let list = run(root, &["for-each-ref", "--sort=-committerdate", "--format=%(refname:short)", "refs/heads"], None)?;
     Ok((current, list.lines().map(str::to_string).collect()))
+}
+
+/// A branch for the switcher.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Branch {
+    /// Short name: `feat/x` (local) or `origin/feat/x` (remote).
+    pub name: String,
+    pub remote: bool,
+    pub current: bool,
+    /// Local branches: the upstream (`origin/feat/x`).
+    pub upstream: Option<String>,
+    /// (ahead, behind) vs the upstream; None without one or when it's gone.
+    pub ab: Option<(u32, u32)>,
+}
+
+/// Local branches (most recently committed first) with upstream and ahead/behind, then remote branches that have
+/// no local branch of the same name. One `for-each-ref`.
+pub fn branches_full(root: &Path) -> Result<Vec<Branch>> {
+    let fmt = "--format=%(HEAD)%00%(refname)%00%(refname:short)%00%(upstream:short)%00%(upstream:track,nobracket)%00%(symref)";
+    let out = run(root, &["for-each-ref", "--sort=-committerdate", fmt, "refs/heads", "refs/remotes"], None)?;
+    let (mut local, mut remote) = (Vec::new(), Vec::new());
+    for line in out.lines() {
+        let f: Vec<&str> = line.split('\0').collect();
+        let [head, full, short, up, track, symref] = f[..] else { continue };
+        if !symref.is_empty() {
+            continue; // origin/HEAD
+        }
+        let ab = (!up.is_empty() && track != "gone").then(|| {
+            let n = |k: &str| {
+                track.split(", ").find_map(|p| p.strip_prefix(k)).and_then(|v| v.trim().parse().ok()).unwrap_or(0)
+            };
+            (n("ahead "), n("behind "))
+        });
+        let b = Branch {
+            name: short.to_string(),
+            remote: full.starts_with("refs/remotes/"),
+            current: head == "*",
+            upstream: (!up.is_empty()).then(|| up.to_string()),
+            ab,
+        };
+        if b.remote { remote.push(b) } else { local.push(b) }
+    }
+    remote.retain(|r: &Branch| {
+        let local_name = r.name.split_once('/').map_or(r.name.as_str(), |(_, n)| n);
+        !local.iter().any(|l: &Branch| l.name == local_name || l.upstream.as_deref() == Some(&r.name))
+    });
+    local.extend(remote);
+    Ok(local)
+}
+
+/// `git switch <branch>`. Local changes that would be overwritten → git refuses, nothing changes.
+pub fn switch(root: &Path, branch: &str) -> Result<()> {
+    run(root, &["switch", branch], None).map(drop)
+}
+
+/// `git switch --track <remote>/<b>`: a local branch tracking the remote one, checked out.
+pub fn switch_remote(root: &Path, remote_branch: &str) -> Result<()> {
+    run(root, &["switch", "--track", remote_branch], None).map(drop)
+}
+
+/// `git switch -c <name>`: a new branch from HEAD (uncommitted changes come along).
+pub fn create_branch(root: &Path, name: &str) -> Result<()> {
+    run(root, &["switch", "-c", name], None).map(drop)
 }
 
 /// Whether `name` is a valid new branch name (`git check-ref-format --branch`).

@@ -63,10 +63,13 @@ pub(super) enum MenuKind {
     Terminal(usize),
     /// Right click on a dock's panel tab.
     Panel(crate::layout::Panel),
+    /// The Changes panel's ⋯ and Commit ▾ (root = the repo).
+    Git(GitMenu),
 }
 
 /// (action, label, one-line explanation)
-type Item = (&'static str, &'static str, &'static str);
+/// (action, label, one-line explanation); the label can be built ("Switch to main and pull").
+pub(super) type Item = (&'static str, SharedString, &'static str);
 
 /// Up/Down over `n` items from `sel`, wrapping; nothing selected yet: Down takes the first, Up the last.
 fn menu_step(sel: Option<usize>, n: usize, down: bool) -> Option<usize> {
@@ -334,26 +337,26 @@ impl Workspace {
     fn menu_items(&self, menu: &Menu, cx: &gpui::App) -> Vec<Item> {
         match menu.kind {
             MenuKind::New => vec![
-                ("setup", "New session…", "Name it, or give it its own git worktree"),
-                ("new", "New session", ""),
-                ("claude", "New session with claude", ""),
+                ("setup", "New session…".into(), "Name it, or give it its own git worktree"),
+                ("new", "New session".into(), ""),
+                ("claude", "New session with claude".into(), ""),
             ],
             MenuKind::Project => {
                 let pinned = self.projects.get(&menu.root).is_some_and(|p| p.pinned);
                 let mut v = vec![
                     if pinned {
-                        ("pin", "Unpin", "The group disappears when its last session closes")
+                        ("pin", "Unpin".into(), "The group disappears when its last session closes")
                     } else {
-                        ("pin", "Pin to sidebar", "Keep this group in the sidebar even with no sessions")
+                        ("pin", "Pin to sidebar".into(), "Keep this group in the sidebar even with no sessions")
                     },
-                    ("rename", "Rename…", "The name shown in the sidebar and the picker"),
-                    ("defaults", "Defaults…", "Start claude, its flags, worktree setup command and location"),
-                    ("worktrees", "Worktrees…", "List, open or clean up this repo's git worktrees"),
+                    ("rename", "Rename…".into(), "The name shown in the sidebar and the picker"),
+                    ("defaults", "Defaults…".into(), "Start claude, its flags, worktree setup command and location"),
+                    ("worktrees", "Worktrees…".into(), "List, open or clean up this repo's git worktrees"),
                 ];
                 if self.projects.get(&menu.root).is_some() {
                     v.push((
                         "remove",
-                        "Remove from recent projects",
+                        "Remove from recent projects".into(),
                         "Forget it in the picker; files and open sessions stay",
                     ));
                 }
@@ -363,15 +366,16 @@ impl Workspace {
                 let view = self.tab_idx(id).and_then(|i| self.tabs[i].view.as_ref());
                 let mut v = Vec::new();
                 if view.is_some_and(|v| v.read(cx).has_selection()) {
-                    v.push(("copy", "Copy", "Ctrl+Shift+C"));
+                    v.push(("copy", "Copy".into(), "Ctrl+Shift+C"));
                 }
-                v.push(("paste", "Paste", "Ctrl+Shift+V"));
-                v.push(("select_all", "Select all", ""));
+                v.push(("paste", "Paste".into(), "Ctrl+Shift+V"));
+                v.push(("select_all", "Select all".into(), ""));
                 v
             }
+            MenuKind::Git(kind) => self.git_menu_items(&menu.root, kind, cx),
             MenuKind::Panel(p) => vec![match self.settings.layout.dock_of(p) {
-                crate::layout::Dock::Left => ("move", "Move to right dock", ""),
-                crate::layout::Dock::Right => ("move", "Move to left dock", ""),
+                crate::layout::Dock::Left => ("move", "Move to right dock".into(), ""),
+                crate::layout::Dock::Right => ("move", "Move to left dock".into(), ""),
             }],
             MenuKind::Session(id) => {
                 let Some(i) = self.tab_idx(id) else { return Vec::new() };
@@ -380,21 +384,29 @@ impl Workspace {
                 let resumable = t.claude_session.is_some() && (exited || self.agent(i).state == agent::State::NoAgent);
                 let files = !self.tracker.view(id as u32).touched.is_empty();
                 let mut v = vec![
-                    ("rename", "Rename", ""),
-                    ("close", "Close session", ""),
-                    ("restart", "Restart shell", ""),
-                    ("duplicate", "Duplicate", "A new session in the same directory, with the project's defaults"),
+                    ("rename", "Rename".into(), ""),
+                    ("close", "Close session".into(), ""),
+                    ("restart", "Restart shell".into(), ""),
+                    (
+                        "duplicate",
+                        "Duplicate".into(),
+                        "A new session in the same directory, with the project's defaults",
+                    ),
                 ];
                 if resumable {
-                    v.push(("resume", "Resume Claude session", ""));
+                    v.push(("resume", "Resume Claude session".into(), ""));
                 }
                 if self.has_unread(i, cx) {
-                    v.push(("read", "Mark as read", ""));
+                    v.push(("read", "Mark as read".into(), ""));
                 }
-                v.push(("copy", "Copy path", ""));
-                v.push(("open", "Open folder in file manager", ""));
+                v.push(("copy", "Copy path".into(), ""));
+                v.push(("open", "Open folder in file manager".into(), ""));
                 if files {
-                    v.push(("forget", "Forget agent's files", "Clears this agent's file list; no file is touched"));
+                    v.push((
+                        "forget",
+                        "Forget agent's files".into(),
+                        "Clears this agent's file list; no file is touched",
+                    ));
                 }
                 v
             }
@@ -437,6 +449,10 @@ impl Workspace {
                     _ => {}
                 });
             }
+            return cx.notify();
+        }
+        if let MenuKind::Git(_) = menu.kind {
+            self.git_menu_action(root, action, window, cx);
             return cx.notify();
         }
         if let MenuKind::Panel(p) = menu.kind {

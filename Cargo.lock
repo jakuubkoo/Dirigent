@@ -1720,6 +1720,7 @@ version = "0.1.1"
 dependencies = [
  "ignore",
  "imara-diff",
+ "libc",
  "memchr",
  "notify",
  "regex",

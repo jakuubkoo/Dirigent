@@ -139,3 +139,39 @@ fn unborn_head() {
     assert_eq!(diff.lines.iter().filter(|l| l.kind == git::LineKind::Add).count(), 2);
     let _ = std::fs::remove_dir_all(&d);
 }
+
+#[test]
+fn fetch_updates_ahead_behind() {
+    // A bare "remote", a clone we watch, and a second clone that pushes a commit the first one then fetches.
+    let base = repo("fetch-src");
+    let bare = base.with_extension("bare");
+    let _ = std::fs::remove_dir_all(&bare);
+    sh_git(&base, &["clone", "-q", "--bare", ".", bare.to_str().unwrap()]);
+    let mine = base.with_extension("mine");
+    let other = base.with_extension("other");
+    for d in [&mine, &other] {
+        let _ = std::fs::remove_dir_all(d);
+        sh_git(&base, &["clone", "-q", bare.to_str().unwrap(), d.to_str().unwrap()]);
+    }
+    let Discovery::Repo(r) = git::discover(&mine) else { panic!("not discovered") };
+    let (tx, rx) = mpsc::channel();
+    let w = Watcher::start(r, move |u| {
+        if u.status_changed {
+            let _ = tx.send(());
+        }
+    })
+    .unwrap();
+    let st = next(&rx, &w);
+    assert_eq!((st.upstream.as_deref(), st.ab), (Some("origin/main"), Some((0, 0))));
+
+    std::fs::write(other.join("b.txt"), "b\n").unwrap();
+    sh_git(&other, &["add", "."]);
+    sh_git(&other, &["commit", "-q", "-m", "b"]);
+    sh_git(&other, &["push", "-q"]);
+    sh_git(&mine, &["fetch", "-q"]);
+    let st = next(&rx, &w);
+    assert_eq!(st.ab, Some((0, 1)), "fetch moved refs/remotes: behind 1");
+    for d in [&base, &bare, &mine, &other] {
+        let _ = std::fs::remove_dir_all(d);
+    }
+}

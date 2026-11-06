@@ -16,7 +16,8 @@ macro_rules! shortcuts {
 
         /// The Command Center's `>` list: every labelled entry once (the first keys of a label), with its action.
         pub fn commands() -> Vec<(&'static str, &'static str, Box<dyn gpui::Action>)> {
-            let all: Vec<(&'static str, &'static str, Box<dyn gpui::Action>)> = vec![$(($keys, $label, Box::new($action))),*];
+            let mut all: Vec<(&'static str, &'static str, Box<dyn gpui::Action>)> = vec![$(($keys, $label, Box::new($action))),*];
+            all.extend(command_only());
             let mut seen = std::collections::HashSet::new();
             all.into_iter().filter(|(_, l, _)| !l.is_empty() && seen.insert(*l)).collect()
         }
@@ -36,6 +37,7 @@ shortcuts![
     ("ctrl-shift-g", ShowChanges, "Show Changes"),
     ("ctrl-shift-e", ShowFiles, "Show Files"),
     ("ctrl-shift-d", ToggleDiffMode, "Unified / split diff"),
+    ("ctrl-shift-o", SwitchBranch, "Switch or create a branch"),
     ("ctrl-,", OpenSettings, "Settings"),
     ("ctrl-p", QuickOpen, "Go to file (Command Center)"),
     ("ctrl-shift-p", CommandPalette, "Run a command (Command Center, >)"),
@@ -58,6 +60,16 @@ shortcuts![
     ("ctrl-8", Activate8, ""),
     ("ctrl-9", Activate9, ""),
 ];
+
+/// Commands without a shortcut (Command Center `>` only).
+fn command_only() -> Vec<(&'static str, &'static str, Box<dyn gpui::Action>)> {
+    vec![
+        ("", "Git: Sync (fetch, then fast-forward, push or publish)", Box::new(GitSync)),
+        ("", "Git: Fetch", Box::new(GitFetch)),
+        ("", "Git: Pull (fast-forward only)", Box::new(GitPull)),
+        ("", "Git: Push (publish a new branch)", Box::new(GitPush)),
+    ]
+}
 
 /// Keys that only work in one place (handled by that view), shown after the table.
 pub const EXTRA: &[(&str, &str)] = &[
@@ -134,7 +146,7 @@ mod tests {
         let cmds = commands();
         let labels: std::collections::HashSet<_> =
             TABLE.iter().filter(|(_, l)| !l.is_empty()).map(|(_, l)| *l).collect();
-        assert_eq!(cmds.len(), labels.len());
+        assert_eq!(cmds.len(), labels.len() + command_only().len());
         assert!(
             cmds.iter().any(|(k, l, a)| *k == "ctrl-=" && l.starts_with("Zoom in") && a.name().ends_with("ZoomIn"))
         );

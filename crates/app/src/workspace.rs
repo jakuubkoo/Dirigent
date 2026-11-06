@@ -50,6 +50,11 @@ actions!(
         QuickOpen,
         CommandPalette,
         FindInFiles,
+        GitSync,
+        GitFetch,
+        GitPull,
+        GitPush,
+        SwitchBranch,
         Activate1,
         Activate2,
         Activate3,
@@ -162,6 +167,8 @@ enum Modal {
     Worktrees(Box<setup::WtList>),
     /// The title bar's search dropdown (quick open, commands, search in files, go to line).
     CommandCenter(Box<command_center::Cc>),
+    /// Switch / create a branch in the active session's repo.
+    Branches(Box<branches_ui::Branches>),
     /// "Discard …?" / "Commit … files of this agent?" before a git write; `ok` is the action button's label.
     Confirm {
         title: String,
@@ -187,6 +194,25 @@ impl Drop for Workspace {
 
 /// A project's file list and whether it hit the index cap.
 pub type ProjectFiles = (Arc<Vec<git::index::Entry>>, bool);
+
+/// The Changes panel's dropdowns (`MenuKind::Git`).
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub enum GitMenu {
+    /// The repo bar's ⋯.
+    More,
+    /// The commit button's ▾.
+    Commit,
+    /// The diff header's view menu: unified/split, split style, structural/word.
+    DiffView,
+}
+
+/// A repo's PR strip: for which branch, the last answer, a lookup running.
+#[derive(Default)]
+struct PrSlot {
+    branch: String,
+    view: Option<crate::pr::View>,
+    loading: bool,
+}
 
 /// What a confirm dialog's action button does.
 enum Then {
@@ -298,6 +324,12 @@ pub struct Workspace {
     /// Git writes per repo (lock, running/failed) and the commit boxes (drafts per repo).
     git_ops: HashMap<PathBuf, crate::git_ops::RepoOps>,
     commit_boxes: HashMap<PathBuf, Entity<crate::commit_box::CommitBox>>,
+    /// The PR/MR strip per repo: looked up when its branch changes or after a push, never polled.
+    prs: HashMap<PathBuf, PrSlot>,
+    /// The one-time "install gh/glab" note was shown (saved).
+    pr_hint_shown: bool,
+    /// Background fetch (Settings → Git), only while `fetch_minutes` > 0.
+    fetch_task: Option<Task<()>>,
     /// Preferences (settings.json), and what's wrong with the file (shown on the Settings page and the status bar).
     pub(crate) settings: Settings,
     pub(crate) settings_notes: Vec<String>,
@@ -449,6 +481,9 @@ impl Workspace {
             _changes_task: None,
             git_ops: HashMap::new(),
             commit_boxes: HashMap::new(),
+            prs: HashMap::new(),
+            pr_hint_shown: saved.pr_hint_shown,
+            fetch_task: None,
             settings: loaded.parsed.settings,
             settings_notes: loaded.parsed.notes,
             settings_broken: loaded.parsed.broken,
@@ -585,6 +620,8 @@ impl Workspace {
         }));
         this.applied = this.grid_size(window);
         this.watch_settings(window, cx);
+        this.restart_fetch_timer(cx);
+        git::remote::set_host_rules(this.settings.hosts.clone());
 
         if let Ok(script) = std::env::var("DIRIGENT_RUN") {
             // Perf harness: one (eagerly spawned) session per line, the line typed into it; saved tabs are ignored.
@@ -743,6 +780,43 @@ impl Workspace {
             cx.spawn_in(window, async move |this, cx| {
                 cx.background_executor().timer(Duration::from_millis(ms)).await;
                 let _ = this.update_in(cx, |w, window, cx| w.open_session_menu(w.active, None, window, cx));
+            })
+            .detach();
+        }
+
+        if let Ok(spec) = std::env::var("DIRIGENT_PERF_GIT") {
+            // Screenshot harness: `<ms>:<branches|more|commit|view|switch:<branch>>` opens the branch switcher, a Changes
+            // panel menu, or the switch (confirm when dirty)
+            // after `ms` milliseconds.
+            let (ms, what) = spec.split_once(':').unwrap_or(("1000", &spec));
+            let (ms, what) = (ms.parse().unwrap_or(1000), what.to_string());
+            cx.spawn_in(window, async move |this, cx| {
+                cx.background_executor().timer(Duration::from_millis(ms)).await;
+                let _ = this.update_in(cx, |w, window, cx| {
+                    let Some(root) = w.active_root() else { return };
+                    let at = gpui::point(window.viewport_size().width - z(280.), z(110.));
+                    match what.as_str() {
+                        "branches" => w.open_branches(window, cx),
+                        "more" => w.open_git_menu(root, GitMenu::More, at, cx),
+                        "commit" => w.open_git_menu(
+                            root,
+                            GitMenu::Commit,
+                            gpui::point(at.x, window.viewport_size().height - z(140.)),
+                            cx,
+                        ),
+                        s if s.starts_with("switch:") => {
+                            let b = s["switch:".len()..].to_string();
+                            w.switch_branch(root, crate::git_ops::Job::Switch(b.clone()), b, window, cx)
+                        }
+                        "view" => w.open_git_menu(
+                            root,
+                            GitMenu::DiffView,
+                            gpui::point(window.viewport_size().width - z(620.), z(90.)),
+                            cx,
+                        ),
+                        _ => {}
+                    }
+                });
             })
             .detach();
         }
@@ -1473,6 +1547,7 @@ impl Workspace {
             Modal::CloseWorktree(_) => return self.close_wt_key(ev, window, cx),
             Modal::Worktrees(_) => return self.worktrees_key(ev, window, cx),
             Modal::CommandCenter(_) => return self.cc_key(ev, window, cx),
+            Modal::Branches(_) => return self.branches_key(ev, window, cx),
             Modal::ProjectDefaults(d) if ks.key == "tab" || (d.focus == 0 && ks.key == "space") => {
                 if ks.key == "tab" {
                     d.focus = (d.focus + if ks.modifiers.shift { 3 } else { 1 }) % 4;
@@ -1779,6 +1854,7 @@ impl Workspace {
                 show_ignored: self.show_ignored,
             },
             projects: Some(self.projects.0.clone()),
+            pr_hint_shown: self.pr_hint_shown,
             ..Saved::default()
         }
     }
@@ -1938,6 +2014,7 @@ impl Workspace {
     }
 }
 
+mod branches_ui;
 mod command_center;
 mod git_write;
 mod projects_ui;
@@ -2071,7 +2148,14 @@ impl Workspace {
     /// Pushes the active tab's repo state into the panel (it re-renders only if that differs).
     fn sync_panel(&mut self, cx: &mut Context<Self>) {
         let commit = match self.tabs.get(self.active).map(|t| t.repo.clone()) {
-            Some(TabRepo::Repo(root)) => Some(self.sync_commit_box(&root, cx)),
+            Some(TabRepo::Repo(root)) => {
+                // The strip follows the branch: a new branch (switch, first status) → one lookup.
+                let branch = self.repos.status(&root).map(|s| s.branch.clone());
+                if branch.is_some_and(|b| self.prs.get(&root).is_none_or(|p| p.branch != b)) {
+                    self.pr_lookup(root.clone(), false, cx);
+                }
+                Some(self.sync_commit_box(&root, cx))
+            }
             _ => None,
         };
         let view = match self.tabs.get(self.active) {
@@ -2085,7 +2169,10 @@ impl Workspace {
                     let ran = t.claude_session.is_some() || !view.touched.is_empty();
                     let agent = ran.then(|| git_panel::AgentFiles { view, only: t.agent_only.unwrap_or(true) });
                     let ops = Box::new(self.git_ops.get(root).map(|o| o.view.clone()).unwrap_or_default());
-                    PanelView::Repo { root: root.clone(), status: self.repos.status(root), agent, ops, commit }
+                    let status = self.repos.status(root);
+                    let pr = self.prs.get(root).filter(|p| status.as_ref().is_some_and(|s| s.branch == p.branch));
+                    let pr = pr.and_then(|p| p.view.clone()).map(Box::new);
+                    PanelView::Repo { root: root.clone(), status, agent, ops, commit, pr }
                 }
             },
         };
@@ -2093,8 +2180,7 @@ impl Workspace {
             Some(Overlay::Diff(d)) => Some(d.read(cx).file.path.clone()),
             _ => None,
         };
-        let narrow = self.dock_width(self.settings.layout.changes) < git_panel::LEGEND_WIDTH;
-        self.git_panel.update(cx, |p, cx| p.set(view, selected, narrow, cx));
+        self.git_panel.update(cx, |p, cx| p.set(view, selected, cx));
         self.sync_files(false, cx);
     }
 
@@ -2163,7 +2249,7 @@ impl Workspace {
 
     /// A change from the Settings page or a diff header switch: applied now, written to settings.json.
     pub fn change_settings(&mut self, f: impl FnOnce(&mut Settings), cx: &mut Context<Self>) {
-        let mut new = self.settings;
+        let mut new = self.settings.clone();
         f(&mut new);
         if new != self.settings {
             self.apply_settings(new, cx);
@@ -2243,7 +2329,7 @@ impl Workspace {
 
     /// Makes `new` the live settings, touching only what changed.
     fn apply_settings(&mut self, new: Settings, cx: &mut Context<Self>) {
-        let old = std::mem::replace(&mut self.settings, new);
+        let old = std::mem::replace(&mut self.settings, new.clone());
         if old.font_size != new.font_size || old.ui_zoom != new.ui_zoom {
             self.metrics_stale = true; // rebuilt in render (needs the window)
         }
@@ -2258,6 +2344,15 @@ impl Workspace {
         }
         if (old.diff_mode, old.split_style, old.diff_engine) != (new.diff_mode, new.split_style, new.diff_engine) {
             self.sync_diff_mode(cx);
+        }
+        if old.fetch_minutes != new.fetch_minutes {
+            self.restart_fetch_timer(cx);
+        }
+        if old.hosts != new.hosts {
+            // Forge detection and every browser URL follow the rules: look the strips up again.
+            git::remote::set_host_rules(new.hosts.clone());
+            self.prs.clear();
+            self.sync_panel(cx);
         }
         if old.layout != new.layout {
             for d in [Dock::Left, Dock::Right] {
