@@ -1,6 +1,8 @@
-# A vX.Y.Z tag on main → Linux x86_64 binaries, a tarball with install.sh --prebuilt, SHA256SUMS, and a GitHub
-# Release with that version's CHANGELOG section. On a PR touching the release path it is a dry run: the same build
-# and package, uploaded as a workflow artifact, no release. See RELEASING.md.
+# A vX.Y.Z tag on main → Linux x86_64 binaries, a tarball with install.sh --prebuilt, a .deb, SHA256SUMS, a GitHub
+# Release with that version's CHANGELOG section, and the APT repository on GitHub Pages rebuilt from the last
+# releases' .debs. On a PR touching the release path it is a dry run: the same build and packages as an artifact,
+# plus an install / upgrade test against a throwaway-key repo in clean Ubuntu containers. workflow_dispatch only
+# rebuilds the APT repository from the published releases. See RELEASING.md.
 name: Release
 
 on:
@@ -11,7 +13,12 @@ on:
       - .github/workflows/release.yml
       - scripts/install.sh
       - scripts/uninstall.sh
+      - scripts/build-deb.sh
+      - scripts/apt-repo.sh
+      - scripts/test-apt-repo.sh
+      - packaging/**
       - CHANGELOG.md
+  workflow_dispatch:
 
 permissions:
   contents: read
@@ -21,6 +28,7 @@ env:
 
 jobs:
   build:
+    if: github.event_name != 'workflow_dispatch'
     # The oldest supported runner: the binaries then need glibc 2.35 or newer.
     runs-on: ubuntu-22.04
     outputs:
@@ -65,7 +73,8 @@ jobs:
           cp crates/app/assets/icons/LICENSE.txt "$d/licenses/icons/"
           cp crates/syntax/licenses/* "$d/licenses/grammars/"
           tar -C dist -czf "dist/$name.tar.gz" "$name"
-          (cd dist && sha256sum "$name.tar.gz" > SHA256SUMS && cat SHA256SUMS)
+          scripts/build-deb.sh "$VERSION" target/release dist
+          (cd dist && sha256sum "$name.tar.gz" "dirigent_${VERSION}_amd64.deb" > SHA256SUMS && cat SHA256SUMS)
           # The release notes: this version's CHANGELOG section, without its heading or the link definitions.
           awk -v v="$VERSION" '/^## \[/ { on = index($0, "## [" v "]") == 1; next } /^\[[^]]*\]: / { next } on' \
             CHANGELOG.md > dist/notes.md
@@ -75,6 +84,7 @@ jobs:
           name: release
           path: |
             dist/*.tar.gz
+            dist/*.deb
             dist/SHA256SUMS
             dist/notes.md
           if-no-files-found: error
@@ -97,4 +107,67 @@ jobs:
         run: |
           (cd dist && sha256sum -c SHA256SUMS)
           gh release create "$TAG" --repo "$GITHUB_REPOSITORY" --verify-tag --title "Dirigent $TAG" \
-            --notes-file dist/notes.md dist/*.tar.gz dist/SHA256SUMS
+            --notes-file dist/notes.md dist/*.tar.gz dist/*.deb dist/SHA256SUMS
+
+  # PR dry run: the .deb through a signed repo (throwaway key) into clean containers: install, check, upgrade.
+  apt-test:
+    if: github.event_name == 'pull_request'
+    needs: build
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: release
+          path: dist
+      - run: sudo apt-get install -yq --no-install-recommends apt-utils
+      - run: scripts/test-apt-repo.sh dist/dirigent_*_amd64.deb "$RUNNER_TEMP/apt-test" ubuntu:22.04 ubuntu:24.04
+
+  # The APT repository: stateless, rebuilt from the .debs of the last releases and signed with the repository key.
+  apt-repo:
+    needs: publish
+    if: ${{ !cancelled() && (needs.publish.result == 'success' || github.event_name == 'workflow_dispatch') }}
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read # the releases' .debs
+      pages: write
+      id-token: write # deploy-pages proves the deployment came from this workflow
+    environment:
+      name: github-pages
+      url: ${{ steps.deploy.outputs.page_url }}
+    env:
+      KEEP: 5 # releases whose .deb stays installable
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - run: sudo apt-get install -yq --no-install-recommends apt-utils
+      - name: Download the last releases' .debs
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          mkdir -p debs
+          for tag in $(gh release list --repo "$GITHUB_REPOSITORY" --exclude-drafts --exclude-pre-releases \
+              --limit "$KEEP" --json tagName -q '.[].tagName'); do
+            gh release download "$tag" --repo "$GITHUB_REPOSITORY" -p '*.deb' -D debs || echo "$tag has no .deb"
+          done
+          ls debs
+      - name: Build and sign the repository
+        env:
+          APT_SIGNING_KEY: ${{ secrets.APT_SIGNING_KEY }}
+        run: |
+          export GNUPGHOME="$RUNNER_TEMP/gnupg"
+          mkdir -m 700 "$GNUPGHOME"
+          printf '%s\n' "$APT_SIGNING_KEY" | gpg --batch --import
+          # Only the key whose public half is committed may sign: a swapped secret fails here.
+          fpr=$(gpg --show-keys --with-colons packaging/dirigent-archive-keyring.asc | awk -F: '/^fpr/ {print $10; exit}')
+          gpg --batch --list-secret-keys "$fpr" >/dev/null || { echo "::error::APT_SIGNING_KEY is not $fpr"; exit 1; }
+          scripts/apt-repo.sh debs site "$fpr" packaging/dirigent-archive-keyring.asc
+          rm -rf "$GNUPGHOME"
+      - uses: actions/upload-pages-artifact@fc324d3547104276b827a68afc52ff2a11cc49c9 # v5.0.0
+        with:
+          path: site
+      - id: deploy
+        uses: actions/deploy-pages@368f82528645a54fb793d4d04e342629a3f51346 # v5.0.1
