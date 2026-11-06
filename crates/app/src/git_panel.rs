@@ -383,6 +383,7 @@ impl GitPanel {
                 .tooltip(tip(hint))
         };
         let (ws, ws2, r, r2) = (self.workspace.clone(), self.workspace.clone(), root.to_path_buf(), root.to_path_buf());
+        let (ws3, r3) = (self.workspace.clone(), root.to_path_buf());
         div()
             .flex()
             .items_center()
@@ -390,16 +391,29 @@ impl GitPanel {
             .px(z(space::LG))
             .pb(z(space::SM))
             .text_size(z(text_size::XS))
-            .child(match &ops.running {
-                Some(label) => div()
+            .child(match (&ops.running, &ops.note) {
+                (Some(label), _) => div()
                     .flex()
                     .items_center()
                     .gap(z(space::XS))
                     .text_color(t.text.muted)
                     .child(ui::icon(icon::REFRESH, 11., t.text.muted))
                     .child(label.clone())
+                    .when(ops.cancellable, |d| {
+                        d.child(link("git-cancel", "Cancel", "Stop it (git and ssh are killed)", true).on_click(
+                            move |_: &ClickEvent, _, cx| {
+                                let _ = ws3.update(cx, |w, cx| w.cancel_git(r3.clone(), cx));
+                            },
+                        ))
+                    })
                     .into_any_element(),
-                None => div().into_any_element(),
+                (None, Some(note)) => link("git-note", "", "Dismiss", true)
+                    .child(note.clone())
+                    .on_click(move |_: &ClickEvent, _, cx| {
+                        let _ = ws3.update(cx, |w, cx| w.dismiss_git_note(r3.clone(), cx));
+                    })
+                    .into_any_element(),
+                (None, None) => div().into_any_element(),
             })
             .child(div().flex_1())
             .when(agent, |d| {

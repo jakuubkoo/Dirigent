@@ -148,6 +148,25 @@ fn config(root: &Path, key: &str) -> Option<String> {
     (!v.is_empty()).then_some(v)
 }
 
+/// The current branch; None when detached.
+pub fn current_branch(root: &Path) -> Option<String> {
+    let b = run(root, &["branch", "--show-current"], None).ok()?.trim().to_string();
+    (!b.is_empty()).then_some(b)
+}
+
+/// The branch's upstream (`origin/x`); None without one (or when its ref is gone).
+pub fn upstream(root: &Path) -> Option<String> {
+    let u = run(root, &["rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}"], None).ok()?.trim().to_string();
+    (!u.is_empty()).then_some(u)
+}
+
+/// (ahead, behind) vs the upstream.
+pub fn ahead_behind(root: &Path) -> Option<(u32, u32)> {
+    let s = run(root, &["rev-list", "--left-right", "--count", "HEAD...@{u}"], None).ok()?;
+    let mut it = s.split_whitespace().map(|n| n.parse().unwrap_or(0));
+    Some((it.next()?, it.next()?))
+}
+
 /// The configured remotes, in git's order.
 pub fn remotes(root: &Path) -> Vec<String> {
     run(root, &["remote"], None).map(|s| s.lines().map(str::to_string).collect()).unwrap_or_default()

@@ -5,6 +5,7 @@ use std::io::Write as _;
 use std::process::{Command, Stdio};
 use std::sync::{Arc, Mutex};
 
+use git::remote::{self, Cancel};
 use git::write::{self, GitError, Span};
 use git::{FileChange, Repo};
 
@@ -27,6 +28,43 @@ pub enum Job {
         files: Vec<FileChange>,
         amend: bool,
     },
+    Fetch,
+    /// Fast-forward to the upstream (never a merge or rebase).
+    Pull,
+    /// Push; without an upstream, publish to the push target (`-u`).
+    Push,
+    /// Fetch, then the one safe step: publish, fast-forward or push; diverged → explain, write nothing.
+    Sync,
+    Switch(String),
+    /// `origin/x` → a local `x` tracking it.
+    SwitchRemote(String),
+    CreateBranch(String),
+    /// Several jobs in order (commit & push); stops at the first failure, whose retry is the rest.
+    Seq(Vec<Job>),
+}
+
+/// What a finished job has to say: a note for the panel ("Pushed to origin/x") and a URL to open (a new PR).
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Done {
+    pub note: Option<String>,
+    pub open: Option<String>,
+}
+
+impl Done {
+    fn note(s: impl Into<String>) -> Self {
+        Done { note: Some(s.into()), open: None }
+    }
+
+    fn then(self, next: Done) -> Done {
+        Done { note: next.note.or(self.note), open: next.open.or(self.open) }
+    }
+}
+
+/// A failed job: the error and what Retry runs (the job itself, or the rest of a sequence).
+#[derive(Debug)]
+pub struct Failed {
+    pub error: GitError,
+    pub retry: Job,
 }
 
 fn name(f: &FileChange) -> &str {
@@ -58,15 +96,66 @@ impl Job {
                     "Committing…".into()
                 }
             }
+            Job::Fetch => "Fetching…".into(),
+            Job::Pull => "Pulling…".into(),
+            Job::Push => "Pushing…".into(),
+            Job::Sync => "Syncing…".into(),
+            Job::Switch(b) | Job::SwitchRemote(b) => format!("Switching to {b}…"),
+            Job::CreateBranch(b) => format!("Creating {b}…"),
+            Job::Seq(jobs) => jobs.first().map(Job::label).unwrap_or_default(),
         }
     }
 
     pub fn is_commit(&self) -> bool {
-        matches!(self, Job::Commit { .. } | Job::CommitOnly { .. })
+        match self {
+            Job::Seq(jobs) => jobs.first().is_some_and(Job::is_commit),
+            j => matches!(j, Job::Commit { .. } | Job::CommitOnly { .. }),
+        }
+    }
+
+    /// Talks to a remote (can take long, can be cancelled).
+    pub fn is_network(&self) -> bool {
+        match self {
+            Job::Seq(jobs) => jobs.iter().any(Job::is_network),
+            j => matches!(j, Job::Fetch | Job::Pull | Job::Push | Job::Sync),
+        }
     }
 
     /// Blocking: on a background thread.
-    pub fn run(&self, repo: &Repo) -> Result<(), GitError> {
+    pub fn run(&self, repo: &Repo, cancel: &Cancel) -> Result<Done, Failed> {
+        if let Job::Seq(jobs) = self {
+            let mut done = Done::default();
+            for (i, j) in jobs.iter().enumerate() {
+                match j.run(repo, cancel) {
+                    Ok(d) => done = done.then(d),
+                    Err(f) => return Err(Failed { error: f.error, retry: Job::Seq(jobs[i..].to_vec()) }),
+                }
+            }
+            return Ok(done);
+        }
+        self.run_one(repo, cancel).map_err(|error| Failed { error, retry: self.clone() })
+    }
+
+    fn run_one(&self, repo: &Repo, cancel: &Cancel) -> Result<Done, GitError> {
+        let root = &repo.root;
+        let quiet = |r: Result<(), GitError>| r.map(|()| Done::default());
+        match self {
+            Job::Fetch => remote::fetch(root, cancel).map(|()| Done::note("Fetched")),
+            Job::Pull => {
+                remote::fast_forward(root, cancel)?;
+                Ok(Done::note(format!("Updated to {}", remote::upstream(root).unwrap_or_default())))
+            }
+            Job::Push => push(root, cancel),
+            Job::Sync => sync(root, cancel),
+            Job::Switch(b) => quiet(write::switch(root, b)),
+            Job::SwitchRemote(b) => quiet(write::switch_remote(root, b)),
+            Job::CreateBranch(b) => quiet(write::create_branch(root, b)),
+            Job::Seq(_) => unreachable!("run handles sequences"),
+            j => quiet(j.run_local(repo)),
+        }
+    }
+
+    fn run_local(&self, repo: &Repo) -> Result<(), GitError> {
         match self {
             Job::Stage(f) => write::stage(repo, f),
             Job::Unstage(f) => write::unstage(repo, f),
@@ -77,7 +166,45 @@ impl Job {
             Job::DiscardHunk(f, s) => write::discard_hunk(repo, f, *s),
             Job::Commit { message, amend } => write::commit(repo, message, *amend),
             Job::CommitOnly { message, files, amend } => write::commit_only(repo, message, files, *amend),
+            _ => unreachable!("network and branch jobs run in run_one"),
         }
+    }
+}
+
+/// Push, or publish when the branch has no upstream yet.
+fn push(root: &std::path::Path, cancel: &Cancel) -> Result<Done, GitError> {
+    if let Some(up) = remote::upstream(root) {
+        remote::push(root, cancel)?;
+        return Ok(Done::note(format!("Pushed to {up}")));
+    }
+    let branch =
+        remote::current_branch(root).ok_or_else(|| GitError::Failed("Not on a branch (detached HEAD)".into()))?;
+    let Some(r) = remote::push_target(root, &branch, None) else {
+        return Err(GitError::Failed(match remote::remotes(root).len() {
+            0 => "This repository has no remote to push to. Add one with `git remote add`.".into(),
+            _ => "Several remotes and none is the default: run `git push -u <remote> HEAD` in a terminal once.".into(),
+        }));
+    };
+    remote::push_to(root, &r, true, &[], cancel)?;
+    Ok(Done::note(format!("Published to {r}/{branch}")))
+}
+
+fn sync(root: &std::path::Path, cancel: &Cancel) -> Result<Done, GitError> {
+    if remote::upstream(root).is_none() {
+        return push(root, cancel);
+    }
+    remote::fetch(root, cancel)?;
+    match remote::ahead_behind(root) {
+        None => push(root, cancel), // the upstream vanished on fetch --prune: publish again
+        Some((0, 0)) => Ok(Done::note("Up to date")),
+        Some((0, _)) => {
+            remote::fast_forward(root, cancel)?;
+            Ok(Done::note("Pulled (fast-forward)"))
+        }
+        Some((_, 0)) => push(root, cancel),
+        Some((a, b)) => Err(GitError::Failed(format!(
+            "This branch and its upstream diverged ({a} ahead, {b} behind). Sync never merges or rebases: do that in a terminal."
+        ))),
     }
 }
 
@@ -86,7 +213,11 @@ impl Job {
 pub struct OpsView {
     /// The latest running job's label.
     pub running: Option<String>,
+    /// The running job talks to a remote: the panel offers Cancel.
+    pub cancellable: bool,
     pub error: Option<OpError>,
+    /// The last finished job's note ("Pushed to origin/x"), until the next job or a dismiss.
+    pub note: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -104,6 +235,8 @@ pub struct RepoOps {
     pub lock: Arc<Mutex<()>>,
     pub inflight: usize,
     pub view: OpsView,
+    /// Cancels the running network job (a fresh flag per job).
+    pub cancel: Cancel,
 }
 
 const GENERATE_PROMPT: &str = "You write git commit messages. Reply with only the message: an imperative subject line of \
@@ -165,6 +298,21 @@ fn clean_message(raw: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn sequences_retry_the_rest() {
+        let commit = Job::Commit { message: "m".into(), amend: false };
+        let seq = Job::Seq(vec![commit.clone(), Job::Push]);
+        assert!(seq.is_commit() && seq.is_network());
+        assert_eq!(seq.label(), "Committing…");
+        // Not a repo: the commit (first step) fails and Retry is the whole sequence.
+        let d = std::env::temp_dir().join(format!("dirigent-seq-{}", std::process::id()));
+        std::fs::create_dir_all(&d).unwrap();
+        let repo = Repo { root: d.clone(), git_dir: d.join(".git"), common_dir: d.join(".git") };
+        let f = seq.run(&repo, &Cancel::default()).unwrap_err();
+        assert_eq!(f.retry, seq);
+        let _ = std::fs::remove_dir_all(&d);
+    }
 
     #[test]
     fn generated_messages_carry_no_attribution() {

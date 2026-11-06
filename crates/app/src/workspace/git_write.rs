@@ -3,7 +3,7 @@
 
 use super::*;
 use crate::commit_box::{CommitBox, Props};
-use crate::git_ops::{Job, OpError};
+use crate::git_ops::{Done, Failed, Job, OpError};
 
 impl Workspace {
     /// The repo's commit box (created on first use; the draft lives as long as the app).
@@ -46,13 +46,34 @@ impl Workspace {
         st.files.iter().filter(|f| view.files.contains_key(&f.path)).cloned().collect()
     }
 
+    /// The active session's repo root.
+    pub(super) fn active_root(&self) -> Option<PathBuf> {
+        match &self.tabs.get(self.active)?.repo {
+            TabRepo::Repo(root) => Some(root.clone()),
+            _ => None,
+        }
+    }
+
+    /// A git job in the active session's repo (Command Center git commands); none → a status-bar note.
+    pub(super) fn git_active(&mut self, job: Job, cx: &mut Context<Self>) {
+        match self.active_root() {
+            Some(root) => self.run_git(root, job, cx),
+            None => self.flash("Not in a git repository".into(), cx),
+        }
+    }
+
     /// Runs a git write for `root` in the background (after any earlier one there finished).
     pub fn run_git(&mut self, root: PathBuf, job: Job, cx: &mut Context<Self>) {
         let Some(repo) = self.repos.repo(&root).cloned() else { return };
         let ops = self.git_ops.entry(root.clone()).or_default();
         ops.inflight += 1;
         ops.view.running = Some(job.label());
+        ops.view.cancellable = job.is_network();
         ops.view.error = None;
+        ops.view.note = None;
+        // A fresh flag per job: Cancel stops this one (queued jobs keep theirs).
+        let cancel = git::remote::Cancel::default();
+        ops.cancel = cancel.clone();
         let lock = ops.lock.clone();
         crate::perf::event_with(|| format!("git write: {}", job.label()));
         self.sync_panel(cx);
@@ -62,7 +83,7 @@ impl Workspace {
                 .background_executor()
                 .spawn(async move {
                     let _one_at_a_time = lock.lock().unwrap_or_else(|e| e.into_inner());
-                    j.run(&repo)
+                    j.run(&repo, &cancel)
                 })
                 .await;
             let _ = this.update(cx, |w, cx| w.git_done(root, job, result, cx));
@@ -70,33 +91,66 @@ impl Workspace {
         .detach();
     }
 
-    fn git_done(&mut self, root: PathBuf, job: Job, result: Result<(), git::write::GitError>, cx: &mut Context<Self>) {
+    fn git_done(&mut self, root: PathBuf, job: Job, result: Result<Done, Failed>, cx: &mut Context<Self>) {
         let ops = self.git_ops.entry(root.clone()).or_default();
         ops.inflight = ops.inflight.saturating_sub(1);
         if ops.inflight == 0 {
             ops.view.running = None;
+            ops.view.cancellable = false;
+        }
+        // A commit that went through (also when a later push in the same sequence failed) clears the box.
+        let committed = match &result {
+            Ok(_) => job.is_commit(),
+            Err(f) => job.is_commit() && !f.retry.is_commit(),
+        };
+        if committed && let Some(b) = self.commit_boxes.get(&root) {
+            b.update(cx, |b, cx| b.committed(cx));
         }
         match result {
-            Ok(()) => {
+            Ok(done) => {
                 crate::perf::event_with(|| format!("git write done: {}", job.label()));
-                if job.is_commit()
-                    && let Some(b) = self.commit_boxes.get(&root)
-                {
-                    b.update(cx, |b, cx| b.committed(cx));
+                ops.view.note = done.note;
+                if let Some(url) = done.open {
+                    cx.open_url(&url);
                 }
             }
-            Err(e) => {
-                crate::perf::event_with(|| format!("git write failed: {} ({e})", job.label()));
-                let locked = matches!(e, git::write::GitError::IndexLocked);
+            Err(Failed { error, retry }) => {
+                crate::perf::event_with(|| format!("git write failed: {} ({error})", job.label()));
+                let locked = matches!(error, git::write::GitError::IndexLocked);
                 let message = if locked {
                     "Another git process holds the index (index.lock). Nothing was changed.".to_string()
                 } else {
-                    e.to_string()
+                    error.to_string()
                 };
-                ops.view.error = Some(OpError { message, locked, retry: Some(job) });
+                let cancelled = matches!(error, git::write::GitError::Cancelled);
+                if cancelled {
+                    ops.view.note = Some("Cancelled".into());
+                } else {
+                    ops.view.error = Some(OpError { message, locked, retry: Some(retry) });
+                }
             }
         }
+        // Refs a network job moved show through the watcher; a refresh covers packed-refs-only updates.
+        if job.is_network() {
+            self.repos.refresh(&root);
+        }
         self.sync_panel(cx);
+    }
+
+    /// Stops the repo's running network job (git and its ssh are killed; nothing half-written: git's ref updates
+    /// are atomic).
+    pub fn cancel_git(&mut self, root: PathBuf, cx: &mut Context<Self>) {
+        if let Some(o) = self.git_ops.get(&root) {
+            o.cancel.store(true, std::sync::atomic::Ordering::Relaxed);
+        }
+        cx.notify();
+    }
+
+    pub fn dismiss_git_note(&mut self, root: PathBuf, cx: &mut Context<Self>) {
+        if let Some(o) = self.git_ops.get_mut(&root) {
+            o.view.note = None;
+            self.sync_panel(cx);
+        }
     }
 
     pub fn retry_git(&mut self, root: PathBuf, cx: &mut Context<Self>) {

@@ -113,6 +113,11 @@ impl Render for Workspace {
             .on_action(cx.listener(|w, _: &QuickOpen, window, cx| w.open_cc("", window, cx)))
             .on_action(cx.listener(|w, _: &CommandPalette, window, cx| w.open_cc(">", window, cx)))
             .on_action(cx.listener(|w, _: &FindInFiles, window, cx| w.open_cc("#", window, cx)))
+            .on_action(cx.listener(|w, _: &GitSync, _, cx| w.git_active(crate::git_ops::Job::Sync, cx)))
+            .on_action(cx.listener(|w, _: &GitFetch, _, cx| w.git_active(crate::git_ops::Job::Fetch, cx)))
+            .on_action(cx.listener(|w, _: &GitPull, _, cx| w.git_active(crate::git_ops::Job::Pull, cx)))
+            .on_action(cx.listener(|w, _: &GitPush, _, cx| w.git_active(crate::git_ops::Job::Push, cx)))
+            .on_action(cx.listener(|w, _: &SwitchBranch, window, cx| w.open_branches(window, cx)))
             .on_action(cx.listener(|w, _: &Activate1, window, cx| w.activate_nth(0, window, cx)))
             .on_action(cx.listener(|w, _: &Activate2, window, cx| w.activate_nth(1, window, cx)))
             .on_action(cx.listener(|w, _: &Activate3, window, cx| w.activate_nth(2, window, cx)))
@@ -1151,6 +1156,7 @@ impl Workspace {
             Some(Modal::Setup(s)) => Some(scrim().child(self.setup_view(s, cx)).into_any_element()),
             Some(Modal::CloseWorktree(c)) => Some(scrim().child(self.close_wt_view(c, cx)).into_any_element()),
             Some(Modal::Worktrees(l)) => Some(scrim().child(self.worktrees_view(l, cx)).into_any_element()),
+            Some(Modal::Branches(b)) => Some(scrim().child(self.branches_view(b, window, cx)).into_any_element()),
             _ => None,
         }
     }

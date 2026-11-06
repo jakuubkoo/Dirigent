@@ -50,6 +50,11 @@ actions!(
         QuickOpen,
         CommandPalette,
         FindInFiles,
+        GitSync,
+        GitFetch,
+        GitPull,
+        GitPush,
+        SwitchBranch,
         Activate1,
         Activate2,
         Activate3,
@@ -162,6 +167,8 @@ enum Modal {
     Worktrees(Box<setup::WtList>),
     /// The title bar's search dropdown (quick open, commands, search in files, go to line).
     CommandCenter(Box<command_center::Cc>),
+    /// Switch / create a branch in the active session's repo.
+    Branches(Box<branches_ui::Branches>),
     /// "Discard …?" / "Commit … files of this agent?" before a git write; `ok` is the action button's label.
     Confirm {
         title: String,
@@ -1473,6 +1480,7 @@ impl Workspace {
             Modal::CloseWorktree(_) => return self.close_wt_key(ev, window, cx),
             Modal::Worktrees(_) => return self.worktrees_key(ev, window, cx),
             Modal::CommandCenter(_) => return self.cc_key(ev, window, cx),
+            Modal::Branches(_) => return self.branches_key(ev, window, cx),
             Modal::ProjectDefaults(d) if ks.key == "tab" || (d.focus == 0 && ks.key == "space") => {
                 if ks.key == "tab" {
                     d.focus = (d.focus + if ks.modifiers.shift { 3 } else { 1 }) % 4;
@@ -1938,6 +1946,7 @@ impl Workspace {
     }
 }
 
+mod branches_ui;
 mod command_center;
 mod git_write;
 mod projects_ui;
