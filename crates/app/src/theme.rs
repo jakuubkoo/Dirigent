@@ -163,6 +163,8 @@ pub struct Theme {
     pub syntax: Syntax,
     /// The window close button's hover background.
     pub danger_hover: Rgba,
+    /// A search match (Search panel results, the matched text in the preview).
+    pub search_match: Rgba,
 }
 
 pub static DARK: Theme = Theme {
@@ -242,6 +244,7 @@ pub static DARK: Theme = Theme {
         attribute: hex(0xe0af68),
     },
     danger_hover: hex(0xc4314b),
+    search_match: hex(0x5c4a14),
 };
 
 pub fn get() -> &'static Theme {

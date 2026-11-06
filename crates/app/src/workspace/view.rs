@@ -105,6 +105,9 @@ impl Render for Workspace {
                             PanelTab::Files => {
                                 self.files_panel.clone().cached(StyleRefinement::default().size_full()).into_any_element()
                             }
+                            PanelTab::Search => {
+                                self.search_panel.clone().cached(StyleRefinement::default().size_full()).into_any_element()
+                            }
                         })),
                 )
         });
@@ -150,6 +153,9 @@ impl Render for Workspace {
             .on_action(cx.listener(|w, _: &ZoomOut, _, cx| w.zoom(Some(-1), cx)))
             .on_action(cx.listener(|w, _: &ZoomReset, _, cx| w.zoom(None, cx)))
             .on_action(cx.listener(|w, _: &SessionMenu, window, cx| w.open_session_menu(w.active, None, window, cx)))
+            .on_action(cx.listener(|w, _: &QuickOpen, window, cx| w.open_cc("", window, cx)))
+            .on_action(cx.listener(|w, _: &CommandPalette, window, cx| w.open_cc(">", window, cx)))
+            .on_action(cx.listener(|w, _: &FindInFiles, window, cx| w.open_cc("#", window, cx)))
             .on_action(cx.listener(|w, _: &Activate1, window, cx| w.activate_nth(0, window, cx)))
             .on_action(cx.listener(|w, _: &Activate2, window, cx| w.activate_nth(1, window, cx)))
             .on_action(cx.listener(|w, _: &Activate3, window, cx| w.activate_nth(2, window, cx)))
@@ -194,6 +200,7 @@ impl Render for Workspace {
                             .min_w_0()
                             .h_full()
                             .bg(t.bg.base)
+                            .when(!chrome.csd, |d| d.child(self.cc_bar(cx)))
                             // Diff and preview belong to the session; Settings fills the main area from the top.
                             .when(!self.settings_open(), |d| d.child(self.session_header()))
                             .child(div().flex_1().min_h_0().overflow_hidden().child(main)),
@@ -203,6 +210,7 @@ impl Render for Workspace {
             .child(self.status_bar(cx))
             .children(self.modal_view(window, cx))
             .children(self.menu_view(cx))
+            .children(self.cc_view(window, cx))
             .when(chrome.csd, |d| d.children(window_chrome::resize_handles(chrome.tiling)))
     }
 }
@@ -351,10 +359,6 @@ impl Workspace {
                 )
                 .into_any_element()
         };
-        let name = match self.tabs.get(self.active) {
-            _ if self.settings_open() => "Settings".to_string(),
-            tab => tab.map(|t| t.name.clone()).unwrap_or_default(),
-        };
         div()
             .id("title-bar")
             .flex()
@@ -372,9 +376,7 @@ impl Workspace {
                     .min_w_0()
                     .flex()
                     .justify_center()
-                    .text_size(z(text_size::SM))
-                    .text_color(t.text.dim)
-                    .child(div().truncate().child(name)),
+                    .child(self.cc_box(cx)),
             )
             .child(window_chrome::window_controls(window))
             .on_mouse_down(
@@ -766,6 +768,7 @@ impl Workspace {
             .border_color(t.border.subtle)
             .child(tab(self, PanelTab::Files, icon::FILES, "Files  Ctrl+Shift+E", cx))
             .child(tab(self, PanelTab::Changes, icon::CHANGES, "Changes  Ctrl+Shift+G", cx))
+            .child(tab(self, PanelTab::Search, icon::SEARCH, "Search in files  Ctrl+Shift+F", cx))
             .when(changes > 0, |d| {
                 d.child(div().text_size(z(text_size::XS)).text_color(t.text.dim).child(changes.to_string()))
             })

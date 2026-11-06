@@ -29,7 +29,7 @@ use crate::terminal_view::{Banner, PADDING, TerminalView};
 actions!(
     dirigent,
     [
-        NewSession, NewInProject, CloseSession, NextSession, PrevSession, Rename, ToggleSidebar, NextNeedsYou, ResumeAll, ShowChanges, ShowFiles, ToggleDiffMode, OpenSettings, ZoomIn, ZoomOut, ZoomReset, SessionMenu,
+        NewSession, NewInProject, CloseSession, NextSession, PrevSession, Rename, ToggleSidebar, NextNeedsYou, ResumeAll, ShowChanges, ShowFiles, ToggleDiffMode, OpenSettings, ZoomIn, ZoomOut, ZoomReset, SessionMenu, QuickOpen, CommandPalette, FindInFiles,
         Activate1, Activate2, Activate3, Activate4, Activate5, Activate6, Activate7, Activate8, Activate9
     ]
 );
@@ -127,6 +127,8 @@ enum Modal {
     /// Closing the last session in a linked worktree / Remove… from the list: keep or remove it.
     CloseWorktree(Box<setup::CloseWt>),
     Worktrees(Box<setup::WtList>),
+    /// The title bar's search dropdown (quick open, commands, search in files, go to line).
+    CommandCenter(Box<command_center::Cc>),
     /// "Discard …?" / "Commit … files of this agent?" before a git write; `ok` is the action button's label.
     Confirm {
         title: String,
@@ -149,6 +151,9 @@ impl Drop for Workspace {
         }
     }
 }
+
+/// A project's file list and whether it hit the index cap.
+pub type ProjectFiles = (Arc<Vec<git::index::Entry>>, bool);
 
 /// What a confirm dialog's action button does.
 enum Then {
@@ -302,6 +307,9 @@ pub struct Workspace {
     /// Structural diffs by both versions' content hashes.
     structural_cache: Arc<syntax::StructuralCache>,
     files_panel: Entity<FilesPanel>,
+    search_panel: Entity<crate::search_panel::SearchPanel>,
+    /// Where the Command Center box was last drawn (its dropdown hangs under it).
+    cc_anchor: command_center::Anchor,
     panel_tab: PanelTab,
     show_ignored: bool,
     /// Directory listings shown by any spawned tab's tree.
@@ -362,6 +370,10 @@ impl Workspace {
         let files_panel = {
             let ws = cx.entity().downgrade();
             cx.new(|cx| FilesPanel::new(ws, cx))
+        };
+        let search_panel = {
+            let (ws, m) = (cx.entity().downgrade(), metrics.clone());
+            cx.new(|cx| crate::search_panel::SearchPanel::new(ws, &m, cx))
         };
         let dir_watcher = git::DirWatcher::start(repos.reporter())
             .map_err(|e| eprintln!("dirigent: no directory watcher for file trees: {e}"))
@@ -431,6 +443,8 @@ impl Workspace {
             syntax_cache: Default::default(),
             structural_cache: Default::default(),
             files_panel,
+            search_panel,
+            cc_anchor: Default::default(),
             panel_tab: saved.git_panel.tab,
             show_ignored: saved.git_panel.show_ignored,
             tree_cache: Default::default(),
@@ -663,6 +677,20 @@ impl Workspace {
             .detach();
         }
 
+        if let Ok(spec) = std::env::var("DIRIGENT_PERF_CC") {
+            // Screenshot / perf harness: `<ms>:<input>` opens the Command Center with that input typed.
+            let (ms, input) = spec.split_once(':').unwrap_or((&spec, ""));
+            let (ms, input) = (ms.parse().unwrap_or(1000), input.to_string());
+            cx.spawn_in(window, async move |this, cx| {
+                cx.background_executor().timer(Duration::from_millis(ms)).await;
+                let _ = this.update_in(cx, |w, window, cx| {
+                    crate::perf::event("cc open");
+                    w.open_cc(&input, window, cx);
+                });
+            })
+            .detach();
+        }
+
         if let Some(ms) = std::env::var("DIRIGENT_PERF_MENU").ok().and_then(|v| v.parse().ok()) {
             // Screenshot harness: the active session's context menu (as Shift+F10) after `ms` milliseconds.
             cx.spawn_in(window, async move |this, cx| {
@@ -822,6 +850,8 @@ impl Workspace {
         let w = vp.width - side - right - z(PADDING) - chrome.horizontal();
         // Slim session header above the terminal and the status bar below everything.
         let bars = z(crate::theme::height::HEADER + crate::theme::height::STATUS_BAR);
+        // Server-side decorations: the Command Center's slim bar sits above the main area.
+        let bars = if chrome.csd { bars } else { bars + z(crate::theme::height::TITLE_BAR) };
         let h = vp.height - z(PADDING) - chrome.vertical() - bars;
         Size {
             cols: (w / m.cell_width).floor().max(2.) as u16,
@@ -1333,6 +1363,7 @@ impl Workspace {
             Modal::Setup(_) => return self.setup_key(ev, window, cx),
             Modal::CloseWorktree(_) => return self.close_wt_key(ev, window, cx),
             Modal::Worktrees(_) => return self.worktrees_key(ev, window, cx),
+            Modal::CommandCenter(_) => return self.cc_key(ev, window, cx),
             Modal::ProjectDefaults(d) if ks.key == "tab" || (d.focus == 0 && ks.key == "space") => {
                 if ks.key == "tab" {
                     d.focus = (d.focus + if ks.modifiers.shift { 3 } else { 1 }) % 4;
@@ -1768,6 +1799,7 @@ impl Workspace {
 
 }
 
+mod command_center;
 mod git_write;
 mod projects_ui;
 mod setup;
@@ -2026,6 +2058,31 @@ impl Workspace {
         .detach();
     }
 
+    /// The active session's project for quick open / content search: its repo root (else its directory), and its
+    /// file list. Everything that may block (the walk, the slot's lock: the watcher thread holds it while patching)
+    /// happens off the UI thread. A repo's list is built once and kept live; other directories and the "include
+    /// ignored" list are walked again on each call.
+    pub fn project_files(&self, ignored: bool, cx: &mut Context<Self>) -> Option<(PathBuf, Task<ProjectFiles>)> {
+        let tab = self.tabs.get(self.active)?;
+        let root = Self::tree_root(tab)?;
+        let slot = (!ignored).then(|| self.repos.index(&root)).flatten();
+        let r = root.clone();
+        let task = cx.background_executor().spawn(async move {
+            match slot {
+                Some(slot) => {
+                    let mut g = slot.lock().unwrap();
+                    let ix = g.get_or_insert_with(|| git::index::Index::build(&r, false, git::index::CAP));
+                    (ix.files.clone(), ix.capped)
+                }
+                None => {
+                    let ix = git::index::Index::build(&r, ignored, git::index::CAP);
+                    (ix.files, ix.capped)
+                }
+            }
+        });
+        Some((root, task))
+    }
+
     /// Makes `new` the live settings, touching only what changed.
     fn apply_settings(&mut self, new: Settings, cx: &mut Context<Self>) {
         let old = std::mem::replace(&mut self.settings, new);
@@ -2185,6 +2242,7 @@ impl Workspace {
         // Cached views replay their last frame until notified: every one of them lays out again, once.
         self.git_panel.update(cx, |_, cx| cx.notify());
         self.files_panel.update(cx, |_, cx| cx.notify());
+        self.search_panel.update(cx, |p, cx| p.set_metrics(&m, cx));
         for b in self.commit_boxes.values() {
             b.update(cx, |_, cx| cx.notify());
         }
@@ -2690,6 +2748,25 @@ impl Workspace {
         }
         self.mark_dirty(cx);
         cx.notify();
+    }
+
+    /// Shows the right panel on `tab` (never hides it).
+    fn reveal_panel_tab(&mut self, tab: PanelTab, cx: &mut Context<Self>) {
+        if !self.git_open {
+            self.git_open = true;
+            self.flush_resize = true;
+        }
+        self.set_panel_tab(tab, cx);
+        self.mark_dirty(cx);
+        cx.notify();
+    }
+
+    /// A Search panel result: the file in the preview, at the hit's line with the matched text marked.
+    pub fn open_search_hit(&mut self, path: PathBuf, hit: Option<(u32, String)>, window: &mut Window, cx: &mut Context<Self>) {
+        self.open_file(path, false, window, cx);
+        if let (Some((line, text)), Some(Overlay::File(f))) = (hit, &self.overlay) {
+            f.update(cx, |f, cx| f.go_to_match(line as usize, text, cx));
+        }
     }
 
     fn set_panel_tab(&mut self, tab: PanelTab, cx: &mut Context<Self>) {

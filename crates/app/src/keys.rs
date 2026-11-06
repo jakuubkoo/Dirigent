@@ -13,6 +13,13 @@ macro_rules! shortcuts {
             let ctx = Some("Workspace");
             cx.bind_keys([$(KeyBinding::new($keys, $action, ctx)),*]);
         }
+
+        /// The Command Center's `>` list: every labelled entry once (the first keys of a label), with its action.
+        pub fn commands() -> Vec<(&'static str, &'static str, Box<dyn gpui::Action>)> {
+            let all: Vec<(&'static str, &'static str, Box<dyn gpui::Action>)> = vec![$(($keys, $label, Box::new($action))),*];
+            let mut seen = std::collections::HashSet::new();
+            all.into_iter().filter(|(_, l, _)| !l.is_empty() && seen.insert(*l)).collect()
+        }
     };
 }
 
@@ -30,6 +37,9 @@ shortcuts![
     ("ctrl-shift-e", ShowFiles, "Show Files"),
     ("ctrl-shift-d", ToggleDiffMode, "Unified / split diff"),
     ("ctrl-,", OpenSettings, "Settings"),
+    ("ctrl-p", QuickOpen, "Go to file (Command Center)"),
+    ("ctrl-shift-p", CommandPalette, "Run a command (Command Center, >)"),
+    ("ctrl-shift-f", FindInFiles, "Search in files (Command Center, #; results in the Search panel)"),
     ("shift-f10", SessionMenu, "Session menu (also the Menu key; or right click a session)"),
     ("menu", SessionMenu, ""),
     // UI zoom (the whole window, terminal font included). Bindings are matched before any view's key handler, so
@@ -110,5 +120,10 @@ mod tests {
         assert_eq!(gpui::Keystroke::parse("ctrl--").unwrap().key, "-");
         assert!(listed().any(|(k, l)| k == "Ctrl+," && l == "Settings"));
         assert_eq!(pretty("shift-f10"), "Shift+F10");
+        // The command list: every labelled entry once, with its action.
+        let cmds = commands();
+        let labels: std::collections::HashSet<_> = TABLE.iter().filter(|(_, l)| !l.is_empty()).map(|(_, l)| *l).collect();
+        assert_eq!(cmds.len(), labels.len());
+        assert!(cmds.iter().any(|(k, l, a)| *k == "ctrl-=" && l.starts_with("Zoom in") && a.name().ends_with("ZoomIn")));
     }
 }
