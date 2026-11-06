@@ -104,14 +104,15 @@ impl Watcher {
             let Ok(mut w) = notify::RecommendedWatcher::new(handler, config) else { return };
             let mut watch_error = None;
             let _ = w.watch(&repo.git_dir, RecursiveMode::NonRecursive);
-            let refs = repo.git_dir.join("refs/heads");
+            // All of refs/ (heads, and remotes for ahead/behind after fetch/push; remotes/ may not exist yet).
+            let refs = repo.git_dir.join("refs");
             if refs.is_dir() {
                 let _ = w.watch(&refs, RecursiveMode::Recursive);
             }
             // A linked worktree: branches live in the shared `.git` (a commit made in another checkout moves them).
             if let Some(common) = shared(&repo) {
                 let _ = w.watch(&common, RecursiveMode::NonRecursive);
-                let refs = common.join("refs/heads");
+                let refs = common.join("refs");
                 if refs.is_dir() {
                     let _ = w.watch(&refs, RecursiveMode::Recursive);
                 }
@@ -250,10 +251,13 @@ fn counts(path: &Path, git_dir: &Path, common: Option<&Path>) -> bool {
         return rel == Path::new("index")
             || rel == Path::new("HEAD")
             || rel == Path::new("packed-refs")
-            || rel.starts_with("refs/heads");
+            || rel.starts_with("refs/heads")
+            || rel.starts_with("refs/remotes");
     }
     match common.map(|c| path.strip_prefix(c)) {
-        Some(Ok(rel)) => rel == Path::new("packed-refs") || rel.starts_with("refs/heads"),
+        Some(Ok(rel)) => {
+            rel == Path::new("packed-refs") || rel.starts_with("refs/heads") || rel.starts_with("refs/remotes")
+        }
         _ => true,
     }
 }
