@@ -275,13 +275,7 @@ impl Workspace {
             let _ = this.update_in(cx, |w, window, cx| match result {
                 Ok(()) => {
                     w.modal = None;
-                    let opts = SessionOpts {
-                        name: name.or(Some(branch)),
-                        claude: Some(claude),
-                        prompt,
-                        setup: true,
-                        project: Some(project),
-                    };
+                    let opts = SessionOpts { name, claude: Some(claude), prompt, setup: true, project: Some(project) };
                     w.new_session_with(path, opts, window, cx);
                 }
                 Err(e) => {

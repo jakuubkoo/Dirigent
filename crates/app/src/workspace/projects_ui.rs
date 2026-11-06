@@ -393,6 +393,12 @@ impl Workspace {
                         "A new session in the same directory, with the project's defaults",
                     ),
                 ];
+                if t.custom.is_some() {
+                    v.insert(
+                        1,
+                        ("auto-name", "Reset to automatic name".into(), "Use Claude's title or the first prompt"),
+                    );
+                }
                 if resumable {
                     v.push(("resume", "Resume Claude session".into(), ""));
                 }
@@ -519,6 +525,7 @@ impl Workspace {
     fn session_action(&mut self, i: usize, action: &str, dir: PathBuf, window: &mut Window, cx: &mut Context<Self>) {
         match action {
             "rename" => self.start_rename(i, window, cx),
+            "auto-name" => self.reset_name(i, cx),
             "close" => self.close_session(i, false, window, cx),
             "restart" => self.close_session(i, true, window, cx),
             "duplicate" => self.duplicate(i, window, cx),

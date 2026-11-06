@@ -427,6 +427,7 @@ mod tests {
             tool: tool.map(Into::into),
             tool_use_id: id.map(Into::into),
             path: path.map(|p| format!("{ROOT}/{p}")),
+            title: None,
         }
     }
 
@@ -626,6 +627,7 @@ mod tests {
             tool: Some("Bash".into()),
             tool_use_id: Some(id.into()),
             path: None,
+            title: None,
         };
         t.hook(1, &h("PreToolUse", "b1"));
         std::fs::write(d.join("made.txt"), "x\n").unwrap();

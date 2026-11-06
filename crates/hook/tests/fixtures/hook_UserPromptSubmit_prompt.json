@@ -1,0 +1,10 @@
+{
+  "session_id": "00000000-0000-4000-8000-000000000004",
+  "transcript_path": "/tmp/redacted",
+  "cwd": "/tmp/redacted",
+  "scratchpad_dir": "/tmp/redacted",
+  "prompt_id": "00000000-0000-4000-8000-000000000005",
+  "permission_mode": "auto",
+  "hook_event_name": "UserPromptSubmit",
+  "prompt": "Reply with just the word ok"
+}

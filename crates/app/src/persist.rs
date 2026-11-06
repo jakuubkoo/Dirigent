@@ -47,7 +47,14 @@ impl Default for State {
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 pub struct TabState {
+    /// The name shown (older builds read only this).
     pub name: String,
+    /// `name` is one the user set (rename, setup dialog); None = a file from before automatic names.
+    #[serde(default)]
+    pub custom: Option<bool>,
+    /// The automatic name and its source (see `agent::offer`).
+    #[serde(default)]
+    pub auto: Option<crate::agent::Auto>,
     pub cwd: PathBuf,
     /// Claude Code session id of the last agent that ran in this tab.
     #[serde(default)]
@@ -266,6 +273,12 @@ mod tests {
         State {
             tabs: vec![TabState {
                 name: "api".into(),
+                custom: Some(false),
+                auto: Some(crate::agent::Auto {
+                    text: "api".into(),
+                    source: crate::agent::Source::Claude,
+                    session: Some("00000000-0000-4000-8000-000000000005".into()),
+                }),
                 cwd: "/home/x/api".into(),
                 claude_session: Some("00000000-0000-4000-8000-000000000005".into()),
                 claude_args: vec!["--model".into(), "haiku".into()],
@@ -299,6 +312,7 @@ mod tests {
         .unwrap();
         let old = load(&p);
         assert_eq!(old.tabs[0].claude_session, None);
+        assert_eq!((old.tabs[0].custom, &old.tabs[0].auto), (None, &None), "before automatic names");
         assert_eq!(old.git_panel, PanelState::default(), "files from before the git panel load with its defaults");
         assert!(old.tabs[0].expanded.is_empty());
         assert_eq!(old.sidebar.tab, PanelTab::Sessions, "files from before the docks: the left dock shows Sessions");

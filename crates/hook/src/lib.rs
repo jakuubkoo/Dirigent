@@ -30,16 +30,24 @@ pub enum Kind {
         /// PostToolUse of a tool that writes files: the absolute path it touched.
         #[serde(default)]
         path: Option<String>,
+        /// UserPromptSubmit: a short title made from the prompt (`notice::prompt_title`), never the whole prompt.
+        #[serde(default)]
+        title: Option<String>,
     },
     /// The arguments `claude` was started with in this tab (sent by the shim before it execs claude).
-    Argv {
-        args: Vec<String>,
-    },
+    Argv { args: Vec<String> },
     Status {
         model: Option<String>,
         context_pct: Option<f32>,
         five_hour: Option<Limit>,
         seven_day: Option<Limit>,
+        /// Claude Code's own session title: `-n`/`--name`, `/rename`, else the title it generates after the first
+        /// response (null before; verified on 2.1.319).
+        #[serde(default)]
+        session_name: Option<String>,
+        /// The session `session_name` belongs to (a status can arrive before SessionStart or after `/clear`).
+        #[serde(default)]
+        session_id: Option<String>,
     },
 }
 
@@ -81,6 +89,7 @@ pub fn parse(mode: &str, json: &str) -> Option<Kind> {
                     };
                     abs.to_str().map(str::to_owned)
                 });
+            let title = v["prompt"].as_str().filter(|_| event == "UserPromptSubmit").and_then(notice::prompt_title);
             Some(Kind::Hook {
                 event,
                 notification_type: s(&v["notification_type"]),
@@ -90,6 +99,7 @@ pub fn parse(mode: &str, json: &str) -> Option<Kind> {
                 tool,
                 tool_use_id: s(&v["tool_use_id"]),
                 path,
+                title,
             })
         }
         "status" => {
@@ -101,6 +111,8 @@ pub fn parse(mode: &str, json: &str) -> Option<Kind> {
                 context_pct: v["context_window"]["used_percentage"].as_f64().map(|p| p as f32),
                 five_hour: limit(&v["rate_limits"]["five_hour"]),
                 seven_day: limit(&v["rate_limits"]["seven_day"]),
+                session_name: s(&v["session_name"]).filter(|n| !n.trim().is_empty()),
+                session_id: s(&v["session_id"]),
             })
         }
         _ => None,
@@ -363,6 +375,7 @@ mod tests {
             tool: None,
             tool_use_id: None,
             path: None,
+            title: None,
         };
         assert_eq!(parse("hook", &fixture("hook_Notification")), Some(want));
     }
@@ -414,7 +427,14 @@ mod tests {
         let first = parse("status", &fixture("status_first")).unwrap();
         assert_eq!(
             first,
-            Kind::Status { model: Some("Haiku 5.5".into()), context_pct: None, five_hour: None, seven_day: None }
+            Kind::Status {
+                model: Some("Haiku 5.5".into()),
+                context_pct: None,
+                five_hour: None,
+                seven_day: None,
+                session_name: None,
+                session_id: Some("00000000-0000-4000-8000-000000000003".into()),
+            }
         );
         let after = parse("status", &fixture("status_after_response")).unwrap();
         assert_eq!(
@@ -424,8 +444,28 @@ mod tests {
                 context_pct: Some(6.),
                 five_hour: Some(Limit { used_pct: 14., resets_at: 1793836800 }),
                 seven_day: Some(Limit { used_pct: 23., resets_at: 1793941200 }),
+                session_name: Some("Ok".into()),
+                session_id: Some("00000000-0000-4000-8000-000000000003".into()),
             }
         );
+    }
+
+    #[test]
+    fn session_names_from_real_claude() {
+        // 2.1.319: `-n foo named` from the first status on, the generated title after the first response, `/rename`.
+        let name = |f: &str| match parse("status", &fixture(f)) {
+            Some(Kind::Status { session_name, .. }) => session_name,
+            other => panic!("{other:?}"),
+        };
+        assert_eq!(name("status_named").as_deref(), Some("foo named"));
+        assert_eq!(name("status_ai_title").as_deref(), Some("Reply with ok"));
+        assert_eq!(name("status_renamed").as_deref(), Some("bar renamed"));
+        let title = |f: &str| match parse("hook", &fixture(f)) {
+            Some(Kind::Hook { title, .. }) => title,
+            other => panic!("{other:?}"),
+        };
+        assert_eq!(title("hook_UserPromptSubmit_prompt").as_deref(), Some("Reply with just the word ok"));
+        assert_eq!(title("hook_Stop"), None);
     }
 
     #[test]
