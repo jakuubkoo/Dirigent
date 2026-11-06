@@ -155,6 +155,7 @@ impl Workspace {
             return;
         }
         slot.loading = true;
+        crate::perf::event_with(|| format!("pr lookup ({})", if recheck { "recheck" } else { "branch/push" }));
         cx.spawn(async move |this, cx| {
             let (r, b) = (root.clone(), branch.clone());
             let view = cx.background_executor().spawn(async move { crate::pr::lookup(&r, &b, recheck) }).await;
