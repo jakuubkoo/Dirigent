@@ -1,0 +1,41 @@
+# A PR that changes crates/ must add a line under [Unreleased] in CHANGELOG.md, unless it carries the
+# `no-changelog` label (nothing user-facing changed: refactors, tests, perf with no visible effect). Its own
+# workflow, so adding or removing the label re-runs only this check.
+name: Changelog
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, labeled, unlabeled]
+
+permissions:
+  contents: read
+  pull-requests: read
+
+concurrency:
+  group: changelog-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  changelog:
+    runs-on: ubuntu-24.04
+    steps:
+      - name: crates/ changed → CHANGELOG.md changed (or the no-changelog label)
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          PR: ${{ github.event.pull_request.number }}
+          SKIP: ${{ contains(github.event.pull_request.labels.*.name, 'no-changelog') }}
+        run: |
+          if [ "$SKIP" = true ]; then
+            echo "Labelled no-changelog: skipped."
+            exit 0
+          fi
+          files=$(gh pr diff "$PR" --repo "$REPO" --name-only) || exit 1 # never pass on an API error
+          if ! grep -q '^crates/' <<<"$files"; then
+            echo "Nothing under crates/ changed."
+          elif grep -qx 'CHANGELOG.md' <<<"$files"; then
+            echo "CHANGELOG.md is updated."
+          else
+            echo "::error::This PR changes crates/ but not CHANGELOG.md. Add a line under [Unreleased], or add the no-changelog label if nothing user-facing changed."
+            exit 1
+          fi
