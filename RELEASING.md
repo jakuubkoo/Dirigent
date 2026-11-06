@@ -76,7 +76,7 @@ The key never expires, so there is no renewal date to track.
   key and the fingerprint in README.md, release.yml (`APT_KEY_FPR`) and here. Then release, or re-run the workflow. Users fetch the new key once
   with the `curl` line from the README.
 
-A PR that changes the release workflow, the packaging scripts (`scripts/install.sh`, `uninstall.sh`, `build-deb.sh`,
-`apt-repo.sh`, `test-apt-repo.sh`), `packaging/` or `CHANGELOG.md` runs the same build and packaging as a dry
-run: the tarball and the `.deb` are workflow artifacts, and nothing is released. The dry run also installs and
+A PR from a `release/*` branch, or one that changes the release workflow, `scripts/install.sh`,
+`scripts/build-deb.sh`, `scripts/apt-repo.sh` or `packaging/`, runs the same build and packaging as a dry run
+(the `gate` job decides; other PRs show the release jobs as skipped): the tarball and the `.deb` are workflow artifacts, and nothing is released. The dry run also installs and
 upgrades the `.deb` from a throwaway-key repository in clean Ubuntu 22.04 and 24.04 containers.
