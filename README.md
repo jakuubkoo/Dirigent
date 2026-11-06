@@ -34,7 +34,7 @@ Add the repository once:
 ```sh
 sudo install -d -m 0755 /etc/apt/keyrings
 sudo curl -fsSLo /etc/apt/keyrings/dirigent.gpg https://jakuubkoo.github.io/Dirigent/dirigent.gpg
-gpg --show-keys /etc/apt/keyrings/dirigent.gpg   # the fingerprint must be 13908CD90639090230BDAADB062C629428541A41
+gpg --show-keys /etc/apt/keyrings/dirigent.gpg   # the fingerprint must be A604D170945C76BBA9E4EE3025E2F2B4838194E1
 sudo curl -fsSLo /etc/apt/sources.list.d/dirigent.sources https://jakuubkoo.github.io/Dirigent/dirigent.sources
 sudo apt update && sudo apt install dirigent
 ```

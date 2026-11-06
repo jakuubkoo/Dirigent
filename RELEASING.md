@@ -30,11 +30,15 @@ version.
 ## APT repository key
 
 The repository is signed with a dedicated ed25519 key without expiry. Fingerprint:
-`13908CD90639090230BDAADB062C629428541A41`.
+`A604D170945C76BBA9E4EE3025E2F2B4838194E1`.
 
-- The private half lives in two places only: the `APT_SIGNING_KEY` repository secret and an offline backup.
+- The private half lives in two places only:
+  - the `APT_SIGNING_KEY` secret of the `github-pages` environment, which only the deploying job can read (there is
+    no repository-level secret);
+  - an encrypted backup.
 - The public half is committed as `packaging/dirigent-archive-keyring.asc`.
-- The workflow refuses to sign unless the secret is that key.
+- The fingerprint is pinned in `.github/workflows/release.yml` (`APT_KEY_FPR`). The workflow refuses to sign unless
+  both the committed public key and the secret are that key.
 
 One-time setup, run locally (the key never leaves your machine except into the secret):
 
@@ -42,10 +46,11 @@ One-time setup, run locally (the key never leaves your machine except into the s
 export GNUPGHOME=$(mktemp -d)
 gpg --batch --passphrase '' --quick-gen-key "Dirigent APT repository <33603479+jakuubkoo@users.noreply.github.com>" ed25519 sign never
 FPR=$(gpg --list-keys --with-colons | awk -F: '/^fpr/ {print $10; exit}')
-gpg --armor --export-secret-keys "$FPR" > /path/to/offline/dirigent-apt-key.asc   # the backup: keep it off this machine
-gpg --armor --export-secret-keys "$FPR" | gh secret set APT_SIGNING_KEY --repo jakuubkoo/Dirigent
+# The encrypted backup (gpg asks for a passphrase; keep the file and the passphrase apart, off this machine):
+gpg --armor --export-secret-keys "$FPR" | gpg --symmetric --armor --output dirigent-apt-key.asc.gpg
+gpg --armor --export-secret-keys "$FPR" | gh secret set APT_SIGNING_KEY --env github-pages --repo jakuubkoo/Dirigent
 gpg --armor --export "$FPR" > packaging/dirigent-archive-keyring.asc             # run in the checkout; committed
-echo "$FPR"     # goes into README.md and this file (the fingerprint users check)
+echo "$FPR"     # goes into README.md, release.yml (APT_KEY_FPR) and this file
 rm -rf "$GNUPGHOME"
 ```
 
@@ -59,9 +64,9 @@ gh api -X POST repos/jakuubkoo/Dirigent/environments/github-pages/deployment-bra
 The key never expires, so there is no renewal date to track.
 
 - **Secret lost or overwritten:** restore it from the backup with
-  `gh secret set APT_SIGNING_KEY --repo jakuubkoo/Dirigent < /path/to/offline/dirigent-apt-key.asc`.
+  `gpg --decrypt dirigent-apt-key.asc.gpg | gh secret set APT_SIGNING_KEY --env github-pages --repo jakuubkoo/Dirigent`.
 - **Key may have leaked:** rotate it. Create a new key the same way, then replace the secret, the committed public
-  key and the fingerprint in README.md and here. Then release, or re-run the workflow. Users fetch the new key once
+  key and the fingerprint in README.md, release.yml (`APT_KEY_FPR`) and here. Then release, or re-run the workflow. Users fetch the new key once
   with the `curl` line from the README.
 
 A PR that changes the release workflow, the packaging scripts (`scripts/install.sh`, `uninstall.sh`, `build-deb.sh`,

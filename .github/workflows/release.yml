@@ -139,6 +139,8 @@ jobs:
       url: ${{ steps.deploy.outputs.page_url }}
     env:
       KEEP: 5 # releases whose .deb stays installable
+      # The repository key (also in README.md and RELEASING.md): the committed public key and the secret must be it.
+      APT_KEY_FPR: A604D170945C76BBA9E4EE3025E2F2B4838194E1
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -156,15 +158,18 @@ jobs:
           ls debs
       - name: Build and sign the repository
         env:
+          # An environment secret of github-pages: only jobs deploying there can read it.
           APT_SIGNING_KEY: ${{ secrets.APT_SIGNING_KEY }}
         run: |
+          # Only the pinned key may sign: a swapped secret or a swapped committed public key fails here.
+          pub=$(gpg --show-keys --with-colons packaging/dirigent-archive-keyring.asc | awk -F: '/^fpr/ {print $10; exit}')
+          [[ "$pub" == "$APT_KEY_FPR" ]] || { echo "::error::committed public key is $pub, not $APT_KEY_FPR"; exit 1; }
           export GNUPGHOME="$RUNNER_TEMP/gnupg"
           mkdir -m 700 "$GNUPGHOME"
           printf '%s\n' "$APT_SIGNING_KEY" | gpg --batch --import
-          # Only the key whose public half is committed may sign: a swapped secret fails here.
-          fpr=$(gpg --show-keys --with-colons packaging/dirigent-archive-keyring.asc | awk -F: '/^fpr/ {print $10; exit}')
-          gpg --batch --list-secret-keys "$fpr" >/dev/null || { echo "::error::APT_SIGNING_KEY is not $fpr"; exit 1; }
-          scripts/apt-repo.sh debs site "$fpr" packaging/dirigent-archive-keyring.asc
+          gpg --batch --list-secret-keys "$APT_KEY_FPR" >/dev/null \
+            || { echo "::error::APT_SIGNING_KEY is not $APT_KEY_FPR"; exit 1; }
+          scripts/apt-repo.sh debs site "$APT_KEY_FPR" packaging/dirigent-archive-keyring.asc
           rm -rf "$GNUPGHOME"
       - uses: actions/upload-pages-artifact@fc324d3547104276b827a68afc52ff2a11cc49c9 # v5.0.0
         with:
