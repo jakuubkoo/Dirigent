@@ -302,6 +302,8 @@ pub struct FileView {
     cell_width: Pixels,
     /// One px under the terminal's font size (Settings → Terminal).
     font_size: Pixels,
+    /// A line to show once the content has arrived (opened from a `path:line` link).
+    go_to: Option<usize>,
 }
 
 impl FileView {
@@ -328,6 +330,16 @@ impl FileView {
             line_height: m.line_height,
             cell_width: m.cell_width,
             font_size: m.font_size - z(1.),
+            go_to: None,
+        }
+    }
+
+    /// Shows 1-based `line` near the top (a few lines of context above it), now or once the content has loaded.
+    pub fn go_to_line(&mut self, line: usize, cx: &mut Context<Self>) {
+        if self.content.is_some() {
+            self.scroll_to(line.saturating_sub(4), cx);
+        } else {
+            self.go_to = Some(line);
         }
     }
 
@@ -354,6 +366,9 @@ impl FileView {
             None => self.failed = true,
         }
         self.change = change;
+        if let Some(line) = self.go_to.take().filter(|_| self.content.is_some()) {
+            self.scroll.scroll_to_item(line.saturating_sub(4), ScrollStrategy::Top);
+        }
         cx.notify();
     }
 

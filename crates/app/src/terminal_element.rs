@@ -1,20 +1,24 @@
 //! Paints the visible terminal grid. The term lock is held only while copying the grid into
 //! segments/rects; shaping and painting happen after it is released.
 
+use std::cell::Cell;
 use std::rc::Rc;
 use std::time::Instant;
 
 use gpui::{
     App, Bounds, Element, ElementId, Font, FontStyle, FontWeight, GlobalElementId, Hsla, InspectorElementId,
-    IntoElement, LayoutId, Pixels, ShapedLine, SharedString, StrikethroughStyle, Style, TextAlign, TextRun,
-    UnderlineStyle, Window, fill, font, point, relative, size,
+    IntoElement, LayoutId, MouseMoveEvent, MouseUpEvent, Pixels, ShapedLine, SharedString, StrikethroughStyle, Style,
+    TextAlign, TextRun, UnderlineStyle, WeakEntity, Window, fill, font, point, relative, size,
 };
+use gpui::DispatchPhase;
+use session::alacritty_terminal::index::Point as GridPoint;
 use session::alacritty_terminal::grid::Dimensions;
 use session::alacritty_terminal::term::cell::Flags;
 use session::alacritty_terminal::term::color::Colors;
 use session::alacritty_terminal::vte::ansi::{Color, CursorShape, NamedColor};
 use session::Session;
 
+use crate::terminal_view::TerminalView;
 use crate::theme::{z, self, MONO_FONT};
 
 #[derive(Clone)]
@@ -92,11 +96,24 @@ struct Segment {
 pub struct TerminalElement {
     session: Rc<Session>,
     m: Metrics,
+    /// Where the grid was laid out (the view maps mouse positions to cells with it).
+    bounds: Rc<Cell<Bounds<Pixels>>>,
+    /// The hovered link's first and last cell: underlined.
+    hover: Option<(GridPoint, GridPoint)>,
+    /// While a mouse button is held in the grid: the view gets every move / release in the window, also past the
+    /// grid's edge (a div's handlers only fire while hovered).
+    drag: Option<WeakEntity<TerminalView>>,
 }
 
 impl TerminalElement {
-    pub fn new(session: Rc<Session>, m: Metrics) -> Self {
-        Self { session, m }
+    pub fn new(
+        session: Rc<Session>,
+        m: Metrics,
+        bounds: Rc<Cell<Bounds<Pixels>>>,
+        hover: Option<(GridPoint, GridPoint)>,
+        drag: Option<WeakEntity<TerminalView>>,
+    ) -> Self {
+        Self { session, m, bounds, hover, drag }
     }
 }
 
@@ -148,7 +165,10 @@ impl Element for TerminalElement {
         _: &mut App,
     ) -> Prepainted {
         let started = Instant::now();
+        self.bounds.set(bounds);
         let m = &self.m;
+        let selection_bg: Hsla = theme::get().terminal.selection.into();
+        let hover = self.hover;
         let mut rects: Vec<(usize, usize, usize, Hsla)> = Vec::new();
         let mut segs: Vec<Segment> = Vec::new();
         let mut cursor = None;
@@ -162,6 +182,8 @@ impl Element for TerminalElement {
             let cur_row = cur.point.line.0 + offset;
             let cur_visible = cur.shape != CursorShape::Hidden && (0..screen_lines as i32).contains(&cur_row);
             let cur_at = (cur_row as usize, cur.point.column.0);
+            // Only with a selection / a hovered link: no extra work per cell otherwise.
+            let selection = content.selection;
 
             for cell in content.display_iter {
                 let flags = cell.flags;
@@ -184,6 +206,10 @@ impl Element for TerminalElement {
                 if flags.contains(Flags::HIDDEN) {
                     fg = bg;
                 }
+                if selection.is_some_and(|s| s.contains(cell.point)) {
+                    bg = selection_bg;
+                }
+                let linked = hover.is_some_and(|(s, e)| s <= cell.point && cell.point <= e);
                 let wide = flags.contains(Flags::WIDE_CHAR);
                 let width = if wide { 2 } else { 1 };
 
@@ -193,7 +219,7 @@ impl Element for TerminalElement {
                         _ => rects.push((row, col, width, bg)),
                     }
                 }
-                if cell.c == ' ' && cell.zerowidth().is_none() && !flags.intersects(Flags::ALL_UNDERLINES | Flags::STRIKEOUT) {
+                if cell.c == ' ' && cell.zerowidth().is_none() && !linked && !flags.intersects(Flags::ALL_UNDERLINES | Flags::STRIKEOUT) {
                     continue; // blanks are not shaped; a segment ends at the gap
                 }
 
@@ -204,7 +230,7 @@ impl Element for TerminalElement {
                 if flags.intersects(Flags::ITALIC) {
                     run_font.style = FontStyle::Italic;
                 }
-                let underline = flags.intersects(Flags::ALL_UNDERLINES).then(|| UnderlineStyle {
+                let underline = (linked || flags.intersects(Flags::ALL_UNDERLINES)).then(|| UnderlineStyle {
                     color: Some(fg),
                     thickness: z(1.),
                     wavy: flags.contains(Flags::UNDERCURL),
@@ -278,6 +304,19 @@ impl Element for TerminalElement {
         }
         if let Some(c) = p.cursor {
             window.paint_quad(fill(c, theme::get().terminal.cursor));
+        }
+        if let Some(view) = self.drag.clone() {
+            let v = view.clone();
+            window.on_mouse_event(move |e: &MouseMoveEvent, phase, _, cx| {
+                if phase == DispatchPhase::Bubble {
+                    let _ = v.update(cx, |v, cx| v.drag_to(e.position, e.modifiers, e.pressed_button.is_some(), cx));
+                }
+            });
+            window.on_mouse_event(move |e: &MouseUpEvent, phase, window, cx| {
+                if phase == DispatchPhase::Bubble {
+                    let _ = view.update(cx, |v, cx| v.mouse_up(e, window, cx));
+                }
+            });
         }
         crate::perf::term_paint(p.started);
     }

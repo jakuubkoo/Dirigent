@@ -263,7 +263,8 @@ pub struct Workspace {
     /// The font size or UI zoom changed: metrics are rebuilt at the next render (needs the window).
     metrics_stale: bool,
     /// The UI zoom just changed: the status bar shows it until this timer ends.
-    pub(crate) zoom_flash: Option<Task<()>>,
+    /// A short status-bar message ("Zoom 120%", "Not a file: …") and the timer that clears it.
+    pub(crate) flash: Option<(String, Task<()>)>,
     _click_task: Option<Task<()>>,
     /// `dirigent <path>` requests from other processes.
     _cli_task: Option<Task<()>>,
@@ -403,7 +404,7 @@ impl Workspace {
             _settings_watch: None,
             _settings_task: None,
             metrics_stale: false,
-            zoom_flash: None,
+            flash: None,
             _click_task: None,
             _cli_task: None,
             projects: crate::projects::Projects(saved.projects.clone().unwrap_or_default()),
@@ -1987,6 +1988,44 @@ impl Workspace {
         }
     }
 
+    /// Shows `text` in the status bar for a moment; a new one replaces it (and its timer).
+    pub(crate) fn flash(&mut self, text: String, cx: &mut Context<Self>) {
+        let task = cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(Duration::from_millis(1500)).await;
+            let _ = this.update(cx, |w, cx| {
+                w.flash = None;
+                cx.notify();
+            });
+        });
+        self.flash = Some((text, task));
+        cx.notify();
+    }
+
+    /// Ctrl+click on a path printed in a session: resolved against that session's directory (`~/` from home),
+    /// checked off-thread, then shown in the preview at `line`. Not a file: a status-bar note.
+    pub fn open_path_from(&mut self, view_id: EntityId, raw: String, line: Option<u32>, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(i) = self.tab_of_view(view_id) else { return };
+        let joined = match raw.strip_prefix("~/") {
+            Some(rest) => home().join(rest),
+            None => self.tabs[i].cwd.join(&raw),
+        };
+        let path: PathBuf = joined.components().filter(|c| !matches!(c, std::path::Component::CurDir)).collect();
+        cx.spawn_in(window, async move |this, cx| {
+            let p = path.clone();
+            let is_file = cx.background_executor().spawn(async move { p.is_file() }).await;
+            let _ = this.update_in(cx, |w, window, cx| {
+                if !is_file {
+                    return w.flash(format!("Not a file: {}", tilde(&path)), cx);
+                }
+                w.open_file(path, false, window, cx);
+                if let (Some(line), Some(Overlay::File(f))) = (line, &w.overlay) {
+                    f.update(cx, |f, cx| f.go_to_line(line as usize, cx));
+                }
+            });
+        })
+        .detach();
+    }
+
     /// Makes `new` the live settings, touching only what changed.
     fn apply_settings(&mut self, new: Settings, cx: &mut Context<Self>) {
         let old = std::mem::replace(&mut self.settings, new);
@@ -1995,14 +2034,7 @@ impl Workspace {
         }
         if old.ui_zoom != new.ui_zoom {
             crate::theme::set_zoom(new.ui_zoom as f32 / 100.);
-            // Shown in the status bar for a moment; a new step replaces the timer.
-            self.zoom_flash = Some(cx.spawn(async move |this, cx| {
-                cx.background_executor().timer(Duration::from_millis(1500)).await;
-                let _ = this.update(cx, |w, cx| {
-                    w.zoom_flash = None;
-                    cx.notify();
-                });
-            }));
+            self.flash(format!("Zoom {}%", new.ui_zoom), cx);
         }
         if old.scrollback != new.scrollback {
             for view in self.tabs.iter().filter_map(|t| t.view.as_ref()) {

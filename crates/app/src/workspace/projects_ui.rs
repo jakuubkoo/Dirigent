@@ -59,6 +59,8 @@ pub(super) enum MenuKind {
     Project,
     /// Right click / Shift+F10 on a session row: the tab id.
     Session(usize),
+    /// Right click in a session's terminal: the tab id.
+    Terminal(usize),
 }
 
 /// (action, label, one-line explanation)
@@ -296,6 +298,13 @@ impl Workspace {
         cx.notify();
     }
 
+    /// Right click in a terminal (Shift+right click while its app takes the mouse): Copy / Paste / Select all.
+    pub fn open_terminal_menu(&mut self, view_id: EntityId, at: Point<Pixels>, cx: &mut Context<Self>) {
+        let Some(i) = self.tab_of_view(view_id) else { return };
+        self.menu = Some(Menu { root: PathBuf::new(), kind: MenuKind::Terminal(self.tabs[i].id), at, sel: None });
+        cx.notify();
+    }
+
     /// The open menu's items (the same list is drawn and walked by the keyboard).
     fn menu_items(&self, menu: &Menu, cx: &gpui::App) -> Vec<Item> {
         match menu.kind {
@@ -319,6 +328,16 @@ impl Workspace {
                 if self.projects.get(&menu.root).is_some() {
                     v.push(("remove", "Remove from recent projects", "Forget it in the picker; files and open sessions stay"));
                 }
+                v
+            }
+            MenuKind::Terminal(id) => {
+                let view = self.tab_idx(id).and_then(|i| self.tabs[i].view.as_ref());
+                let mut v = Vec::new();
+                if view.is_some_and(|v| v.read(cx).has_selection()) {
+                    v.push(("copy", "Copy", "Ctrl+Shift+C"));
+                }
+                v.push(("paste", "Paste", "Ctrl+Shift+V"));
+                v.push(("select_all", "Select all", ""));
                 v
             }
             MenuKind::Session(id) => {
@@ -376,6 +395,17 @@ impl Workspace {
     fn menu_action(&mut self, action: &'static str, window: &mut Window, cx: &mut Context<Self>) {
         let Some(menu) = self.menu.take() else { return };
         let root = menu.root;
+        if let MenuKind::Terminal(id) = menu.kind {
+            if let Some(view) = self.tab_idx(id).and_then(|i| self.tabs[i].view.clone()) {
+                view.update(cx, |v, cx| match action {
+                    "copy" => v.copy(cx),
+                    "paste" => v.paste_clipboard(cx),
+                    "select_all" => v.select_all(cx),
+                    _ => {}
+                });
+            }
+            return cx.notify();
+        }
         if let MenuKind::Session(id) = menu.kind {
             if let Some(i) = self.tab_idx(id) {
                 self.session_action(i, action, root, window, cx);

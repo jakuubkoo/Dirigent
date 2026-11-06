@@ -815,9 +815,7 @@ impl Workspace {
             .children(limit("5h", five))
             .children(limit("Week", seven))
             .child(div().flex_1())
-            .when(self.zoom_flash.is_some(), |d| {
-                d.child(div().text_color(t.text.primary).child(format!("Zoom {}%", self.settings.ui_zoom)))
-            })
+            .children(self.flash.as_ref().map(|(text, _)| div().text_color(t.text.primary).child(text.clone())))
             .when(!self.settings_notes.is_empty(), |d| {
                 let n = self.settings_notes.len();
                 d.child(
