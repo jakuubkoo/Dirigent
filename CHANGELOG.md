@@ -19,8 +19,8 @@ All notable changes to Dirigent are recorded here. The format follows
 
 - New session dialog: the first prompt is multi-line and wraps (3 to 10 lines, then it scrolls). Enter adds a line
   there, Ctrl+Enter creates the session. The prompt reaches claude as written (new lines and quotes intact, whatever
-  your shell): it goes through a file in the runtime folder that the `claude` shim reads and deletes, never through
-  the typed command.
+  your shell, also behind an alias that adds flags): it goes through a file in the runtime folder that the `claude`
+  shim reads and deletes, never through the typed command.
 - Every single-line field (dialogs, search, find, settings): a click places the cursor, drag or Shift+click selects,
   a double click selects a word, the field scrolls to keep the cursor visible, and Ctrl+C / X / V / A, Ctrl+Z / Y
   (undo, redo) and Ctrl+←/→ (word moves) work.

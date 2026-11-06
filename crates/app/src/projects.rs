@@ -188,18 +188,18 @@ pub fn inside_repo(repo_root: &Path, path: &Path) -> bool {
     path.starts_with(repo_root)
 }
 
-/// What a new session types: `<setup> && claude [--dirigent-prompt-file <file>] <flags>` (each part optional;
-/// None: nothing). The first prompt never goes through your shell: it waits in `prompt_file` and our `claude` shim
-/// passes it on as one argument, newlines and quotes intact (`agent::SHIM`). Flags are shell-quoted; the setup
-/// command is typed as you wrote it.
+/// What a new session types: `<setup> && [DIRIGENT_PROMPT_FILE=<file>] claude <flags>` (each part optional; None:
+/// nothing). The first prompt never goes through your shell: it waits in `prompt_file` and our `claude` shim passes
+/// it on as one argument, newlines and quotes intact (`agent::SHIM`). An env var, not an argument: an alias that
+/// adds flags (`alias claude='claude --model opus'`) still expands after the assignment and can't move it. Flags
+/// are shell-quoted; the setup command is typed as you wrote it.
 pub fn start_line(setup: Option<&str>, claude: bool, args: &[String], prompt_file: Option<&Path>) -> Option<String> {
     let claude = claude.then(|| {
-        let mut words = vec!["claude".to_string()];
+        let mut words = Vec::new();
         if let Some(f) = prompt_file {
-            // First: the shim only looks there.
-            words.push(crate::agent::PROMPT_FLAG.into());
-            words.push(crate::workspace::sh_word(&f.to_string_lossy()));
+            words.push(format!("{}={}", crate::agent::PROMPT_ENV, crate::workspace::sh_word(&f.to_string_lossy())));
         }
+        words.push("claude".to_string());
         words.extend(args.iter().map(|a| crate::workspace::sh_word(a)));
         words.join(" ")
     });
@@ -397,11 +397,11 @@ mod tests {
         assert_eq!(start_line(None, true, &args, None).unwrap(), "claude --model opus");
         assert_eq!(
             start_line(Some(" pnpm install "), true, &args, Some(file)).unwrap(),
-            "pnpm install && claude --dirigent-prompt-file /run/user/1/dirigent-9/prompt-3-1.txt --model opus"
+            "pnpm install && DIRIGENT_PROMPT_FILE=/run/user/1/dirigent-9/prompt-3-1.txt claude --model opus"
         );
         assert_eq!(
             start_line(None, true, &[], Some(Path::new("/tmp/it's here/p.txt"))).unwrap(),
-            "claude --dirigent-prompt-file '/tmp/it'\\''s here/p.txt'"
+            "DIRIGENT_PROMPT_FILE='/tmp/it'\\''s here/p.txt' claude"
         );
         assert_eq!(start_line(Some("cargo fetch"), false, &[], None).unwrap(), "cargo fetch");
         assert_eq!(start_line(Some("  "), true, &[], None).unwrap(), "claude");
