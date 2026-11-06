@@ -6,6 +6,10 @@ All notable changes to Dirigent are recorded here. The format follows
 
 ## [Unreleased]
 
+## [0.1.1] - 2026-11-06
+
+Install and update Dirigent with apt.
+
 ### Added
 
 - A `.deb` package (`/usr/lib/dirigent`, `/usr/bin/dirigent`, a launcher entry and icon, runtime dependencies
@@ -74,5 +78,6 @@ The first release: a native Linux app (Wayland and X11) for running many Claude 
   - Prebuilt Linux x86_64 tarballs with `install.sh --prebuilt` and SHA256 checksums.
   - CI checks formatting, clippy, tests, licenses and RustSec advisories.
 
-[Unreleased]: https://github.com/jakuubkoo/Dirigent/compare/v0.1.0...HEAD
+[Unreleased]: https://github.com/jakuubkoo/Dirigent/compare/v0.1.1...HEAD
+[0.1.1]: https://github.com/jakuubkoo/Dirigent/compare/v0.1.0...v0.1.1
 [0.1.0]: https://github.com/jakuubkoo/Dirigent/releases/tag/v0.1.0
