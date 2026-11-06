@@ -49,6 +49,7 @@ const CATS: [(Cat, &str); 8] = [
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum Key {
     Trust,
+    NameWithClaude,
     Zoom,
     Plus,
     FontSize,
@@ -86,6 +87,13 @@ const ITEMS: &[Item] = &[
         cat: Cat::General,
         label: "Answer Claude's folder trust dialog",
         desc: "When Dirigent starts claude in a folder it hasn't seen, pick \"Yes, I trust this folder\" for you.",
+        ctl: Ctl::Toggle,
+    },
+    Item {
+        key: Key::NameWithClaude,
+        cat: Cat::General,
+        label: "Name new sessions with Claude",
+        desc: "The New session dialog names the session and its branch from the first prompt with a small claude -p call on a cheap model (Haiku), once per new session. Off: no call; a branch written in the prompt and its first words still work.",
         ctl: Ctl::Toggle,
     },
     Item {
@@ -216,6 +224,7 @@ fn get(s: &Settings, k: Key) -> Val {
     let n = &s.notifications;
     match k {
         Key::Trust => Val::Bool(s.trust_auto_accept),
+        Key::NameWithClaude => Val::Bool(s.name_with_claude),
         Key::Plus => Val::Choice(match s.plus_opens {
             PlusOpens::Dialog => 0,
             PlusOpens::Project => 1,
@@ -241,6 +250,7 @@ fn get(s: &Settings, k: Key) -> Val {
 fn set(s: &mut Settings, k: Key, v: Val) {
     match (k, v) {
         (Key::Trust, Val::Bool(b)) => s.trust_auto_accept = b,
+        (Key::NameWithClaude, Val::Bool(b)) => s.name_with_claude = b,
         (Key::Plus, Val::Choice(i)) => {
             s.plus_opens = [PlusOpens::Dialog, PlusOpens::Project, PlusOpens::Shell, PlusOpens::Claude][i.min(3)]
         }
