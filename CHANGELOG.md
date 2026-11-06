@@ -36,6 +36,8 @@ All notable changes to Dirigent are recorded here. The format follows
 - Scrollbars in the diff (unified and split), file preview, Changes list, file tree and Search results can be
   dragged again, and clicking their track jumps there. They stopped responding as soon as any other part of the
   window redrew (e.g. a session spinner).
+- In a window that isn't maximized (GNOME), the right panel's scrollbar and row buttons no longer sit under the
+  window's resize edge, which took the clicks meant for them.
 
 ## [0.2.0] - 2026-11-06
 
