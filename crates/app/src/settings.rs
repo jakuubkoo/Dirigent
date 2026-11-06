@@ -86,6 +86,8 @@ pub struct Settings {
     pub fetch_minutes: u32,
     /// `git.hosts`: remote hosts whose forge / web UI the name doesn't give away (sorted by host). Hand-edited.
     pub hosts: Vec<git::remote::HostRule>,
+    /// Sections and keys this build doesn't know (an older or newer build's): written back as they are.
+    pub extra: serde_json::Map<String, Value>,
 }
 
 pub const FONT_SIZE: (f32, f32) = (8., 32.);
@@ -126,6 +128,7 @@ impl Default for Settings {
             layout: Layout::default(),
             fetch_minutes: 0,
             hosts: Vec::new(),
+            extra: serde_json::Map::new(),
         }
     }
 }
@@ -179,6 +182,17 @@ impl Settings {
                 out.insert(sec.clone(), changed.into());
             }
         }
+        // What another build wrote and this one doesn't know goes back as it was.
+        for (sec, val) in &self.extra {
+            match (out.get_mut(sec), val) {
+                (Some(Value::Object(known)), Value::Object(keys)) => {
+                    known.extend(keys.iter().map(|(k, v)| (k.clone(), v.clone())))
+                }
+                _ => {
+                    out.insert(sec.clone(), val.clone());
+                }
+            }
+        }
         let mut s = serde_json::to_string_pretty(&Value::Object(out)).unwrap_or_default();
         s.push('\n');
         s
@@ -205,7 +219,7 @@ pub fn parse(text: &str, fallback: &Settings) -> Parsed {
     let mut notes = Vec::new();
     let d = Settings::default();
     let mut g = Get { v: &v, notes: &mut notes };
-    let s = Settings {
+    let mut s = Settings {
         trust_auto_accept: g.get("general", "trust_auto_accept", d.trust_auto_accept, "true or false", |_| true),
         plus_opens: g.get("general", "plus_opens", d.plus_opens, "\"project\", \"shell\" or \"claude\"", |_| true),
         ui_zoom: g.get("general", "ui_zoom", d.ui_zoom, "a whole number 50–200 (percent)", |n: &u32| {
@@ -243,6 +257,7 @@ pub fn parse(text: &str, fallback: &Settings) -> Parsed {
             Layout { sessions, files, changes, search, left_width, right_width }
         },
         hosts: parse_hosts(&v["git"]["hosts"], g.notes),
+        extra: serde_json::Map::new(),
         fetch_minutes: g.get(
             "git",
             "fetch_minutes",
@@ -251,14 +266,25 @@ pub fn parse(text: &str, fallback: &Settings) -> Parsed {
             |n: &u32| (FETCH_MINUTES.0..=FETCH_MINUTES.1).contains(n),
         ),
     };
+    // Unknown sections and keys are noted and kept: saving writes them back, so a build that doesn't know a
+    // setting never deletes it.
     for (sec, val) in v.as_object().into_iter().flatten() {
         match KEYS.iter().find(|(s, _)| s == sec) {
-            None => notes.push(format!("{sec}: unknown section, ignored")),
+            None => {
+                notes.push(format!("{sec}: unknown section, kept as is"));
+                s.extra.insert(sec.clone(), val.clone());
+            }
             Some((_, keys)) => match val.as_object() {
                 None => notes.push(format!("{sec}: not an object, using the defaults")),
-                Some(o) => notes.extend(
-                    o.keys().filter(|k| !keys.contains(&k.as_str())).map(|k| format!("{sec}.{k}: unknown, ignored")),
-                ),
+                Some(o) => {
+                    for (k, kv) in o.iter().filter(|(k, _)| !keys.contains(&k.as_str())) {
+                        notes.push(format!("{sec}.{k}: unknown, kept as is"));
+                        let e = s.extra.entry(sec.clone()).or_insert_with(|| json!({}));
+                        if let Some(e) = e.as_object_mut() {
+                            e.insert(k.clone(), kv.clone());
+                        }
+                    }
+                }
             },
         }
     }
@@ -529,6 +555,7 @@ mod tests {
                 forge: git::remote::Forge::GitLab,
                 web: Some("https://gitlab.jakuubkoo.me".into()),
             }],
+            extra: serde_json::Map::new(),
         };
         let p = parse(&s.to_json(), &Settings::default());
         assert!(s.to_json().contains("\"fetch_minutes\": 15"));
@@ -626,6 +653,30 @@ mod tests {
         let out = parse(r#"{"terminal":{"font_size":40}}"#, &d);
         assert_eq!(out.settings.font_size, d.font_size, "out of range");
         assert_eq!(parse(r#"{"general":5}"#, &d).notes, vec!["general: not an object, using the defaults"]);
+    }
+
+    /// A section or key from another build (older or newer) survives a save from this one, with its note.
+    #[test]
+    fn unknown_sections_and_keys_are_written_back() {
+        let text = r#"{"themes": {"name": "nord", "list": [1, 2]}, "git": {"fetch_minutes": 5, "auto_prune": true},
+            "terminal": {"cursor": "beam"}}"#;
+        let p = parse(text, &Settings::default());
+        assert_eq!(p.settings.fetch_minutes, 5);
+        assert_eq!(p.notes.len(), 3, "{:?}", p.notes);
+        assert!(p.notes.iter().all(|n| n.ends_with("kept as is")), "{:?}", p.notes);
+        // A change from this build (font size), then a save.
+        let mut s = p.settings.clone();
+        s.font_size = 16.;
+        let saved: Value = serde_json::from_str(&s.to_json()).unwrap();
+        assert_eq!(saved["themes"], json!({"name": "nord", "list": [1, 2]}));
+        assert_eq!(saved["git"], json!({"fetch_minutes": 5, "auto_prune": true}));
+        assert_eq!(saved["terminal"], json!({"font_size": 16.0, "cursor": "beam"}));
+        // Read back by this build: the same settings and the same extras.
+        assert_eq!(parse(&s.to_json(), &Settings::default()).settings, s);
+        // Only an unknown key in a section that's otherwise all defaults: the section stays for it.
+        let only: Value =
+            serde_json::from_str(&parse(r#"{"diff": {"new": 1}}"#, &Settings::default()).settings.to_json()).unwrap();
+        assert_eq!(only, json!({"diff": {"new": 1}}));
     }
 
     #[test]
