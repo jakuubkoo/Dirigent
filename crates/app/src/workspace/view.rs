@@ -63,8 +63,8 @@ impl Render for Workspace {
             self.window_title = title;
         }
 
-        let left = self.dock(Dock::Left, cx);
-        let right = self.dock(Dock::Right, cx);
+        let left = self.dock(Dock::Left, z(0.), cx);
+        let right = self.dock(Dock::Right, chrome.right_inset(), cx);
 
         let title_bar = self.title_bar(window, chrome.csd, cx);
         self.spin_tick(cx);
@@ -482,7 +482,8 @@ impl Workspace {
 
     /// One dock: its tabs and the panel it shows, the divider on the terminal's side. Collapsed: a 10 px strip that
     /// reopens it; empty: nothing, except a drop strip while a tab is dragged.
-    fn dock(&mut self, d: Dock, cx: &mut Context<Self>) -> Option<gpui::AnyElement> {
+    /// `inset`: right padding that keeps the content clear of the window's resize strip.
+    fn dock(&mut self, d: Dock, inset: gpui::Pixels, cx: &mut Context<Self>) -> Option<gpui::AnyElement> {
         let t = theme::get();
         let lay = self.settings.layout;
         let shown = self.dock_shown(d);
@@ -526,6 +527,7 @@ impl Workspace {
             .id(if d == Dock::Left { "dock-left" } else { "dock-right" })
             .w(z(self.dock_width(d)))
             .h_full()
+            .pr(inset)
             .flex()
             .flex_col()
             .bg(if lay.sessions == d { self.panel_bg() } else { t.bg.panel })

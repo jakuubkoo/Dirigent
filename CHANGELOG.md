@@ -33,6 +33,11 @@ All notable changes to Dirigent are recorded here. The format follows
 - Settings: typing into a number field (e.g. Font size) no longer jumps back to the search box. After Enter or a
   click elsewhere the field keeps focus and shows the value just applied (it showed the previous one), and 13.52
   no longer shows as 13.520000457763672.
+- Scrollbars in the diff (unified and split), file preview, Changes list, file tree and Search results can be
+  dragged again, and clicking their track jumps there. They stopped responding as soon as any other part of the
+  window redrew (e.g. a session spinner).
+- In a window that isn't maximized (GNOME), the right panel's scrollbar and row buttons no longer sit under the
+  window's resize edge, which took the clicks meant for them.
 
 ## [0.2.0] - 2026-11-06
 

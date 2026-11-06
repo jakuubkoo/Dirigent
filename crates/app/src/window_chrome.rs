@@ -39,6 +39,12 @@ impl Chrome {
     pub fn horizontal(&self) -> Pixels {
         self.border * 2.
     }
+
+    /// Room the right resize strip takes inside the border: the right dock keeps its content (scrollbars, row
+    /// buttons) out of it, or the strip gets the clicks.
+    pub fn right_inset(&self) -> Pixels {
+        if self.csd && !self.tiling.right { z(EDGE) - self.border } else { z(0.) }
+    }
 }
 
 /// Minimize / maximize-restore / close, for the client-side title bar.
