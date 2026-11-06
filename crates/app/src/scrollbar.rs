@@ -25,27 +25,37 @@ fn thumb(track: Bounds<Pixels>, handle: &UniformListScrollHandle) -> Option<(Bou
     if max <= z(0.) {
         return None;
     }
-    let view = track.size.height;
-    let h = (view * (view / (view + max))).max(z(MIN_THUMB)).min(view);
-    let top = (-base.offset().y / max).clamp(0., 1.) * (view - h);
+    let (top, h) = thumb_span(track.size.height, max, -base.offset().y, z(MIN_THUMB));
     Some((Bounds { origin: point(track.origin.x, track.origin.y + top), size: gpui::size(track.size.width, h) }, max))
+}
+
+/// Thumb (top, height) in a track `view` tall, for content scrolled `scrolled` of `max` (max > 0).
+fn thumb_span(view: Pixels, max: Pixels, scrolled: Pixels, min_thumb: Pixels) -> (Pixels, Pixels) {
+    let h = (view * (view / (view + max))).max(min_thumb).min(view);
+    ((scrolled / max).clamp(0., 1.) * (view - h), h)
+}
+
+/// How far to scroll so a thumb `h` tall sits `top` below the track's top.
+fn scrolled_for(view: Pixels, max: Pixels, h: Pixels, top: Pixels) -> Pixels {
+    let room = view - h;
+    if room > Pixels::ZERO { max * (top / room).clamp(0., 1.) } else { Pixels::ZERO }
 }
 
 /// Scrolls so the thumb's top sits at `y` (window coordinates).
 fn scroll_thumb_to(track: Bounds<Pixels>, handle: &UniformListScrollHandle, y: Pixels) {
     let Some((t, max)) = thumb(track, handle) else { return };
-    let room = track.size.height - t.size.height;
-    let frac = if room > z(0.) { ((y - track.origin.y) / room).clamp(0., 1.) } else { 0. };
-    handle.0.borrow().base_handle.set_offset(point(z(0.), -max * frac));
+    let scrolled = scrolled_for(track.size.height, max, t.size.height, y - track.origin.y);
+    handle.0.borrow().base_handle.set_offset(point(Pixels::ZERO, -scrolled));
 }
 
 /// Place inside a `relative()` parent that also holds the list.
 pub fn scrollbar(handle: UniformListScrollHandle, drag: Drag, view: EntityId) -> impl IntoElement {
     canvas(
-        |_, _, _| (),
-        move |track, (), window, _| {
+        // The hitbox must come from prepaint: a cached view's replay keeps prepaint hitboxes but not paint ones,
+        // so one inserted in paint vanished on the next root redraw and every click missed the scrollbar.
+        |track, window, _| window.insert_hitbox(track, HitboxBehavior::Normal),
+        move |track, hitbox, window, _| {
             let Some((t, _)) = thumb(track, &handle) else { return };
-            let hitbox = window.insert_hitbox(track, HitboxBehavior::Normal);
             window.set_cursor_style(CursorStyle::Arrow, &hitbox);
             let s = &crate::theme::get().scrollbar;
             let color = if drag.get().is_some() { s.active } else { s.thumb };
@@ -96,4 +106,38 @@ pub fn scrollbar(handle: UniformListScrollHandle, drag: Drag, view: EntityId) ->
     .right_0()
     .bottom_0()
     .w(z(WIDTH))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn p(v: f32) -> Pixels {
+        gpui::px(v) // unscaled: plain math, no zoom
+    }
+
+    #[test]
+    fn thumb_follows_the_offset_and_drag_maps_back() {
+        let (view, max, min) = (p(100.), p(300.), p(24.));
+        // 100 of 400 visible → a quarter-height thumb.
+        assert_eq!(thumb_span(view, max, p(0.), min), (p(0.), p(25.)));
+        assert_eq!(thumb_span(view, max, max, min), (p(75.), p(25.)));
+        assert_eq!(thumb_span(view, max, p(150.), min).0, p(37.5));
+        // Out-of-range offsets (overscroll) stay in the track.
+        assert_eq!(thumb_span(view, max, p(-10.), min).0, p(0.));
+        assert_eq!(thumb_span(view, max, p(400.), min).0, p(75.));
+        // Huge content: the thumb keeps its minimum height.
+        assert_eq!(thumb_span(view, p(100_000.), p(0.), min).1, min);
+
+        // Dragging the thumb's top to `top` scrolls back to the offset that put it there.
+        for scrolled in [0., 60., 150., 299., 300.] {
+            let (top, h) = thumb_span(view, max, p(scrolled), min);
+            assert!((scrolled_for(view, max, h, top) - p(scrolled)).abs() < p(0.01), "{scrolled}");
+        }
+        // Past either end of the track clamps.
+        assert_eq!(scrolled_for(view, max, p(25.), p(-40.)), p(0.));
+        assert_eq!(scrolled_for(view, max, p(25.), p(500.)), max);
+        // A thumb as tall as the track has no room to move.
+        assert_eq!(scrolled_for(view, max, view, p(10.)), p(0.));
+    }
 }
