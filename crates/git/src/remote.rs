@@ -412,15 +412,20 @@ mod tests {
 
     #[test]
     fn gitlab_push_output() {
-        let created = "remote: \nremote: View merge request for feat/x:\nremote:   https://gl.example/g/p/-/merge_requests/12\nremote: \nTo gl.example:g/p.git\n * [new branch]      HEAD -> feat/x\n";
-        assert_eq!(parse_mr_push(created), MrPush::Created("https://gl.example/g/p/-/merge_requests/12".into()));
-        let hint = "remote: \nremote: To create a merge request for feat/x, visit:\nremote:   https://gl.example/g/p/-/merge_requests/new?merge_request%5Bsource_branch%5D=feat%2Fx\nremote: \n";
+        // Captured from real pushes to a GitLab test project (git 2.53, self-hosted GitLab, 2026-11-06).
+        let created = include_str!("../tests/fixtures/gitlab_push_mr_created.txt");
+        assert_eq!(
+            parse_mr_push(created),
+            MrPush::Created("https://gitlab.jakuubkoo.me/jakuubkoo/testingprojectlol/-/merge_requests/1".into())
+        );
+        let hint = include_str!("../tests/fixtures/gitlab_push_hint.txt");
         assert_eq!(
             parse_mr_push(hint),
             MrPush::Suggested(
-                "https://gl.example/g/p/-/merge_requests/new?merge_request%5Bsource_branch%5D=feat%2Fx".into()
+                "https://gitlab.jakuubkoo.me/jakuubkoo/testingprojectlol/-/merge_requests/new?merge_request%5Bsource_branch%5D=dirigent%2Fplain-push".into()
             )
         );
-        assert_eq!(parse_mr_push("Everything up-to-date\n"), MrPush::None);
+        // The options were sent with a push that sent nothing: no merge request, no marker.
+        assert_eq!(parse_mr_push(include_str!("../tests/fixtures/gitlab_push_up_to_date.txt")), MrPush::None);
     }
 }

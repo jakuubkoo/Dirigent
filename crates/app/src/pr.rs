@@ -300,6 +300,35 @@ mod tests {
         assert_eq!((merged.state, merged.checks), (State::Merged, Checks::None));
     }
 
+    /// Live: `DIRIGENT_LIVE_REPO=<clone of a GitLab test project>` (credentials from your git setup or
+    /// GIT_CONFIG_* env), `cargo test -p dirigent gitlab_live -- --ignored`. Pushes two branches and opens one MR.
+    #[test]
+    #[ignore]
+    fn gitlab_live() {
+        let Ok(repo) = std::env::var("DIRIGENT_LIVE_REPO") else { return };
+        let root = std::path::Path::new(&repo);
+        let git = |args: &[&str]| {
+            let ok = std::process::Command::new("git").args(args).current_dir(root).status().unwrap().success();
+            assert!(ok, "git {args:?}");
+        };
+        let branch = format!("dirigent/live-{}", std::process::id());
+        git(&["switch", "-q", "-c", &branch, "origin/main"]);
+        std::fs::write(root.join(format!("{branch}.txt").replace('/', "-")), "x\n").unwrap();
+        git(&["add", "."]);
+        git(&["-c", "commit.gpgsign=false", "commit", "-q", "-m", "Live test from Dirigent"]);
+        // New commit, no upstream: the push publishes the branch and GitLab creates the MR.
+        let (url, note) = create(root, &Cancel::default()).unwrap();
+        assert!(url.contains("/-/merge_requests/") && !url.contains("/new?"), "{url}");
+        assert_eq!(note, "Merge request created");
+        // Nothing new to push: push options would be dropped, so the new-MR form opens instead.
+        let (url, _) = create(root, &Cancel::default()).unwrap();
+        assert!(url.contains("/-/merge_requests/new?"), "{url}");
+        let v = lookup(root, &branch, true);
+        assert_eq!(v.forge, Forge::GitLab);
+        assert!(v.pushed);
+        eprintln!("live: {branch} → {:?}", v.info);
+    }
+
     #[test]
     fn titles() {
         assert_eq!(humanize("feat/git-redesign"), "Git redesign");

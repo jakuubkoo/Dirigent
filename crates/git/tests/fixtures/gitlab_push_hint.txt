@@ -1,0 +1,7 @@
+remote: 
+remote: To create a merge request for dirigent/plain-push, visit:        
+remote:   https://gitlab.jakuubkoo.me/jakuubkoo/testingprojectlol/-/merge_requests/new?merge_request%5Bsource_branch%5D=dirigent%2Fplain-push        
+remote: 
+To https://gitlab.jakuubkoo.me/jakuubkoo/testingprojectlol.git
+ * [new branch]      HEAD -> dirigent/plain-push
+branch 'dirigent/plain-push' set up to track 'origin/dirigent/plain-push'.
