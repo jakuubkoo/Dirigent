@@ -145,7 +145,7 @@ impl Workspace {
                 cc.rows.clear();
                 let text = rest.to_string();
                 if !text.is_empty() {
-                    self.reveal_panel_tab(PanelTab::Search, cx);
+                    self.reveal_panel_tab(Panel::Search, cx);
                 }
                 self.search_panel.update(cx, |p, cx| p.set_text(&text, cx));
             }
@@ -238,7 +238,7 @@ impl Workspace {
             }
             (Mode::Content, _) => {
                 if !rest.is_empty() {
-                    self.reveal_panel_tab(PanelTab::Search, cx);
+                    self.reveal_panel_tab(Panel::Search, cx);
                     self.search_panel.update(cx, |p, cx| p.focus_results(window, cx));
                 }
             }
@@ -264,6 +264,7 @@ impl Workspace {
         div()
             .id("cc-box")
             .relative()
+            .min_w_0() // shrinks in a narrow title bar
             .flex()
             .items_center()
             .gap(z(space::SM))
@@ -285,21 +286,6 @@ impl Workspace {
             // Not a window drag / maximize.
             .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| cx.stop_propagation())
             .on_click(cx.listener(|w, _: &ClickEvent, window, cx| w.open_cc("", window, cx)))
-    }
-
-    /// Server-side decorations: the box in a slim bar on top of the main area.
-    pub(super) fn cc_bar(&self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
-        let t = theme::get();
-        div()
-            .flex()
-            .flex_none()
-            .items_center()
-            .justify_center()
-            .h(z(height::TITLE_BAR))
-            .bg(t.bg.panel)
-            .border_b_1()
-            .border_color(t.border.subtle)
-            .child(self.cc_box(cx))
     }
 
     /// The dropdown under the box, over a full-window layer that closes it on a click outside.

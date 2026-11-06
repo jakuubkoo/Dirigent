@@ -32,7 +32,7 @@ shortcuts![
     ("ctrl-shift-j", NextNeedsYou, "Next session that needs you"),
     ("ctrl-shift-r", ResumeAll, "Resume all saved Claude sessions"),
     ("f2", Rename, "Rename session (or double click)"),
-    ("ctrl-shift-b", ToggleSidebar, "Toggle sidebar"),
+    ("ctrl-shift-b", ToggleSidebar, "Show / hide Sessions"),
     ("ctrl-shift-g", ShowChanges, "Show Changes"),
     ("ctrl-shift-e", ShowFiles, "Show Files"),
     ("ctrl-shift-d", ToggleDiffMode, "Unified / split diff"),

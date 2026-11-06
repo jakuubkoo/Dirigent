@@ -61,6 +61,8 @@ pub(super) enum MenuKind {
     Session(usize),
     /// Right click in a session's terminal: the tab id.
     Terminal(usize),
+    /// Right click on a dock's panel tab.
+    Panel(crate::layout::Panel),
 }
 
 /// (action, label, one-line explanation)
@@ -290,8 +292,14 @@ impl Workspace {
         }
         let Some(t) = self.tabs.get(i).filter(|_| self.modal.is_none()) else { return };
         let keyboard = at.is_none();
-        // Collapsed sidebar: below the title bar, by the left edge.
-        let at = at.or(self.active_row.get()).unwrap_or_else(|| gpui::point(z(16.), z(theme::height::TITLE_BAR + theme::height::HEADER)));
+        // Sessions not shown: below the title bar, by the edge of its dock.
+        let at = at.or(self.active_row.get()).unwrap_or_else(|| {
+            let x = match self.settings.layout.sessions {
+                crate::layout::Dock::Left => z(16.),
+                crate::layout::Dock::Right => window.viewport_size().width - z(16. + 260.),
+            };
+            gpui::point(x, z(theme::height::TITLE_BAR + theme::height::HEADER))
+        });
         // Focus stays where it is: the root's capture-phase `modal_key` gets the keys anyway, and Esc returns to the
         // terminal untouched (no cursor repaint).
         self.menu = Some(Menu { root: t.cwd.clone(), kind: MenuKind::Session(t.id), at, sel: keyboard.then_some(0) });
@@ -340,6 +348,10 @@ impl Workspace {
                 v.push(("select_all", "Select all", ""));
                 v
             }
+            MenuKind::Panel(p) => vec![match self.settings.layout.dock_of(p) {
+                crate::layout::Dock::Left => ("move", "Move to right dock", ""),
+                crate::layout::Dock::Right => ("move", "Move to left dock", ""),
+            }],
             MenuKind::Session(id) => {
                 let Some(i) = self.tab_idx(id) else { return Vec::new() };
                 let t = &self.tabs[i];
@@ -403,6 +415,12 @@ impl Workspace {
                     "select_all" => v.select_all(cx),
                     _ => {}
                 });
+            }
+            return cx.notify();
+        }
+        if let MenuKind::Panel(p) = menu.kind {
+            if action == "move" {
+                self.move_panel(p, self.settings.layout.dock_of(p).other(), cx);
             }
             return cx.notify();
         }

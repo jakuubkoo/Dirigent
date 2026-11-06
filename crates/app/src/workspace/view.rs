@@ -61,58 +61,10 @@ impl Render for Workspace {
             self.window_title = title;
         }
 
-        let side = if self.sidebar_open {
-            div()
-                .flex()
-                .flex_none()
-                .h_full()
-                .child(self.sidebar(!chrome.csd, cx))
-                .child(divider("divider", SidebarDrag))
-                .into_any_element()
-        } else {
-            div()
-                .id("expand")
-                .flex_none()
-                .w(z(COLLAPSED))
-                .h_full()
-                .cursor_pointer()
-                .bg(self.panel_bg())
-                .border_r_1()
-                .border_color(t.border.subtle)
-                .hover(|s| s.bg(t.bg.hover))
-                .on_click(cx.listener(|w, _: &ClickEvent, _, cx| w.toggle_sidebar(cx)))
-                .into_any_element()
-        };
+        let left = self.dock(Dock::Left, cx);
+        let right = self.dock(Dock::Right, cx);
 
-        let right = self.git_open.then(|| {
-            div()
-                .flex()
-                .flex_none()
-                .h_full()
-                .child(divider("git-divider", GitPanelDrag))
-                .child(
-                    div()
-                        .w(z(self.git_width))
-                        .h_full()
-                        .flex()
-                        .flex_col()
-                        .bg(t.bg.panel)
-                        .child(self.panel_tabs(cx))
-                        .child(div().flex_1().min_h_0().child(match self.panel_tab {
-                            PanelTab::Changes => {
-                                self.git_panel.clone().cached(StyleRefinement::default().size_full()).into_any_element()
-                            }
-                            PanelTab::Files => {
-                                self.files_panel.clone().cached(StyleRefinement::default().size_full()).into_any_element()
-                            }
-                            PanelTab::Search => {
-                                self.search_panel.clone().cached(StyleRefinement::default().size_full()).into_any_element()
-                            }
-                        })),
-                )
-        });
-
-        let title_bar = if chrome.csd { Some(self.title_bar(window, cx)) } else { None };
+        let title_bar = self.title_bar(window, chrome.csd, cx);
         self.spin_tick(cx);
 
         div()
@@ -145,8 +97,8 @@ impl Render for Workspace {
             .on_action(cx.listener(|w, _: &ToggleSidebar, _, cx| w.toggle_sidebar(cx)))
             .on_action(cx.listener(|w, _: &NextNeedsYou, window, cx| w.next_needs_you(window, cx)))
             .on_action(cx.listener(|w, _: &ResumeAll, window, cx| w.resume_all(window, cx)))
-            .on_action(cx.listener(|w, _: &ShowChanges, window, cx| w.show_panel_tab(PanelTab::Changes, window, cx)))
-            .on_action(cx.listener(|w, _: &ShowFiles, window, cx| w.show_panel_tab(PanelTab::Files, window, cx)))
+            .on_action(cx.listener(|w, _: &ShowChanges, window, cx| w.show_panel_tab(Panel::Changes, window, cx)))
+            .on_action(cx.listener(|w, _: &ShowFiles, window, cx| w.show_panel_tab(Panel::Files, window, cx)))
             .on_action(cx.listener(|w, _: &ToggleDiffMode, _, cx| w.toggle_diff_mode(cx)))
             .on_action(cx.listener(|w, _: &OpenSettings, window, cx| w.open_settings(window, cx)))
             .on_action(cx.listener(|w, _: &ZoomIn, _, cx| w.zoom(Some(1), cx)))
@@ -165,33 +117,33 @@ impl Render for Workspace {
             .on_action(cx.listener(|w, _: &Activate7, window, cx| w.activate_nth(6, window, cx)))
             .on_action(cx.listener(|w, _: &Activate8, window, cx| w.activate_nth(7, window, cx)))
             .on_action(cx.listener(|w, _: &Activate9, window, cx| w.activate_nth(8, window, cx)))
-            .on_drag_move::<SidebarDrag>(cx.listener(|w, e: &DragMoveEvent<SidebarDrag>, window, cx| {
+            .on_drag_move::<DockDrag>(cx.listener(|w, e: &DragMoveEvent<DockDrag>, window, cx| {
+                let d = e.drag(cx).0;
                 w.dragging = true;
-                // Stored at 100 %: the pointer's distance ÷ zoom.
+                // Stored at 100 %: the pointer's distance from the window edge ÷ zoom.
                 let zoom = theme::zoom();
-                let max = (f32::from(window.viewport_size().width) * 0.5 / zoom).max(MIN_SIDEBAR);
-                w.sidebar_width = (f32::from(e.event.position.x - e.bounds.left()) / zoom).clamp(MIN_SIDEBAR, max);
-                cx.notify();
-            }))
-            .on_drop::<SidebarDrag>(cx.listener(|w, _, _, cx| w.end_drag(cx)))
-            .on_drag_move::<GitPanelDrag>(cx.listener(|w, e: &DragMoveEvent<GitPanelDrag>, window, cx| {
-                w.dragging = true;
-                let (zoom, min) = (theme::zoom(), git_panel::MIN_WIDTH);
+                let min = w.settings.layout.min_width(d);
                 let max = (f32::from(window.viewport_size().width) * 0.6 / zoom).max(min);
-                w.git_width = (f32::from(e.bounds.right() - e.event.position.x) / zoom).clamp(min, max);
-                w.sync_panel(cx);
+                let dist = match d {
+                    Dock::Left => e.event.position.x - e.bounds.left(),
+                    Dock::Right => e.bounds.right() - e.event.position.x,
+                };
+                w.docks[d.ix()].width = (f32::from(dist) / zoom).clamp(min, max);
+                if w.settings.layout.changes == d {
+                    w.sync_panel(cx);
+                }
                 cx.notify();
             }))
-            .on_drop::<GitPanelDrag>(cx.listener(|w, _, _, cx| w.end_drag(cx)))
+            .on_drop::<DockDrag>(cx.listener(|w, _, _, cx| w.end_drag(cx)))
             .on_mouse_up(MouseButton::Left, cx.listener(|w, _, _, cx| w.end_drag(cx)))
-            .children(title_bar)
+            .child(title_bar)
             .child(
                 div()
                     .flex()
                     .flex_1()
                     .min_h_0()
                     .w_full()
-                    .child(side)
+                    .children(left)
                     .child(
                         div()
                             .flex()
@@ -200,7 +152,6 @@ impl Render for Workspace {
                             .min_w_0()
                             .h_full()
                             .bg(t.bg.base)
-                            .when(!chrome.csd, |d| d.child(self.cc_bar(cx)))
                             // Diff and preview belong to the session; Settings fills the main area from the top.
                             .when(!self.settings_open(), |d| d.child(self.session_header()))
                             .child(div().flex_1().min_h_0().overflow_hidden().child(main)),
@@ -214,6 +165,12 @@ impl Render for Workspace {
             .when(chrome.csd, |d| d.children(window_chrome::resize_handles(chrome.tiling)))
     }
 }
+
+/// The brand's width (mark, name, +, gear).
+const BRAND_W: f32 = 150.;
+
+/// Width of the drop strip a collapsed or empty dock shows while a panel tab is dragged.
+const DROP_STRIP: f32 = 28.;
 
 /// A draggable 4 px divider with a 1 px hairline.
 fn divider<D: Clone + 'static>(id: &'static str, drag: D) -> impl IntoElement {
@@ -232,8 +189,13 @@ fn divider<D: Clone + 'static>(id: &'static str, drag: D) -> impl IntoElement {
         .on_drag(drag, |_, _, _, cx| cx.new(|_| DragGhost))
 }
 
-/// A square icon button (title bar, panel tabs).
+/// A square icon button in the title bar: never starts a window move.
 fn icon_button(id: impl Into<gpui::ElementId>, glyph: &'static str, active: bool) -> gpui::Stateful<gpui::Div> {
+    square_button(id, glyph, active).on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+}
+
+/// A square icon button (dock tabs: draggable, so the press must reach the drag).
+fn square_button(id: impl Into<gpui::ElementId>, glyph: &'static str, active: bool) -> gpui::Stateful<gpui::Div> {
     let t = theme::get();
     div()
         .id(id)
@@ -246,7 +208,6 @@ fn icon_button(id: impl Into<gpui::ElementId>, glyph: &'static str, active: bool
         .cursor_pointer()
         .when(active, |d| d.bg(t.bg.selected))
         .hover(|s| s.bg(t.bg.hover))
-        .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation()) // never starts a window move
         .child(ui::icon(glyph, 15., if active { t.accent } else { t.text.muted }))
 }
 
@@ -299,13 +260,15 @@ impl Workspace {
         if self.translucent { t.bg.panel_translucent } else { t.bg.panel }
     }
 
-    /// App mark, new-session and collapse buttons: in the title bar (CSD) or atop the sidebar.
+    /// App mark, name, new session and settings: always at the left of the title bar, wherever the panels live.
     fn brand(&self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
         let t = theme::get();
         div()
             .flex()
+            .flex_none()
             .items_center()
             .gap(z(space::SM))
+            .w(z(BRAND_W))
             .h_full()
             .px(z(space::MD))
             .child(ui::icon(icon::TERMINAL, 15., t.accent))
@@ -320,47 +283,20 @@ impl Workspace {
                     .tooltip(tip("Settings  Ctrl+,"))
                     .on_click(cx.listener(|w, _: &ClickEvent, window, cx| w.open_settings(window, cx))),
             )
-            .child(
-                icon_button("collapse", icon::SIDEBAR_CLOSE, false)
-                    .tooltip(tip("Hide sidebar  Ctrl+Shift+B"))
-                    .on_click(cx.listener(|w, _: &ClickEvent, _, cx| w.toggle_sidebar(cx))),
-            )
     }
 
-    /// Client-side title bar: the left part continues the sidebar, the rest carries the session name and controls.
-    fn title_bar(&self, window: &Window, cx: &mut Context<Self>) -> impl IntoElement + use<> {
+    /// The top bar: the brand at the left, the Command Center box centred in the window. Client-side decorations
+    /// add the window controls and the move / maximize / window-menu handling; server-side ones get the same bar
+    /// without them (the window manager draws its own title above).
+    fn title_bar(&self, window: &Window, csd: bool, cx: &mut Context<Self>) -> impl IntoElement + use<> {
         let t = theme::get();
-        let left = if self.sidebar_open {
-            div()
-                .flex_none()
-                .w(z(self.sidebar_width + DIVIDER))
-                .h_full()
-                .bg(self.panel_bg())
-                .border_r_1()
-                .border_color(t.border.subtle)
-                .child(self.brand(cx))
-                .into_any_element()
-        } else {
-            div()
-                .flex_none()
-                .h_full()
-                .px(z(space::SM))
-                .flex()
-                .items_center()
-                .child(
-                    icon_button("expand-title", icon::SIDEBAR_OPEN, false)
-                        .tooltip(tip("Show sidebar  Ctrl+Shift+B"))
-                        .on_click(cx.listener(|w, _: &ClickEvent, _, cx| w.toggle_sidebar(cx))),
-                )
-                .child(
-                    icon_button("settings-title", icon::SETTINGS, self.settings_open())
-                        .tooltip(tip("Settings  Ctrl+,"))
-                        .on_click(cx.listener(|w, _: &ClickEvent, window, cx| w.open_settings(window, cx))),
-                )
-                .into_any_element()
-        };
+        // The box is centred in the whole bar, kept clear of both sides (its own layer has no hitbox, so the bar
+        // still drags everywhere else).
+        let controls_w = if csd { 3. * 40. } else { 0. };
+        let reserve = BRAND_W.max(controls_w) + space::SM;
         div()
             .id("title-bar")
+            .relative()
             .flex()
             .flex_none()
             .items_center()
@@ -369,16 +305,22 @@ impl Workspace {
             .bg(t.bg.panel)
             .border_b_1()
             .border_color(t.border.subtle)
-            .child(left)
+            .child(self.brand(cx))
+            .child(div().flex_1())
+            .when(csd, |d| d.child(window_chrome::window_controls(window)))
             .child(
                 div()
-                    .flex_1()
-                    .min_w_0()
+                    .absolute()
+                    .top_0()
+                    .left_0()
+                    .size_full()
                     .flex()
+                    .items_center()
                     .justify_center()
+                    .px(z(reserve))
                     .child(self.cc_box(cx)),
             )
-            .child(window_chrome::window_controls(window))
+            .when(csd, |d| d
             .on_mouse_down(
                 MouseButton::Left,
                 cx.listener(|w, e: &gpui::MouseDownEvent, window, _| {
@@ -401,10 +343,11 @@ impl Workspace {
                 if e.is_right_click() {
                     window.show_window_menu(e.position());
                 }
-            })
+            }))
     }
 
-    fn sidebar(&mut self, with_brand: bool, cx: &mut Context<Self>) -> impl IntoElement + use<> {
+    /// The Sessions panel: project groups and their session rows.
+    fn sessions_list(&mut self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
         let t = theme::get();
         let now = now_secs();
         let mut items: Vec<gpui::AnyElement> = Vec::new();
@@ -498,15 +441,64 @@ impl Workspace {
                 }
             }
         }
-        div()
+        div().id("sessions").size_full().overflow_y_scroll().pb(z(space::MD)).children(items)
+    }
+
+    /// One dock: its tabs and the panel it shows, the divider on the terminal's side. Collapsed: a 10 px strip that
+    /// reopens it; empty: nothing, except a drop strip while a tab is dragged.
+    fn dock(&mut self, d: Dock, cx: &mut Context<Self>) -> Option<gpui::AnyElement> {
+        let t = theme::get();
+        let lay = self.settings.layout;
+        let shown = self.dock_shown(d);
+        let target = move |el: gpui::Stateful<gpui::Div>, cx: &mut Context<Self>| {
+            el.drag_over::<PanelDrag>(move |s, p: &PanelDrag, _, _| {
+                if lay.dock_of(p.0) != d { s.bg(t.bg.hover) } else { s }
+            })
+            .on_drop(cx.listener(move |w, p: &PanelDrag, _, cx| w.move_panel(p.0, d, cx)))
+        };
+        let Some(shown) = shown.filter(|_| self.docks[d.ix()].open) else {
+            let strip = shown.is_some();
+            if !strip && !self.panel_drag {
+                return None;
+            }
+            let el = div()
+                .id(if d == Dock::Left { "dock-strip-left" } else { "dock-strip-right" })
+                .flex_none()
+                .w(z(if self.panel_drag { DROP_STRIP } else { COLLAPSED }))
+                .h_full()
+                .bg(self.panel_bg())
+                .border_color(t.border.subtle)
+                .map(|e| if d == Dock::Left { e.border_r_1() } else { e.border_l_1() })
+                .when(strip, |e| {
+                    e.cursor_pointer()
+                        .hover(|s| s.bg(t.bg.hover))
+                        .on_click(cx.listener(move |w, _: &ClickEvent, _, cx| w.set_dock_open(d, true, cx)))
+                });
+            return Some(target(el, cx).into_any_element());
+        };
+        let body = match shown {
+            Panel::Sessions => self.sessions_list(cx).into_any_element(),
+            Panel::Changes => self.git_panel.clone().cached(StyleRefinement::default().size_full()).into_any_element(),
+            Panel::Files => self.files_panel.clone().cached(StyleRefinement::default().size_full()).into_any_element(),
+            Panel::Search => self.search_panel.clone().cached(StyleRefinement::default().size_full()).into_any_element(),
+        };
+        let content = div()
+            .id(if d == Dock::Left { "dock-left" } else { "dock-right" })
+            .w(z(self.dock_width(d)))
+            .h_full()
             .flex()
             .flex_col()
-            .flex_none()
-            .w(z(self.sidebar_width))
-            .h_full()
-            .bg(self.panel_bg())
-            .when(with_brand, |d| d.child(div().flex_none().h(z(height::TITLE_BAR)).child(self.brand(cx))))
-            .child(div().id("sessions").flex_1().overflow_y_scroll().pb(z(space::MD)).children(items))
+            .bg(if lay.sessions == d { self.panel_bg() } else { t.bg.panel })
+            .child(self.panel_tabs(d, shown, cx))
+            .child(div().flex_1().min_h_0().child(body));
+        let content = target(content, cx);
+        let divider = divider(if d == Dock::Left { "divider" } else { "git-divider" }, DockDrag(d));
+        let row = div().flex().flex_none().h_full();
+        Some(match d {
+            Dock::Left => row.child(content).child(divider),
+            Dock::Right => row.child(divider).child(content),
+        }
+        .into_any_element())
     }
 
     fn session_row(&self, i: usize, now: i64, cx: &mut Context<Self>) -> gpui::AnyElement {
@@ -736,27 +728,57 @@ impl Workspace {
             }))
     }
 
-    /// Right panel tabs: Files and Changes as icon buttons.
-    fn panel_tabs(&self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
+    /// A dock's tabs: one icon per panel living there (always shown, even alone: drag it or right click it to move
+    /// the panel to the other dock).
+    fn panel_tabs(&self, d: Dock, shown: Panel, cx: &mut Context<Self>) -> impl IntoElement + use<> {
         let t = theme::get();
+        let lay = self.settings.layout;
         let changes = match self.tabs.get(self.active).map(|t| &t.repo) {
-            Some(TabRepo::Repo(root)) => self.repos.status(root).map_or(0, |s| s.totals().0),
+            Some(TabRepo::Repo(root)) if lay.changes == d => self.repos.status(root).map_or(0, |s| s.totals().0),
             _ => 0,
         };
-        let tab = |w: &Self, which: PanelTab, glyph, hint, cx: &mut Context<Self>| {
-            let active = w.panel_tab == which;
-            div()
-                .flex()
-                .items_center()
-                .h_full()
-                .border_b_2()
-                .border_color(if active { t.accent } else { gpui::transparent_black().into() })
-                .child(
-                    icon_button(SharedString::from(hint), glyph, active)
-                        .tooltip(tip(hint))
-                        .on_click(cx.listener(move |w, _: &ClickEvent, _, cx| w.set_panel_tab(which, cx))),
-                )
-        };
+        let ws = cx.entity().downgrade();
+        let tabs: Vec<_> = lay
+            .panels(d)
+            .map(|p| {
+                let active = p == shown;
+                let (glyph, hint) = match p {
+                    Panel::Sessions => (icon::SESSIONS, "Sessions  Ctrl+Shift+B"),
+                    Panel::Files => (icon::FILES, "Files  Ctrl+Shift+E"),
+                    Panel::Changes => (icon::CHANGES, "Changes  Ctrl+Shift+G"),
+                    Panel::Search => (icon::SEARCH, "Search in files  Ctrl+Shift+F"),
+                };
+                let ws = ws.clone();
+                div()
+                    .flex()
+                    .items_center()
+                    .h_full()
+                    .border_b_2()
+                    .border_color(if active { t.accent } else { gpui::transparent_black().into() })
+                    .child(
+                        square_button(SharedString::from(hint), glyph, active)
+                            .tooltip(tip(hint))
+                            .on_click(cx.listener(move |w, _: &ClickEvent, _, cx| w.set_panel_tab(p, cx)))
+                            .on_mouse_down(
+                                MouseButton::Right,
+                                cx.listener(move |w, e: &MouseDownEvent, _, cx| {
+                                    cx.stop_propagation();
+                                    w.open_menu(PathBuf::new(), projects_ui::MenuKind::Panel(p), e.position, cx);
+                                }),
+                            )
+                            .on_drag(PanelDrag(p), move |drag, _, _, cx| {
+                                // Not inside a workspace update here: flag the drag so empty / collapsed docks
+                                // offer a drop strip.
+                                let _ = ws.update(cx, |w, cx| {
+                                    w.panel_drag = true;
+                                    cx.notify();
+                                });
+                                let label = drag.0.label();
+                                cx.new(|_| RowGhost(label.into()))
+                            }),
+                    )
+            })
+            .collect();
         div()
             .flex()
             .flex_none()
@@ -766,12 +788,20 @@ impl Workspace {
             .px(z(space::MD))
             .border_b_1()
             .border_color(t.border.subtle)
-            .child(tab(self, PanelTab::Files, icon::FILES, "Files  Ctrl+Shift+E", cx))
-            .child(tab(self, PanelTab::Changes, icon::CHANGES, "Changes  Ctrl+Shift+G", cx))
-            .child(tab(self, PanelTab::Search, icon::SEARCH, "Search in files  Ctrl+Shift+F", cx))
+            .children(tabs)
             .when(changes > 0, |d| {
                 d.child(div().text_size(z(text_size::XS)).text_color(t.text.dim).child(changes.to_string()))
             })
+            .child(div().flex_1())
+            .child(
+                square_button(
+                    if d == Dock::Left { "collapse-left" } else { "collapse-right" },
+                    if d == Dock::Left { icon::SIDEBAR_CLOSE } else { icon::DOCK_RIGHT_CLOSE },
+                    false,
+                )
+                .tooltip(tip(if lay.sessions == d { "Hide dock  Ctrl+Shift+B" } else { "Hide dock" }))
+                .on_click(cx.listener(move |w, _: &ClickEvent, _, cx| w.set_dock_open(d, false, cx))),
+            )
     }
 
     /// Bottom bar: Claude usage limits, session counts, the active branch.

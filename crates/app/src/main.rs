@@ -10,6 +10,7 @@ mod file_tree;
 mod files_panel;
 mod git_panel;
 mod keys;
+mod layout;
 mod line_edit;
 mod notify;
 mod perf;
@@ -101,7 +102,15 @@ fn main() {
     let saved = persist::load(&state_path);
     // Before the state is saved again: a first start takes the preferences over from the old state file.
     let settings_path = settings::path();
-    let loaded = settings::load(&settings_path, &state_path);
+    let mut loaded = settings::load(&settings_path, &state_path);
+    // Dock widths moved from the state file into settings.json: taken over once.
+    if settings::adopt_widths(&mut loaded.parsed.settings, loaded.text.as_deref(), saved.sidebar.width, saved.git_panel.width) {
+        let text = loaded.parsed.settings.to_json();
+        match settings::save(&settings_path, &text, false) {
+            Ok(()) => loaded.text = Some(text),
+            Err(e) => eprintln!("dirigent: couldn't write {}: {e}", settings_path.display()),
+        }
+    }
     let translucent = blur::decide(std::env::var("DIRIGENT_BLUR").ok().as_deref(), blur::wayland_globals);
     let t = theme::get();
     let rgb8 = |c: gpui::Rgba| [(c.r * 255.).round() as u8, (c.g * 255.).round() as u8, (c.b * 255.).round() as u8];

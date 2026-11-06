@@ -31,7 +31,7 @@ impl Default for State {
             version: VERSION,
             tabs: Vec::new(),
             active: 0,
-            sidebar: SidebarState { width: 220., open: true },
+            sidebar: SidebarState { width: 220., open: true, tab: PanelTab::Sessions },
             window: None,
             last_dir: None,
             git_panel: PanelState::default(),
@@ -61,11 +61,19 @@ pub struct TabState {
 
 #[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq)]
 pub struct SidebarState {
+    /// Still written for older builds; the width now lives in settings.json (`layout.left_width`).
     pub width: f32,
     pub open: bool,
+    /// The left dock's shown panel (added later).
+    #[serde(default = "sessions")]
+    pub tab: PanelTab,
 }
 
-/// The right panel. Fields added later default individually, so older files keep their width/open.
+fn sessions() -> PanelTab {
+    PanelTab::Sessions
+}
+
+/// The right dock (was the right panel; its width now lives in settings.json). Fields added later default individually, so older files keep their width/open.
 #[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq)]
 #[serde(default)]
 pub struct PanelState {
@@ -82,14 +90,8 @@ impl Default for PanelState {
     }
 }
 
-#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq, Default)]
-#[serde(rename_all = "lowercase")]
-pub enum PanelTab {
-    #[default]
-    Changes,
-    Files,
-    Search,
-}
+/// The panel a dock shows (the old right panel's tab names, + `sessions`).
+pub use crate::layout::Panel as PanelTab;
 
 #[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq)]
 #[serde(rename_all = "lowercase")]
@@ -284,6 +286,7 @@ mod tests {
         assert_eq!(old.tabs[0].claude_session, None);
         assert_eq!(old.git_panel, PanelState::default(), "files from before the git panel load with its defaults");
         assert!(old.tabs[0].expanded.is_empty());
+        assert_eq!(old.sidebar.tab, PanelTab::Sessions, "files from before the docks: the left dock shows Sessions");
         // Preferences an older file still holds (now in settings.json) are ignored, and the next save drops them.
         std::fs::write(&p, r#"{"version":1,"tabs":[],"active":0,"sidebar":{"width":200,"open":false},"window":null,
             "last_dir":null,"diff_mode":"split","notifications":{"done":false}}"#).unwrap();

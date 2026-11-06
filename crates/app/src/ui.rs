@@ -18,7 +18,8 @@ pub mod icon {
     pub const MAXIMIZE: &str = "icons/square.svg";
     pub const RESTORE: &str = "icons/copy.svg";
     pub const SIDEBAR_CLOSE: &str = "icons/panel-left-close.svg";
-    pub const SIDEBAR_OPEN: &str = "icons/panel-left-open.svg";
+    pub const DOCK_RIGHT_CLOSE: &str = "icons/panel-right-close.svg";
+    pub const SESSIONS: &str = "icons/list.svg";
     pub const FILES: &str = "icons/files.svg";
     pub const CHANGES: &str = "icons/git-compare.svg";
     pub const DONE: &str = "icons/circle-check.svg";
@@ -56,7 +57,7 @@ pub mod icon {
 #[cfg(test)]
 pub const ALL_ICONS: &[&str] = &[
     icon::CHEVRON_RIGHT, icon::CHEVRON_DOWN, icon::PLUS, icon::CLOSE, icon::MINIMIZE, icon::MAXIMIZE, icon::RESTORE,
-    icon::SIDEBAR_CLOSE, icon::SIDEBAR_OPEN, icon::FILES, icon::CHANGES, icon::DONE, icon::SPINNER,
+    icon::SIDEBAR_CLOSE, icon::DOCK_RIGHT_CLOSE, icon::SESSIONS, icon::FILES, icon::CHANGES, icon::DONE, icon::SPINNER,
     icon::RESUMABLE, icon::WARNING, icon::BRANCH, icon::REFRESH, icon::RESTART, icon::SHOW, icon::HIDE, icon::FOLDER,
     icon::FOLDER_OPEN, icon::FILE, icon::FILE_CODE, icon::FILE_TEXT, icon::FILE_JSON, icon::FILE_CONFIG,
     icon::FILE_LOCK, icon::FILE_IMAGE, icon::FILE_SHELL, icon::FILE_ARCHIVE, icon::TERMINAL,
