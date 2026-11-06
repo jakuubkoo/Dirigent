@@ -519,7 +519,8 @@ impl GitPanel {
     }
 
     /// The branch's PR/MR: number, state and checks with View, or Create, or a link when gh/glab aren't there.
-    fn pr_strip(&self, root: &Path, pr: &crate::pr::View, can_create: bool) -> Option<gpui::AnyElement> {
+    /// `enabled`: no job running (Create is shown but inactive meanwhile, so the strip doesn't flicker).
+    fn pr_strip(&self, root: &Path, pr: &crate::pr::View, enabled: bool) -> Option<gpui::AnyElement> {
         use crate::pr::{Checks, Info, State};
         let t = theme::get();
         let noun = pr.noun();
@@ -555,13 +556,16 @@ impl GitPanel {
             bar_button("pr-create")
                 .h(z(22.))
                 .text_size(z(text_size::XS))
+                .when(!enabled, |d| d.text_color(t.text.faint).cursor_not_allowed())
                 .child(ui::icon(icon::PULL_REQUEST, 12., t.text.muted))
                 .child(if noun == "MR" { "Create MR…" } else { "Create PR…" })
                 .tooltip(tip(
                     "Push if needed, then open the new request (gh, GitLab push options, or the browser form)",
                 ))
                 .on_click(move |_: &ClickEvent, _, cx| {
-                    let _ = ws.update(cx, |w, cx| w.run_git(r.clone(), crate::git_ops::Job::CreatePr, cx));
+                    if enabled {
+                        let _ = ws.update(cx, |w, cx| w.run_git(r.clone(), crate::git_ops::Job::CreatePr, cx));
+                    }
                 })
         };
         match &pr.info {
@@ -588,12 +592,12 @@ impl GitPanel {
                         .child(div().flex_none().text_color(color).child(state))
                         .children(checks.map(|(c, col)| div().min_w_0().truncate().text_color(col).child(c)))
                         .child(div().flex_1())
-                        .when(closed && can_create, |d| d.child(create()))
+                        .when(closed, |d| d.child(create()))
                         .child(link("pr-view", "View".into(), p.url.clone()))
                         .into_any_element(),
                 )
             }
-            Info::Known(None) if pr.pushed || can_create => Some(
+            Info::Known(None) => Some(
                 strip()
                     .child(
                         div()
@@ -606,11 +610,10 @@ impl GitPanel {
                     .child(create())
                     .into_any_element(),
             ),
-            Info::Known(None) => None,
             Info::Link(url) => Some(
                 strip()
                     .child(div().flex_1())
-                    .when(can_create, |d| d.child(create()))
+                    .child(create())
                     .child(link(
                         "pr-list",
                         if noun == "MR" { "View merge requests".into() } else { "View pull requests".into() },
@@ -699,25 +702,41 @@ impl GitPanel {
 
     /// The list's header: a checkbox for every listed file (stage the rest / unstage all), counts, staged count.
     /// `whole`: the list is the whole repo (All), so staging is `git add -A` (also files past the list cap).
+    /// `only`: the listed files' indices (This agent); None = every file (All).
     fn list_header(
         &self,
         root: &Path,
-        files: Vec<FileChange>,
-        whole: bool,
+        st: Arc<Status>,
+        only: Option<Arc<Vec<usize>>>,
         add: u64,
         del: u64,
     ) -> impl IntoElement + use<> {
         use crate::git_ops::Job;
         let t = theme::get();
-        let staged = files.iter().filter(|f| f.staged).count();
+        let whole = only.is_none();
+        let files = || -> Box<dyn Iterator<Item = &FileChange> + '_> {
+            match &only {
+                Some(ix) => Box::new(ix.iter().filter_map(|&i| st.files.get(i))),
+                None => Box::new(st.files.iter()),
+            }
+        };
+        // Counted here without cloning; the click clones what it stages.
+        let staged = files().filter(|f| f.staged).count();
         let state = if staged == 0 {
             ui::Check::Off
-        } else if files.iter().all(|f| f.staged && !f.unstaged) {
+        } else if files().all(|f| f.staged && !f.unstaged) {
             ui::Check::On
         } else {
             ui::Check::Partial
         };
-        let n = files.len();
+        let n = files().count();
+        // The click works out its files from the same Arcs (nothing is cloned per render).
+        let listed = move || -> Vec<FileChange> {
+            match &only {
+                Some(ix) => ix.iter().filter_map(|&i| st.files.get(i).cloned()).collect(),
+                None => st.files.clone(),
+            }
+        };
         let (ws, r) = (self.workspace.clone(), root.to_path_buf());
         let clamp = |v: u64| v.min(u32::MAX as u64) as u32;
         div()
@@ -745,11 +764,11 @@ impl GitPanel {
                             return;
                         }
                         let job = if state == ui::Check::On {
-                            Job::Unstage(files.clone())
+                            Job::Unstage(listed())
                         } else if whole {
                             Job::StageAll
                         } else {
-                            Job::Stage(files.iter().filter(|f| f.unstaged).cloned().collect())
+                            Job::Stage(listed().into_iter().filter(|f| f.unstaged).collect())
                         };
                         let _ = ws.update(cx, |w, cx| w.run_git(r.clone(), job, cx));
                     }),
@@ -790,10 +809,6 @@ impl Render for GitPanel {
                     (Some(_), Some(a)) => a.view.summary.unwrap_or_default(),
                     _ => st.totals(),
                 };
-                let listed: Vec<FileChange> = match &only {
-                    Some(ix) => ix.iter().map(|&i| st.files[i].clone()).collect(),
-                    None => st.files.clone(),
-                };
                 let marks = agent.as_ref().map(|a| a.view.clone());
                 // In All, the agent's files get a dot (in This agent every row is one).
                 let dot = only.is_none();
@@ -825,7 +840,7 @@ impl Render for GitPanel {
                     self.scope_switch(a.only, agent_ix.as_ref().map_or(0, Vec::len), st.files.len() + st.more)
                 });
                 let count = only.as_ref().map_or(st.files.len() + (st.more > 0) as usize, |o| o.len());
-                let header = self.list_header(&root, listed, only.is_none(), add, del);
+                let header = self.list_header(&root, st.clone(), only.clone(), add, del);
                 let bar = self.repo_bar(&root, &st, busy);
                 let list = if count == 0 {
                     ui::note(if only.is_some() { "No changes by this agent" } else { "No changes" }).into_any_element()

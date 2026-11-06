@@ -418,17 +418,24 @@ impl Workspace {
         let marked =
             files.iter().map(|f| (f.path.clone(), view.files.get(&f.path).copied().unwrap_or_default())).collect();
         let n = files.len();
+        // A chained push / PR is part of what Enter does: the dialog says so.
+        let (then_text, ok) = match after.last() {
+            Some(Job::CreatePr) => (" Then push and open the pull/merge request.", "Commit, push & create PR"),
+            Some(Job::Push) => (" Then push (a new branch is published).", "Commit & push"),
+            _ => ("", if amend { "Amend" } else { "Commit" }),
+        };
         self.modal = Some(Modal::Confirm {
             title: format!(
                 "{} {n} file{} of this agent?",
                 if amend { "Amend with" } else { "Commit" },
                 if n == 1 { "" } else { "s" }
             ),
-            body: "Whole file contents are committed, including unstaged parts. Other staged changes stay staged and \
-                   out of this commit."
-                .to_string(),
+            body: format!(
+                "Whole file contents are committed, including unstaged parts. Other staged changes stay staged and \
+                 out of this commit.{then_text}"
+            ),
             files: marked,
-            ok: if amend { "Amend" } else { "Commit" },
+            ok,
             danger: false,
             then: Then::Git(root, then(Job::CommitOnly { message, files, amend }, after)),
         });
