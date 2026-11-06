@@ -328,6 +328,8 @@ pub struct Workspace {
     prs: HashMap<PathBuf, PrSlot>,
     /// The one-time "install gh/glab" note was shown (saved).
     pr_hint_shown: bool,
+    /// Background fetch (Settings → Git), only while `fetch_minutes` > 0.
+    fetch_task: Option<Task<()>>,
     /// Preferences (settings.json), and what's wrong with the file (shown on the Settings page and the status bar).
     pub(crate) settings: Settings,
     pub(crate) settings_notes: Vec<String>,
@@ -481,6 +483,7 @@ impl Workspace {
             commit_boxes: HashMap::new(),
             prs: HashMap::new(),
             pr_hint_shown: saved.pr_hint_shown,
+            fetch_task: None,
             settings: loaded.parsed.settings,
             settings_notes: loaded.parsed.notes,
             settings_broken: loaded.parsed.broken,
@@ -617,6 +620,7 @@ impl Workspace {
         }));
         this.applied = this.grid_size(window);
         this.watch_settings(window, cx);
+        this.restart_fetch_timer(cx);
 
         if let Ok(script) = std::env::var("DIRIGENT_RUN") {
             // Perf harness: one (eagerly spawned) session per line, the line typed into it; saved tabs are ignored.
@@ -2334,6 +2338,9 @@ impl Workspace {
         }
         if (old.diff_mode, old.split_style, old.diff_engine) != (new.diff_mode, new.split_style, new.diff_engine) {
             self.sync_diff_mode(cx);
+        }
+        if old.fetch_minutes != new.fetch_minutes {
+            self.restart_fetch_timer(cx);
         }
         if old.layout != new.layout {
             for d in [Dock::Left, Dock::Right] {

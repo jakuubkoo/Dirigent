@@ -82,11 +82,14 @@ pub struct Settings {
     pub split_style: SplitStyle,
     pub diff_engine: DiffEngine,
     pub layout: Layout,
+    /// Fetch every watched repo in the background every N minutes; 0 = never (the default: no timers unless asked).
+    pub fetch_minutes: u32,
 }
 
 pub const FONT_SIZE: (f32, f32) = (8., 32.);
 pub const SCROLLBACK: (usize, usize) = (0, 100_000);
 pub const UI_ZOOM: (u32, u32) = (50, 200);
+pub const FETCH_MINUTES: (u32, u32) = (0, 120);
 /// Ctrl+= / Ctrl+- step, percent.
 pub const ZOOM_STEP: u32 = 10;
 
@@ -119,6 +122,7 @@ impl Default for Settings {
             split_style: SplitStyle::Clean,
             diff_engine: DiffEngine::Auto,
             layout: Layout::default(),
+            fetch_minutes: 0,
         }
     }
 }
@@ -130,6 +134,7 @@ const KEYS: &[(&str, &[&str])] = &[
     ("notifications", &["needs_you", "done", "sound"]),
     ("diff", &["mode", "split_style", "engine"]),
     ("layout", &["sessions", "files", "changes", "search", "left_width", "right_width"]),
+    ("git", &["fetch_minutes"]),
 ];
 
 impl Settings {
@@ -154,6 +159,7 @@ impl Settings {
                     "left_width": s.layout.left_width,
                     "right_width": s.layout.right_width,
                 },
+                "git": { "fetch_minutes": s.fetch_minutes },
             })
         };
         let (mine, defaults) = (all(self), all(Settings::default()));
@@ -233,6 +239,13 @@ pub fn parse(text: &str, fallback: &Settings) -> Parsed {
             let (left_width, right_width) = (width("left_width", dl.left_width), width("right_width", dl.right_width));
             Layout { sessions, files, changes, search, left_width, right_width }
         },
+        fetch_minutes: g.get(
+            "git",
+            "fetch_minutes",
+            d.fetch_minutes,
+            "a whole number 0–120 (minutes; 0 = off)",
+            |n: &u32| (FETCH_MINUTES.0..=FETCH_MINUTES.1).contains(n),
+        ),
     };
     for (sec, val) in v.as_object().into_iter().flatten() {
         match KEYS.iter().find(|(s, _)| s == sec) {
@@ -440,8 +453,12 @@ mod tests {
                 left_width: 300,
                 right_width: 400,
             },
+            fetch_minutes: 15,
         };
         let p = parse(&s.to_json(), &Settings::default());
+        assert!(s.to_json().contains("\"fetch_minutes\": 15"));
+        let bad = parse(r#"{"git": {"fetch_minutes": 500}}"#, &Settings::default());
+        assert_eq!((bad.settings.fetch_minutes, bad.notes.len()), (0, 1), "out of range: off, with a note");
         assert_eq!(p, Parsed { settings: s, notes: vec![], broken: false });
         assert_eq!(parse("{}", &s).settings, Settings::default(), "missing keys are defaults, not the fallback");
         assert_eq!(Settings::default().to_json(), "{}\n", "nothing set: an empty object");

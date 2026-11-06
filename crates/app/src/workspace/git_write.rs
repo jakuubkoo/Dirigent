@@ -183,6 +183,60 @@ impl Workspace {
         .detach();
     }
 
+    /// Settings → Git: one timer that fetches every watched repo every N minutes (none when 0).
+    pub(super) fn restart_fetch_timer(&mut self, cx: &mut Context<Self>) {
+        let minutes = self.settings.fetch_minutes;
+        self.fetch_task = (minutes > 0).then(|| {
+            cx.spawn(async move |this, cx| {
+                loop {
+                    cx.background_executor().timer(Duration::from_secs(minutes as u64 * 60)).await;
+                    if this.update(cx, |w, cx| w.background_fetch(cx)).is_err() {
+                        return;
+                    }
+                }
+            })
+        });
+    }
+
+    /// Fetches each watched repo that has a remote, one after another, under its write lock, without touching the
+    /// panel (no progress label); a failure is a status-bar note. Ahead/behind and the PR strip follow.
+    fn background_fetch(&mut self, cx: &mut Context<Self>) {
+        let jobs: Vec<_> =
+            self.repos.roots().map(|r| (r.clone(), self.git_ops.entry(r.clone()).or_default().lock.clone())).collect();
+        crate::perf::event_with(|| format!("background fetch: {} repos", jobs.len()));
+        cx.spawn(async move |this, cx| {
+            for (root, lock) in jobs {
+                let r = root.clone();
+                let result = cx
+                    .background_executor()
+                    .spawn(async move {
+                        if git::remote::remotes(&r).is_empty() {
+                            return Ok(false);
+                        }
+                        let _one_at_a_time = lock.lock().unwrap_or_else(|e| e.into_inner());
+                        git::remote::fetch(&r, &git::remote::Cancel::default()).map(|()| true)
+                    })
+                    .await;
+                let ok = this.update(cx, |w, cx| match result {
+                    Ok(true) => {
+                        w.repos.refresh(&root);
+                        w.pr_lookup(root.clone(), false, cx);
+                    }
+                    Ok(false) => {}
+                    Err(e) => {
+                        let name = root.file_name().map_or_else(String::new, |n| n.to_string_lossy().into_owned());
+                        let first = e.to_string().lines().next().unwrap_or_default().to_string();
+                        w.flash(format!("Background fetch failed in {name}: {first}"), cx);
+                    }
+                });
+                if ok.is_err() {
+                    return;
+                }
+            }
+        })
+        .detach();
+    }
+
     /// Stops the repo's running network job (git and its ssh are killed; nothing half-written: git's ref updates
     /// are atomic).
     pub fn cancel_git(&mut self, root: PathBuf, cx: &mut Context<Self>) {
