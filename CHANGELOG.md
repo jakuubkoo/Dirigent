@@ -6,6 +6,14 @@ All notable changes to Dirigent are recorded here. The format follows
 
 ## [Unreleased]
 
+### Added
+
+- A `.deb` package (`/usr/lib/dirigent`, `/usr/bin/dirigent`, a launcher entry and icon, runtime dependencies
+  computed from the binaries), attached to each release.
+- An APT repository on GitHub Pages, signed and rebuilt by every release: `sudo apt update && sudo apt upgrade`
+  updates Dirigent.
+- A hint at startup, and from `install.sh`, when a user-local install and the package are both installed.
+
 ## [0.1.0] - 2026-11-06
 
 The first release: a native Linux app (Wayland and X11) for running many Claude Code sessions side by side.

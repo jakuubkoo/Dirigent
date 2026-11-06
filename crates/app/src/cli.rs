@@ -255,9 +255,52 @@ pub fn pick(req: &Request, tabs: &[(&Path, bool)], active: usize, order: &[usize
     std::iter::once(active).chain(order.iter().copied()).find(fits)
 }
 
+/// Where the apt package puts the app (`/usr/bin/dirigent` links here).
+pub const SYSTEM_EXE: &str = "/usr/lib/dirigent/dirigent";
+
+/// The user-local install (`scripts/install.sh`) under `home`.
+pub fn local_exe(home: &Path) -> PathBuf {
+    home.join(".local/lib/dirigent/dirigent")
+}
+
+/// Running one install while the other exists: which one a terminal's `dirigent` starts depends on PATH
+/// (`~/.local/bin` comes first), and `apt upgrade` updates only the package. None when there's nothing to say.
+pub fn install_hint(exe: &Path, home: &Path, local_exists: bool, system_exists: bool) -> Option<String> {
+    let local = local_exe(home);
+    let switch = "Run scripts/uninstall.sh (from the source checkout or the release tarball; your sessions and \
+                  settings stay) to keep only the package.";
+    if exe == local && system_exists {
+        Some(format!(
+            "dirigent: this is the user-local install ({}); the apt package in /usr/lib/dirigent is installed too, \
+             but ~/.local/bin/dirigent shadows /usr/bin/dirigent, and `apt upgrade` doesn't update this copy. {switch}",
+            local.display()
+        ))
+    } else if exe == Path::new(SYSTEM_EXE) && local_exists {
+        Some(format!(
+            "dirigent: a user-local install also exists ({}); in a terminal, `dirigent` may start that older copy \
+             (~/.local/bin comes first on PATH). {switch}",
+            local.display()
+        ))
+    } else {
+        None
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn install_hint_only_when_both_installs_exist() {
+        let home = Path::new("/home/u");
+        let (local, system) = (local_exe(home), PathBuf::from(SYSTEM_EXE));
+        let hint = |exe: &Path, l, s| install_hint(exe, home, l, s);
+        assert!(hint(&local, true, true).unwrap().contains("shadows /usr/bin/dirigent"));
+        assert!(hint(&system, true, true).unwrap().contains("/home/u/.local/lib/dirigent/dirigent"));
+        assert_eq!(hint(&local, true, false), None, "only the local install");
+        assert_eq!(hint(&system, false, true), None, "only the package");
+        assert_eq!(hint(Path::new("/src/target/release/dirigent"), true, true), None, "a dev build says nothing");
+    }
 
     fn args(a: &[&str]) -> Vec<String> {
         a.iter().map(|s| s.to_string()).collect()

@@ -27,7 +27,51 @@ stay at zero lag and 0 % CPU when idle. Linux (Wayland and X11) for now.
 
 ## Install
 
-### From a release (no Rust needed)
+### With apt (Ubuntu 22.04+ / Debian 12+, amd64)
+
+Add the repository once:
+
+```sh
+sudo install -d -m 0755 /etc/apt/keyrings
+sudo curl -fsSLo /etc/apt/keyrings/dirigent.gpg https://jakuubkoo.github.io/Dirigent/dirigent.gpg
+gpg --show-keys /etc/apt/keyrings/dirigent.gpg   # the fingerprint must be A604D170945C76BBA9E4EE3025E2F2B4838194E1
+sudo curl -fsSLo /etc/apt/sources.list.d/dirigent.sources https://jakuubkoo.github.io/Dirigent/dirigent.sources
+sudo apt update && sudo apt install dirigent
+```
+
+`dirigent.sources` is this deb822 entry (write it by hand if you prefer):
+
+```
+Types: deb
+URIs: https://jakuubkoo.github.io/Dirigent
+Suites: stable
+Components: main
+Architectures: amd64
+Signed-By: /etc/apt/keyrings/dirigent.gpg
+```
+
+From then on, `sudo apt update && sudo apt upgrade` brings new releases. The package puts the app in
+`/usr/lib/dirigent/` (`/usr/bin/dirigent` links to it) with a launcher entry and icon. Each
+[release](https://github.com/jakuubkoo/Dirigent/releases) also has the `.deb` attached
+(`sudo apt install ./dirigent_X.Y.Z_amd64.deb`).
+
+Remove it with `sudo apt remove dirigent`. To drop the repository too, delete
+`/etc/apt/sources.list.d/dirigent.sources` and `/etc/apt/keyrings/dirigent.gpg`. Your sessions and settings stay in
+`~/.local/state/dirigent` and `~/.config/dirigent`.
+
+#### Switching from a local install to apt
+
+A local install (`scripts/install.sh` or a release tarball) lives in `~/.local`, and `~/.local/bin` usually comes
+before `/usr/bin` on PATH. A terminal's `dirigent` would then keep starting the old local copy, which apt never
+updates; Dirigent prints a hint when it starts with both installed. Remove the local one (your sessions and settings
+stay):
+
+```sh
+scripts/uninstall.sh      # from your checkout or the unpacked tarball
+hash -r                   # make the shell forget the old path
+```
+
+### From a release tarball (no Rust needed)
 
 Download `dirigent-X.Y.Z-x86_64-linux.tar.gz` and `SHA256SUMS` from
 [Releases](https://github.com/jakuubkoo/Dirigent/releases) (Linux x86_64, glibc 2.35+, e.g. Ubuntu 22.04 or newer):

@@ -45,6 +45,11 @@ fn main() {
         println!("Dirigent {} ({})", env!("CARGO_PKG_VERSION"), option_env!("DIRIGENT_BUILD").unwrap_or("dev build"));
         return;
     }
+    if let (Some("--desktop-entry"), Some(exec)) = (args.first().map(String::as_str), args.get(1)) {
+        // For packaging (scripts/build-deb.sh): the launcher entry for the app at `exec`.
+        print!("{}", desktop_text(exec));
+        return;
+    }
     if let Some(flag @ ("--install-desktop" | "--uninstall-desktop")) = args.first().map(String::as_str) {
         if let Err(e) = desktop_entry(flag == "--install-desktop") {
             eprintln!("dirigent: {e}");
@@ -83,6 +88,16 @@ fn main() {
         Err(e) => fail(1, e),
     };
     send(&req);
+    // We are the app (not a request to a running one): two installs side by side get a hint, in the terminal and
+    // the log.
+    if let (Ok(exe), Some(home)) = (std::env::current_exe(), std::env::var_os("HOME").map(PathBuf::from)) {
+        let exists = |p: &std::path::Path| p.exists();
+        if let Some(hint) =
+            cli::install_hint(&exe, &home, exists(&cli::local_exe(&home)), exists(cli::SYSTEM_EXE.as_ref()))
+        {
+            eprintln!("{hint}");
+        }
+    }
     if std::io::stdin().is_terminal() {
         // Started from a terminal: the app runs on its own (own process group, output to a log), the shell returns.
         detach(&state_path);
@@ -205,6 +220,14 @@ fn detach(state_path: &std::path::Path) -> ! {
     }
 }
 
+/// The launcher entry starting the app at `exec` (`--install-desktop`, and the .deb via `--desktop-entry`).
+fn desktop_text(exec: &str) -> String {
+    format!(
+        "[Desktop Entry]\nType=Application\nName=Dirigent\nComment=Many Claude Code sessions in one window\n\
+         Exec=\"{exec}\"\nIcon=dirigent\nTerminal=false\nCategories=Development;\nStartupWMClass=dirigent\n"
+    )
+}
+
 /// `--install-desktop`: `~/.local/share/applications/dirigent.desktop` (launching this binary) and the icon, so
 /// GNOME names notifications and shows the dock icon; `--uninstall-desktop` removes both. Nothing else ever writes
 /// to your home directory.
@@ -226,12 +249,7 @@ fn desktop_entry(install: bool) -> std::io::Result<()> {
         }
         return Ok(());
     }
-    let exe = std::env::current_exe()?;
-    let body = format!(
-        "[Desktop Entry]\nType=Application\nName=Dirigent\nComment=Many Claude Code sessions in one window\n\
-         Exec=\"{}\"\nIcon=dirigent\nTerminal=false\nCategories=Development;\nStartupWMClass=dirigent\n",
-        exe.display()
-    );
+    let body = desktop_text(&std::env::current_exe()?.display().to_string());
     for (path, bytes) in [(&entry, body.as_bytes()), (&icon, assets::APP_ICON_SVG)] {
         std::fs::create_dir_all(path.parent().unwrap())?;
         std::fs::write(path, bytes)?;

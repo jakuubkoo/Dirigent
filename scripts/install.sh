@@ -131,3 +131,7 @@ esac
 if pgrep -x dirigent >/dev/null; then
     echo "dirigent is running: restart it to use the new version."
 fi
+if [[ -x /usr/lib/dirigent/dirigent ]]; then
+    echo "The apt package is installed too (/usr/lib/dirigent): $bin/dirigent shadows /usr/bin/dirigent when $bin"
+    echo "comes first on PATH, and apt upgrades only the package. Keep one: scripts/uninstall.sh removes this copy."
+fi
