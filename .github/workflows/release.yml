@@ -111,8 +111,10 @@ jobs:
           if-no-files-found: error
 
   publish:
-    if: github.ref_type == 'tag'
     needs: build
+    # A plain `if` adds an implicit success(), which also checks the skipped `gate` behind `build` and skipped this
+    # job on the v0.3.0 tag push. Check the build's own result instead.
+    if: ${{ !cancelled() && github.ref_type == 'tag' && needs.build.result == 'success' }}
     runs-on: ubuntu-24.04
     permissions:
       contents: write # create the release; nothing else here can write
