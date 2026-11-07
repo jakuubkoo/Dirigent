@@ -8,6 +8,13 @@ All notable changes to Dirigent are recorded here. The format follows
 
 ### Added
 
+- **Edit files in the preview**: type, select with the mouse or Shift+keys, copy/cut/paste, undo/redo, auto-indent
+  on Enter, Tab / Shift+Tab (also over selected lines), Ctrl+S saves. A dot next to the name marks unsaved edits;
+  Esc, switching or closing the session, opening another file and closing the window ask before dropping them.
+  When an agent changes the open file, it reloads (cursor kept, a short "Reloaded" notice) if you have no unsaved
+  edits; otherwise a banner offers Reload (lose mine), Keep mine or Show diff. Ctrl+Z never goes back past a reload. Saving over a change made on disk asks first.
+  Binary, non-UTF-8 and large files (over 2 MB / 50k lines, or lines over 2000 characters) stay read-only.
+
 - New session dialog: a branch prefix dropdown (`feat/`, `fix/`, `chore/`, `docs/`, none) next to the branch field,
   `feat/` by default and remembered per project. The slug made from the session name never takes a `/` from it
   (`esc-ctrl-c`, not `esc/ctrl-c`).

@@ -16,7 +16,7 @@ use session::{Session, Size};
 use crate::agent::{self, Hub};
 use crate::diff_syntax::{self, syntax_off};
 use crate::file_tree::{self, Marks, Row};
-use crate::files_panel::{Content, FileView, FilesPanel, TreeData};
+use crate::files_panel::{Content, FileView, FilesPanel, Loaded, TreeData};
 use crate::git_panel::{self, DiffView, GitPanel, PanelView, Repos};
 use crate::layout::{self, Dock, Panel};
 use crate::line_edit::{Edit, LineEdit};
@@ -225,9 +225,22 @@ struct PrSlot {
 /// What a confirm dialog's action button does.
 enum Then {
     Git(PathBuf, crate::git_ops::Job),
+    /// Discard the open editor's unsaved edits, then do this.
+    Leave(Leave),
     /// Close / restart the tab with this id (claude runs in it).
     Close(usize),
     Restart(usize),
+}
+
+/// What was about to replace or close the open editor when it asked about its unsaved edits.
+enum Leave {
+    CloseOverlay,
+    Show(Overlay),
+    /// Tab ids (indices move meanwhile).
+    Activate(usize),
+    CloseTab(usize),
+    FindInTerminal(Option<String>),
+    Quit,
 }
 
 /// A session row being dragged: its tab id, sidebar group and vector index when the drag began.
@@ -629,6 +642,11 @@ impl Workspace {
             }
             async {}
         }));
+        // Closing the window with unsaved edits in the editor asks first.
+        let ws = cx.entity().downgrade();
+        window.on_window_should_close(cx, move |window, cx| {
+            ws.update(cx, |w, cx| !w.unsaved(Leave::Quit, window, cx)).unwrap_or(true)
+        });
         this.applied = this.grid_size(window);
         this.watch_settings(window, cx);
         this.restart_fetch_timer(cx);
@@ -981,6 +999,7 @@ impl Workspace {
                         }
                     }
                 }
+                perf_editor::run(this.clone(), cx).await;
                 eprintln!("[perf] opened");
             })
             .detach();
@@ -1175,7 +1194,7 @@ impl Workspace {
     }
 
     fn activate(&mut self, idx: usize, window: &mut Window, cx: &mut Context<Self>) {
-        if idx >= self.tabs.len() {
+        if idx >= self.tabs.len() || self.unsaved(Leave::Activate(self.tabs[idx].id), window, cx) {
             return;
         }
         crate::perf::switch_started();
@@ -1529,7 +1548,8 @@ impl Workspace {
 
     /// Closes tab `idx` now (its shell and whatever runs in it are killed off-thread).
     pub(super) fn close_tab(&mut self, idx: usize, window: &mut Window, cx: &mut Context<Self>) {
-        if idx >= self.tabs.len() {
+        // Any tab: the overlay is the window's, dropped below whichever tab closes.
+        if idx >= self.tabs.len() || self.unsaved(Leave::CloseTab(self.tabs[idx].id), window, cx) {
             return;
         }
         let was_active = idx == self.active;
@@ -2179,6 +2199,7 @@ impl Workspace {
 mod branches_ui;
 mod command_center;
 mod git_write;
+mod perf_editor;
 mod projects_ui;
 mod setup;
 mod view;
@@ -2704,6 +2725,9 @@ impl Workspace {
     }
 
     fn show_overlay(&mut self, overlay: Overlay, window: &mut Window, cx: &mut Context<Self>) {
+        if self.unsaved(Leave::Show(overlay.clone()), window, cx) {
+            return;
+        }
         if self.overlay.is_none()
             && let Some(term) = self.tabs.get(self.active).and_then(|t| t.view.as_ref())
         {
@@ -2734,6 +2758,9 @@ impl Workspace {
 
     /// Ctrl+Alt+F: the find bar of the active session (a diff, preview or Settings over it closes first).
     pub fn find_in_terminal(&mut self, query: Option<String>, window: &mut Window, cx: &mut Context<Self>) {
+        if self.unsaved(Leave::FindInTerminal(query.clone()), window, cx) {
+            return;
+        }
         if self.overlay.is_some() {
             self.close_overlay(window, cx);
         }
@@ -2744,7 +2771,7 @@ impl Workspace {
 
     /// Esc in a diff or preview: back to the terminal.
     pub fn close_overlay(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if !self.drop_overlay() {
+        if self.unsaved(Leave::CloseOverlay, window, cx) || !self.drop_overlay() {
             return;
         }
         if let Some(view) = self.tabs.get(self.active).and_then(|t| t.view.clone()) {
@@ -2756,6 +2783,56 @@ impl Workspace {
         }
         self.sync_panel(cx);
         cx.notify();
+    }
+
+    /// The title bar's close button: asks first while the editor has unsaved edits (true: asked, don't close).
+    pub fn ask_before_quit(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
+        self.unsaved(Leave::Quit, window, cx)
+    }
+
+    /// The open editor has unsaved edits: asks whether to discard them (then does `leave`) and returns true.
+    fn unsaved(&mut self, leave: Leave, window: &mut Window, cx: &mut Context<Self>) -> bool {
+        let Some(Overlay::File(f)) = &self.overlay else { return false };
+        let f = f.read(cx);
+        if !f.dirty() {
+            return false;
+        }
+        let name = f.path.file_name().map_or(String::new(), |n| n.to_string_lossy().into_owned());
+        self.modal = Some(Modal::Confirm {
+            title: format!("Discard unsaved changes to {name}?"),
+            body: "Your edits aren't saved. Cancel, then Ctrl+S in the editor keeps them.".into(),
+            files: Vec::new(),
+            ok: "Discard changes",
+            danger: true,
+            then: Then::Leave(leave),
+        });
+        window.focus(&self.focus, cx);
+        window.activate_window();
+        cx.notify();
+        true
+    }
+
+    /// The confirm dialog said discard: drop the editor's edits and do what was asked.
+    fn leave(&mut self, leave: Leave, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(Overlay::File(f)) = &self.overlay {
+            f.update(cx, |f, _| f.forget_edits());
+        }
+        match leave {
+            Leave::CloseOverlay => self.close_overlay(window, cx),
+            Leave::Show(o) => self.show_overlay(o, window, cx),
+            Leave::Activate(id) => {
+                if let Some(i) = self.tab_idx(id) {
+                    self.activate(i, window, cx);
+                }
+            }
+            Leave::CloseTab(id) => {
+                if let Some(i) = self.tab_idx(id) {
+                    self.close_tab(i, window, cx);
+                }
+            }
+            Leave::FindInTerminal(q) => self.find_in_terminal(q, window, cx),
+            Leave::Quit => cx.quit(),
+        }
     }
 
     /// Forgets the overlay and cancels its read; returns whether one was open.
@@ -2893,30 +2970,41 @@ impl Workspace {
                 }));
             }
             Some(Overlay::File(view)) => {
-                let (path, repo) = {
+                let (path, repo, editing) = {
                     let v = view.read(cx);
-                    (v.path.clone(), v.repo.clone())
+                    (v.path.clone(), v.repo.clone(), v.editable())
                 };
                 let change = repo.as_ref().and_then(|root| {
                     let rel = path.strip_prefix(root).ok()?.to_str()?.to_string();
                     self.repos.status(root)?.files.iter().find(|f| f.path == rel).cloned()
                 });
+                if editing {
+                    // The editor watches its file itself; a repo refresh only brings the git status.
+                    view.update(cx, |v, cx| v.set_change(change, cx));
+                    return;
+                }
                 self._overlay_task = Some(cx.spawn(async move |_, cx| {
                     let started = Instant::now();
                     let lang = syntax::detect(&path);
-                    let read = cx
-                        .background_executor()
-                        .spawn(async move { git::text::read_file(&path).ok().map(Content::prepare) })
-                        .await;
+                    let read = cx.background_executor().spawn(async move { Loaded::read(&path).ok() }).await;
                     if current2.load(Ordering::Relaxed) != generation {
                         return;
                     }
                     crate::perf::event_with(|| format!("file read in {:.1} ms", started.elapsed().as_secs_f64() * 1e3));
-                    let (content, raw) = match read {
-                        Some((c, raw)) => (Some(c), raw),
-                        None => (None, None),
+                    let raw = match read {
+                        Some(Loaded::Edit { rope, format, hash }) => {
+                            view.update(cx, |v, cx| v.open_editor(rope, format, hash, change, cx));
+                            return;
+                        }
+                        Some(Loaded::View { content, raw, why }) => {
+                            view.update(cx, |v, cx| v.set_content(Some(content), Some(why), change, cx));
+                            raw
+                        }
+                        None => {
+                            view.update(cx, |v, cx| v.set_content(None, None, change, cx));
+                            None
+                        }
                     };
-                    view.update(cx, |v, cx| v.set_content(content, change, cx));
                     let (Some(lang), Some(raw), false) = (lang, raw, syntax_off()) else { return };
                     let started = Instant::now();
                     let colors = cx
