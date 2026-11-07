@@ -216,7 +216,8 @@ fn status_command_reaches_the_app_through_both_shells() {
 
 /// WSL: the Linux helper (musl build, `DIRIGENT_TEST_WSL_HOOK`) inside the distro (`DIRIGENT_TEST_WSL`) reaches the
 /// app's pipe through the Windows helper started by interop (`relay` mode), every message with its `seq`; the
-/// statusLine runs the user's own Linux one. Skipped with a note without a distro.
+/// statusLine runs the user's own Linux one. The script then stays a moment, as a tab's shell does: relays still
+/// starting when `wsl.exe` exits are lost with the session. Skipped with a note without a distro.
 #[test]
 #[cfg(windows)]
 fn wsl_helper_relays_to_the_app() {
@@ -242,7 +243,8 @@ mkdir -p {user}/.claude
 printf '%s' '{{"statusLine":{{"type":"command","command":"printf mine:; grep -o \"\\\"display_name\\\": \\\"[^\\\"]*\\\"\" | head -1"}}}}' > {user}/.claude/settings.json
 for i in $(seq 20); do /tmp/dh-$$ "$PIPE" 7 hook < "$FX/hook_UserPromptSubmit.json"; done
 CLAUDE_CONFIG_DIR={user}/.claude /tmp/dh-$$ "$PIPE" 7 status < "$FX/status_after_response.json"
-rm -rf /tmp/dh-$$ {user}"#
+rm -rf /tmp/dh-$$ {user}
+sleep 3"#
     );
     let out = Command::new("wsl.exe")
         .args(["-d", &distro, "-e", "env"])
@@ -256,19 +258,20 @@ rm -rf /tmp/dh-$$ {user}"#
     assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
     assert_eq!(String::from_utf8_lossy(&out.stdout).trim(), r#"mine:"display_name": "Haiku 5.5""#);
     let mut seqs = Vec::new();
-    let mut status = None;
+    let (mut hooks, mut status) = (0, None);
     while let Ok(bytes) = app.rx.recv_timeout(Duration::from_secs(10)) {
         let m: Msg = serde_json::from_slice(&bytes).unwrap();
         assert_eq!(m.tab, 7);
         seqs.push(m.seq.expect("relayed messages carry seq"));
-        if let Kind::Status { five_hour, .. } = m.kind {
-            status = five_hour;
+        match m.kind {
+            Kind::Status { five_hour, .. } => status = five_hour,
+            _ => hooks += 1,
         }
         if seqs.len() == 21 {
             break;
         }
     }
-    assert_eq!(seqs.len(), 21, "all 20 hooks and the status arrived");
+    assert_eq!((hooks, status.is_some()), (20, true), "all 20 hooks and the status arrived");
     assert_eq!(status.map(|l| l.used_pct.round()), Some(14.0));
     seqs.sort();
     seqs.dedup();
