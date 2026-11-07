@@ -82,6 +82,7 @@ fn hunks_partially_staged() {
 }
 
 #[test]
+#[cfg_attr(windows, ignore = "gio trash; the Recycle Bin comes with the Windows git step")]
 fn files_stage_unstage_discard_and_trash() {
     let (r, d) = repo("files");
     edit(&d, "3", "three");
@@ -147,7 +148,8 @@ fn failing_pre_commit_hook_shows_its_output() {
     let (r, d) = repo("hook");
     let hook = d.join(".git/hooks/pre-commit");
     std::fs::write(&hook, "#!/bin/sh\necho 'lint: 2 problems' >&2\nexit 1\n").unwrap();
-    std::os::unix::fs::PermissionsExt::set_mode(&mut std::fs::metadata(&hook).unwrap().permissions(), 0o755);
+    // Git for Windows runs hooks through its own sh, no executable bit.
+    #[cfg(unix)]
     std::fs::set_permissions(&hook, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
     edit(&d, "2", "two");
     sh(&d, &["add", "f.txt"]);

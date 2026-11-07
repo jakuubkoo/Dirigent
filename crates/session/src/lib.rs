@@ -143,7 +143,8 @@ pub struct Session {
     pub title: Arc<Mutex<Option<String>>>,
     flags: Arc<Flags>,
     writer: Writer,
-    master: Box<dyn MasterPty + Send>,
+    /// `None` once a Windows pseudoconsole was closed after its shell exited (`watch_exit`).
+    master: Arc<Mutex<Option<Box<dyn MasterPty + Send>>>>,
     /// Taken by whoever ends the process: the reader thread on EOF (reaps), or Drop (kills + reaps).
     child: Arc<Mutex<Option<Box<dyn Child + Send + Sync>>>>,
     size: Arc<Mutex<Size>>,
@@ -238,7 +239,10 @@ impl Session {
             // dropping `tx` closes the channel = exit notification
         })?;
 
-        Ok(Self { term, wakeups, title, flags, writer, master: pair.master, child, size: size_shared })
+        let master = Arc::new(Mutex::new(Some(pair.master)));
+        #[cfg(windows)]
+        watch_exit(&child, &master)?;
+        Ok(Self { term, wakeups, title, flags, writer, master, child, size: size_shared })
     }
 
     /// Answers a prompt once: when `needle` (whitespace ignored, escapes stripped) appears in the output before
@@ -268,7 +272,9 @@ impl Session {
         *cur = new;
         drop(cur);
         self.term.lock().resize(new);
-        let _ = self.master.resize(new.pty());
+        if let Some(m) = self.master.lock().unwrap().as_ref() {
+            let _ = m.resize(new.pty());
+        }
         true
     }
 
@@ -345,6 +351,30 @@ impl Drop for Session {
     }
 }
 
+/// ConPTY keeps the output pipe open after the shell exits, until the pseudoconsole is closed. A waiter thread
+/// closes it when the process ends, while the reader thread is still reading (`ClosePseudoConsole` waits for the
+/// output to be drained); the reader then sees EOF and runs the normal exit path.
+#[cfg(windows)]
+fn watch_exit(
+    child: &Mutex<Option<Box<dyn Child + Send + Sync>>>,
+    master: &Arc<Mutex<Option<Box<dyn MasterPty + Send>>>>,
+) -> std::io::Result<()> {
+    use std::os::windows::io::{AsRawHandle, BorrowedHandle};
+    use windows_sys::Win32::System::Threading::{INFINITE, WaitForSingleObject};
+    let raw =
+        child.lock().unwrap().as_ref().and_then(|c| c.as_raw_handle()).ok_or_else(|| io_err("no process handle"))?;
+    // Our own handle: the reader thread may drop the child (and its handle) while we wait.
+    // SAFETY: `raw` belongs to the child, which is alive and locked above while we duplicate it.
+    let process = unsafe { BorrowedHandle::borrow_raw(raw) }.try_clone_to_owned()?;
+    let master = master.clone();
+    thread::Builder::new().name("pty-exit".into()).spawn(move || {
+        // SAFETY: a valid process handle we own.
+        unsafe { WaitForSingleObject(process.as_raw_handle(), INFINITE) };
+        drop(master.lock().unwrap().take());
+    })?;
+    Ok(())
+}
+
 fn io_err(e: impl std::fmt::Display) -> std::io::Error {
     std::io::Error::other(e.to_string())
 }
@@ -361,6 +391,7 @@ mod tests {
         term.renderable_content().display_iter.map(|c| c.c).collect()
     }
 
+    #[cfg(unix)]
     fn sh(script: &str) -> CommandBuilder {
         let mut cmd = CommandBuilder::new("sh");
         cmd.args(["-c", script]);
@@ -368,7 +399,8 @@ mod tests {
     }
 
     fn wait_until(what: &str, mut f: impl FnMut() -> bool) {
-        let deadline = Instant::now() + Duration::from_secs(5);
+        // PowerShell alone can take seconds to start on a cold CI runner.
+        let deadline = Instant::now() + Duration::from_secs(if cfg!(windows) { 30 } else { 5 });
         while !f() {
             assert!(Instant::now() < deadline, "timed out waiting for {what}");
             thread::sleep(Duration::from_millis(20));
@@ -376,6 +408,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(unix)]
     fn output_cwd_and_resize() {
         let dir = std::env::temp_dir();
         let s = Session::spawn_command(sh("printf '%s-%s' \"$COLORTERM\" \"$PWD\"; sleep 2"), &dir, SIZE).unwrap();
@@ -390,6 +423,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(unix)]
     fn scrollback_limit_applies_live() {
         let s = Session::spawn_command(sh("seq 1 500; sleep 2"), Path::new("/"), SIZE).unwrap();
         wait_until("output", || s.term.lock().grid().history_size() >= 400);
@@ -400,6 +434,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(unix)]
     fn hidden_flood_wakes_once() {
         let s = Session::spawn_command(sh("sleep 0.2; exec yes"), Path::new("/"), SIZE).unwrap();
         wait_until("unread", || s.is_unread());
@@ -411,6 +446,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(unix)]
     fn shell_cwd_reports_wake_once_per_change() {
         // Like the zsh precmd hook: the same dir reported twice (BEL, then ST), then a new one.
         let script = r#"printf '\033]7;file://%s/tmp\a' "$(cat /proc/sys/kernel/hostname)"; sleep 0.3
@@ -427,6 +463,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(unix)]
     fn exit_is_reported_with_code() {
         let s = Session::spawn_command(sh("exit 3"), Path::new("/"), SIZE).unwrap();
         let pid = s.pid().unwrap();
@@ -436,6 +473,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(unix)]
     fn drop_kills_shell_and_foreground_child() {
         let s = Session::spawn_command(sh("sleep 1000; true"), Path::new("/"), SIZE).unwrap();
         let pid = s.pid().unwrap();
@@ -450,5 +488,76 @@ mod tests {
         let gone = |p: &str| !Path::new(&format!("/proc/{p}")).exists();
         wait_until("shell reaped", || gone(&pid.to_string()));
         wait_until("sleep killed", || gone(&sleep_pid));
+    }
+
+    #[cfg(windows)]
+    fn ps(script: &str) -> CommandBuilder {
+        let mut cmd = CommandBuilder::new("powershell.exe");
+        cmd.args(["-NoLogo", "-NoProfile", "-Command", script]);
+        cmd
+    }
+
+    #[cfg(windows)]
+    fn alive(pid: u32) -> bool {
+        let out = std::process::Command::new("tasklist").args(["/FI", &format!("PID eq {pid}"), "/NH"]).output();
+        String::from_utf8_lossy(&out.unwrap().stdout).contains(&pid.to_string())
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn conpty_output_resize_and_exit_code() {
+        let dir = std::env::temp_dir();
+        let mut cmd = CommandBuilder::new("cmd.exe");
+        cmd.args(["/c", "echo out-%COLORTERM%-%CD%& ping -n 2 127.0.0.1 >nul & exit /b 3"]);
+        let s = Session::spawn_command(cmd, &dir, SIZE).unwrap();
+        s.set_visible(true);
+        wait_until("output", || grid_text(&s).contains("out-truecolor-"));
+        assert!(s.wakeups.try_recv().is_ok(), "visible session must signal a wakeup");
+        assert!(s.resize(Size { cols: 20, rows: 3, ..SIZE }));
+        // The exit must come through although ConPTY never closes the pipe on its own (`watch_exit`).
+        wait_until("exit", || s.is_exited() && s.wakeups.is_closed());
+        assert_eq!(s.exit_code(), Some(3));
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn conpty_passes_osc7_through() {
+        let s = Session::spawn_command(
+            ps("[Console]::Write([char]27 + ']7;file://localhost/C:/Windows' + [char]7); Start-Sleep 3"),
+            &std::env::temp_dir(),
+            SIZE,
+        )
+        .unwrap();
+        wait_until("cwd", || s.flags.cwd.lock().unwrap().is_some());
+        assert_eq!(s.take_cwd_change(), Some(PathBuf::from(r"C:\Windows")));
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn conpty_keys_reach_the_shell() {
+        let s = Session::spawn_command(
+            ps("$l = Read-Host; Write-Host \"got-$l\"; Start-Sleep 3"),
+            &std::env::temp_dir(),
+            SIZE,
+        )
+        .unwrap();
+        s.set_visible(true);
+        thread::sleep(Duration::from_millis(1500)); // powershell startup
+        s.write(b"abc\r");
+        wait_until("echo", || grid_text(&s).contains("got-abc"));
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn conpty_drop_kills_the_shell() {
+        let mut cmd = CommandBuilder::new("cmd.exe");
+        cmd.args(["/c", "ping -n 1000 127.0.0.1 >nul"]);
+        let s = Session::spawn_command(cmd, &std::env::temp_dir(), SIZE).unwrap();
+        let pid = s.pid().unwrap();
+        assert!(alive(pid));
+        let started = Instant::now();
+        drop(s);
+        assert!(started.elapsed() < Duration::from_millis(50), "drop must not block");
+        wait_until("shell killed", || !alive(pid));
     }
 }

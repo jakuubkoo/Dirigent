@@ -1105,6 +1105,7 @@ dependencies = [
  "wayland-backend",
  "wayland-client",
  "wayland-protocols",
+ "windows-sys 0.61.2",
  "zbus",
 ]
 
@@ -2260,6 +2261,7 @@ version = "0.3.0"
 dependencies = [
  "serde",
  "serde_json",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -4678,6 +4680,7 @@ dependencies = [
  "async-channel",
  "portable-pty",
  "regex-syntax",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]

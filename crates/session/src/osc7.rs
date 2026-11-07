@@ -92,9 +92,21 @@ pub fn parse(payload: &[u8], hostname: &str) -> Option<PathBuf> {
     if !(host.is_empty() || host == "localhost" || host.eq_ignore_ascii_case(hostname)) {
         return None;
     }
-    let path = decode(&rest[slash..]);
+    Some(to_path(decode(&rest[slash..])))
+}
+
+#[cfg(unix)]
+fn to_path(bytes: Vec<u8>) -> PathBuf {
     use std::os::unix::ffi::OsStringExt;
-    Some(PathBuf::from(std::ffi::OsString::from_vec(path)))
+    PathBuf::from(std::ffi::OsString::from_vec(bytes))
+}
+
+/// `/C:/Users/x` (or cmd's raw `/C:\Users\x`) → `C:\Users\x`.
+#[cfg(windows)]
+fn to_path(bytes: Vec<u8>) -> PathBuf {
+    let s = String::from_utf8_lossy(&bytes);
+    let s = s.strip_prefix('/').filter(|r| r.as_bytes().get(1) == Some(&b':')).unwrap_or(&s);
+    PathBuf::from(s.replace('/', "\\"))
 }
 
 fn decode(b: &[u8]) -> Vec<u8> {
@@ -116,8 +128,15 @@ fn decode(b: &[u8]) -> Vec<u8> {
 }
 
 /// This machine's hostname (what zsh's `$HOST` holds).
+#[cfg(unix)]
 pub fn hostname() -> String {
     std::fs::read_to_string("/proc/sys/kernel/hostname").map(|s| s.trim().to_string()).unwrap_or_default()
+}
+
+/// This machine's name (what our PowerShell prompt hook puts in OSC 7).
+#[cfg(windows)]
+pub fn hostname() -> String {
+    std::env::var("COMPUTERNAME").unwrap_or_default()
 }
 
 #[cfg(test)]
@@ -152,6 +171,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(unix)]
     fn parses_local_paths_only() {
         assert_eq!(parse(b"file://box/home/j/my%20dir", "box"), Some("/home/j/my dir".into()));
         assert_eq!(parse(b"file:///tmp", "box"), Some("/tmp".into()));
@@ -159,5 +179,15 @@ mod tests {
         assert_eq!(parse(b"file://other/etc", "box"), None, "remote shell");
         assert_eq!(parse(b"http://box/etc", "box"), None);
         assert_eq!(parse(b"file://box/a%zzb", "box"), Some("/a%zzb".into()), "bad escape kept as-is");
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn parses_windows_paths() {
+        let p = |s: &[u8]| parse(s, "BOX").map(|p| p.to_string_lossy().into_owned());
+        assert_eq!(p(b"file://BOX/C:/Users/j/my%20dir").as_deref(), Some(r"C:\Users\j\my dir"), "PowerShell hook");
+        assert_eq!(p(b"file://box/D:/").as_deref(), Some(r"D:\"), "host case-insensitive");
+        assert_eq!(p(b"file://localhost/C:\\Code\\a b").as_deref(), Some(r"C:\Code\a b"), "cmd's raw $P");
+        assert_eq!(p(b"file://other/C:/x"), None, "remote shell");
     }
 }

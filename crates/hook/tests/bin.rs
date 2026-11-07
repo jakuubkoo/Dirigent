@@ -1,3 +1,6 @@
+// Unix socket transport; the Windows named pipe gets its own tests with the hooks step.
+#![cfg(unix)]
+
 use std::io::Write;
 use std::os::unix::net::UnixDatagram;
 use std::path::{Path, PathBuf};

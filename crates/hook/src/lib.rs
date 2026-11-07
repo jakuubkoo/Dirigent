@@ -4,6 +4,8 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 pub mod notice;
+#[cfg(windows)]
+pub mod pipe;
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 pub struct Msg {

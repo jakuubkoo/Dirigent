@@ -57,10 +57,24 @@ fn perf(what: impl FnOnce() -> String) {
     }
 }
 
+/// `Command::new` for every program we start (git, gh, glab, claude, …). On Windows it adds `CREATE_NO_WINDOW`:
+/// a GUI app's child would otherwise flash a console window.
+pub fn cmd(program: impl AsRef<std::ffi::OsStr>) -> Command {
+    #[allow(unused_mut)]
+    let mut c = Command::new(program);
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt as _;
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        c.creation_flags(CREATE_NO_WINDOW);
+    }
+    c
+}
+
 /// `git` with the options every call needs. `--no-optional-locks`: a plain `git status` refreshes and rewrites
 /// `.git/index`, which our own watcher would see as a change (a refresh loop).
 fn git(dir: &Path) -> Command {
-    let mut c = Command::new("git");
+    let mut c = cmd("git");
     c.arg("--no-optional-locks")
         .current_dir(dir)
         .env("GIT_OPTIONAL_LOCKS", "0")

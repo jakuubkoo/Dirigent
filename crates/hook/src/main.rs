@@ -5,7 +5,6 @@
 //! send fails instantly and is ignored. Always exits 0 so Claude Code is never slowed down or broken.
 
 use std::io::{Read, Write};
-use std::os::unix::net::UnixDatagram;
 use std::process::{Command, Stdio};
 
 use hook::{Kind, Msg, parse};
@@ -31,15 +30,31 @@ fn main() {
     };
 
     if let (Ok(tab), Some(kind)) = (tab.parse(), kind)
-        && let Ok(sock) = UnixDatagram::unbound()
-        && sock.set_nonblocking(true).is_ok()
         && let Ok(bytes) = serde_json::to_vec(&Msg { tab, kind })
     {
-        let _ = sock.send_to(&bytes, socket);
+        send(socket, &bytes);
     }
 
     if mode == "status" {
         statusline(&input);
+    }
+}
+
+#[cfg(unix)]
+fn send(socket: &str, bytes: &[u8]) {
+    use std::os::unix::net::UnixDatagram;
+    if let Ok(sock) = UnixDatagram::unbound()
+        && sock.set_nonblocking(true).is_ok()
+    {
+        let _ = sock.send_to(bytes, socket);
+    }
+}
+
+/// `socket` = the app's pipe name. Busy: waited for at most 20 ms; app gone: nothing.
+#[cfg(windows)]
+fn send(socket: &str, bytes: &[u8]) {
+    if let Ok(mut pipe) = hook::pipe::connect(socket, std::time::Duration::from_millis(20)) {
+        let _ = pipe.write_all(bytes);
     }
 }
 
@@ -73,8 +88,8 @@ fn statusline(input: &str) {
 }
 
 fn user_statusline() -> Option<String> {
-    let home = std::env::var_os("HOME")?;
-    let text = std::fs::read_to_string(std::path::Path::new(&home).join(".claude/settings.json")).ok()?;
+    let home = std::env::home_dir()?;
+    let text = std::fs::read_to_string(home.join(".claude").join("settings.json")).ok()?;
     let v: serde_json::Value = serde_json::from_str(&text).ok()?;
     v["statusLine"]["command"].as_str().map(str::to_owned)
 }

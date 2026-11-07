@@ -7,7 +7,7 @@
 
 use std::io::Read as _;
 use std::path::Path;
-use std::process::{Command, Stdio};
+use std::process::Stdio;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
@@ -32,8 +32,7 @@ pub struct Output {
 /// Runs `program args` in `dir` with no terminal: stdin null, its own session (no controlling tty), prompts off.
 /// Killed (with its children, e.g. ssh) on `cancel` or after `timeout`. Non-zero exit → `Failed` with the output.
 pub fn run_tool(program: &str, dir: &Path, args: &[&str], cancel: &Cancel, timeout: Duration) -> Result<Output> {
-    use std::os::unix::process::CommandExt as _;
-    let mut c = Command::new(program);
+    let mut c = crate::cmd(program);
     c.args(args)
         .current_dir(dir)
         .env("LC_ALL", "C")
@@ -46,15 +45,18 @@ pub fn run_tool(program: &str, dir: &Path, args: &[&str], cancel: &Cancel, timeo
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
-    // SAFETY: setsid is async-signal-safe and touches no memory of ours.
-    unsafe {
-        c.pre_exec(|| {
-            libc::setsid();
-            Ok(())
-        });
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt as _;
+        // SAFETY: setsid is async-signal-safe and touches no memory of ours.
+        unsafe {
+            c.pre_exec(|| {
+                libc::setsid();
+                Ok(())
+            });
+        }
     }
     let mut child = c.spawn().map_err(GitError::Io)?;
-    let pid = child.id() as i32;
     let reader = |mut pipe: Box<dyn std::io::Read + Send>| {
         std::thread::spawn(move || {
             let mut buf = Vec::new();
@@ -71,8 +73,7 @@ pub fn run_tool(program: &str, dir: &Path, args: &[&str], cancel: &Cancel, timeo
             break Some(s);
         }
         if cancel.load(Ordering::Relaxed) || started.elapsed() > timeout {
-            // SAFETY: the child leads its own process group (setsid): this kills it and e.g. its ssh.
-            unsafe { libc::kill(-pid, libc::SIGKILL) };
+            kill_tree(&mut child);
             let _ = child.wait();
             break None;
         }
@@ -85,6 +86,20 @@ pub fn run_tool(program: &str, dir: &Path, args: &[&str], cancel: &Cancel, timeo
         Some(s) if s.success() => Ok(o),
         Some(_) => Err(classify(o)),
     }
+}
+
+/// Kills the child and what it started (e.g. ssh).
+#[cfg(unix)]
+fn kill_tree(child: &mut std::process::Child) {
+    // SAFETY: the child leads its own process group (setsid): this kills it and e.g. its ssh.
+    unsafe { libc::kill(-(child.id() as i32), libc::SIGKILL) };
+}
+
+// ponytail: kills only the direct child on Windows (its ssh may linger until it times out); a Job Object
+// (KILL_ON_JOB_CLOSE) takes the whole tree in the git/notifications step.
+#[cfg(windows)]
+fn kill_tree(child: &mut std::process::Child) {
+    let _ = child.kill();
 }
 
 /// Auth failures get a line saying where to fix them (the user's git setup), above git's own message.
