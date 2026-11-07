@@ -1,6 +1,7 @@
 //! Read-only git for the app: repo discovery, working-tree status with line counts, one file's diff, and a
 //! watcher that refreshes the status only after real changes. No UI dependencies. Shells out to `git`.
 
+mod exec;
 mod fs;
 pub mod index;
 pub mod layout;
@@ -183,7 +184,7 @@ pub(crate) fn native_or_wsl(dir: &Path, program: &str) -> Command {
 }
 
 fn output(mut c: Command) -> std::io::Result<Vec<u8>> {
-    let out = c.output()?;
+    let out = exec::output(&mut c, None, exec::READ_TIMEOUT, true)?;
     if out.status.success() {
         Ok(out.stdout)
     } else {
@@ -195,7 +196,7 @@ fn output(mut c: Command) -> std::io::Result<Vec<u8>> {
 pub fn discover(dir: &Path) -> Discovery {
     let mut c = git(dir);
     c.args(["rev-parse", "--show-toplevel", "--absolute-git-dir", "--path-format=absolute", "--git-common-dir"]);
-    match c.output() {
+    match exec::output(&mut c, None, exec::READ_TIMEOUT, true) {
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Discovery::GitMissing,
         Ok(out) if out.status.success() => {
             let text = String::from_utf8_lossy(&out.stdout);
@@ -451,29 +452,21 @@ pub fn diff(repo: &Repo, file: &FileChange, cancelled: impl Fn() -> bool) -> Opt
         c.args(file.orig.iter());
         c.arg(&file.path);
     }
-    c.stdout(Stdio::piped());
-    let mut child = c.spawn().ok()?;
-    let mut stdout = child.stdout.take()?;
+    let mut out = exec::stream(&mut c).ok()?;
     let mut raw = Vec::new();
-    let mut buf = vec![0u8; 64 * 1024];
     let mut truncated = false;
     loop {
-        if cancelled() {
-            let _ = child.kill();
-            let _ = child.wait();
-            return None;
-        }
-        match stdout.read(&mut buf) {
-            Ok(0) | Err(_) => break,
-            Ok(n) => raw.extend_from_slice(&buf[..n]),
+        match out.next(&cancelled) {
+            exec::Chunk::Data(b) => raw.extend(b),
+            exec::Chunk::End => break,
+            exec::Chunk::Cancelled | exec::Chunk::Failed => return None, // dropping `out` stops git
         }
         if raw.len() > MAX_DIFF_BYTES {
             truncated = true;
-            let _ = child.kill();
             break;
         }
     }
-    let _ = child.wait();
+    drop(out);
     let mut d = parse_diff(&raw);
     d.truncated |= truncated;
     Some(d)

@@ -4,9 +4,12 @@
 //! (`wsl.exe -d <distro> --cd <dir> -e git …`): Windows git over 9P is ~6x slower and doesn't see Linux config.
 //! The string helpers are pure and tested on every OS; the path ones only match on Windows.
 
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Condvar, Mutex};
+use std::time::{Duration, Instant};
 
 /// `(distro, /linux/path)` of a path inside a WSL distro, in any form Windows or the user hands out:
 /// `\\wsl.localhost\D\x`, `\\wsl$\D\x`, `\\?\UNC\wsl.localhost\D\x` (a `canonicalize`), `//wsl.localhost/D/x`,
@@ -75,24 +78,192 @@ pub fn of(p: &Path) -> Option<(String, String)> {
 }
 
 /// The env names our command builders set that must reach the Linux side (WSL passes only what `WSLENV` names).
-const ENV: &str = "LC_ALL:GIT_OPTIONAL_LOCKS:GIT_TERMINAL_PROMPT:GH_PROMPT_DISABLED:NO_COLOR:DIRIGENT_JOB";
+pub(crate) const ENV: &str = "LC_ALL:GIT_OPTIONAL_LOCKS:GIT_TERMINAL_PROMPT:GH_PROMPT_DISABLED:NO_COLOR:DIRIGENT_JOB";
 
+static REQUESTS: AtomicU64 = AtomicU64::new(0);
 static SPAWNS: AtomicU64 = AtomicU64::new(0);
 
 /// `program` run inside the distro of `dir`, in `dir`: `wsl.exe -d <distro> --cd <linux dir> -e <program>`; add its
-/// args with `.arg(s)`. None when `dir` isn't inside a distro (run it natively).
+/// args with `.arg(s)`. None when `dir` isn't inside a distro (run it natively). `exec` runs it as a request to the
+/// distro's git server instead when there is one.
 pub fn command(dir: &Path, program: &str) -> Option<Command> {
     let (distro, linux) = of(dir)?;
-    SPAWNS.fetch_add(1, Ordering::Relaxed);
+    REQUESTS.fetch_add(1, Ordering::Relaxed);
     crate::perf(|| format!("wsl {distro}: {program} in {linux}"));
     let mut c = crate::cmd("wsl.exe");
     c.args(["-d", &distro, "--cd", &linux, "-e", program]).env("WSLENV", ENV).env_remove("WSL_UTF8");
     Some(c)
 }
 
-/// How many commands `command` built (perf/tests: what one refresh costs).
+/// How many commands ran inside a distro, by either way (perf/tests: what one refresh costs).
+pub fn requests() -> u64 {
+    REQUESTS.load(Ordering::Relaxed)
+}
+
+/// How many `wsl.exe` processes were started for them (per-call commands and git servers).
 pub fn spawns() -> u64 {
     SPAWNS.load(Ordering::Relaxed)
+}
+
+pub(crate) fn count_spawn() {
+    SPAWNS.fetch_add(1, Ordering::Relaxed);
+}
+
+/// One long-lived `dirigent-hook git-server` per distro (`gitserve`) runs the non-network git calls: a request
+/// costs what git costs, not a `wsl.exe` start (~130 ms). Started on a distro's first call, replaced when it dies
+/// (3 deaths in a minute: given up for the run), stopped `grace` after the last tab or repo in the distro went
+/// away (`hold`/`release`). Without the helper, or when it fails, git runs per call through `wsl.exe` as before.
+#[derive(Default)]
+struct Distro {
+    server: Server,
+    deaths: Vec<Instant>,
+    users: usize,
+    /// Bumped by every `hold`/`release`: a pending stop only runs if nothing happened since.
+    generation: u64,
+}
+
+#[derive(Default)]
+enum Server {
+    #[default]
+    Idle,
+    Starting,
+    Up(gitserve::Client),
+    Off,
+}
+
+static HELPER: Mutex<Option<String>> = Mutex::new(None);
+static GRACE: Mutex<Duration> = Mutex::new(Duration::from_secs(30));
+static DISTROS: Mutex<Option<HashMap<String, Distro>>> = Mutex::new(None);
+static STARTED: Condvar = Condvar::new();
+
+/// The Linux helper (its path inside every distro, `/mnt/c/…/dirigent-hook`) that serves git; None: per call.
+/// Setting it again lets distros whose server was given up try once more (and forgets past deaths).
+pub fn set_server_helper(path: Option<String>) {
+    *HELPER.lock().unwrap() = path;
+    for d in DISTROS.lock().unwrap().get_or_insert_default().values_mut() {
+        d.deaths.clear();
+        if matches!(d.server, Server::Off) {
+            d.server = Server::Idle;
+        }
+    }
+}
+
+/// How long a distro's server outlives its last tab or repo (30 s; tests shorten it).
+pub fn set_grace(grace: Duration) {
+    *GRACE.lock().unwrap() = grace;
+}
+
+fn with_distro<T>(distro: &str, f: impl FnOnce(&mut Distro) -> T) -> T {
+    let mut map = DISTROS.lock().unwrap();
+    let d = map.get_or_insert_default().entry(distro.to_lowercase()).or_default();
+    f(d)
+}
+
+/// Keeps a distro's git server up while it lives: held by every WSL tab and by the watcher of every repo inside a
+/// distro. The last one dropped stops the server after the grace period (`set_grace`), unless a new one comes.
+pub struct Hold(String);
+
+impl Hold {
+    pub fn new(distro: &str) -> Self {
+        hold(distro);
+        Self(distro.to_owned())
+    }
+
+    /// For a path inside a distro; None otherwise.
+    pub fn of(path: &Path) -> Option<Self> {
+        of(path).map(|(d, _)| Self::new(&d))
+    }
+}
+
+impl Drop for Hold {
+    fn drop(&mut self) {
+        release(&self.0);
+    }
+}
+
+fn hold(distro: &str) {
+    with_distro(distro, |d| {
+        d.users += 1;
+        d.generation += 1;
+    });
+}
+
+fn release(distro: &str) {
+    let stop = with_distro(distro, |d| {
+        d.users = d.users.saturating_sub(1);
+        d.generation += 1;
+        (d.users == 0).then_some(d.generation)
+    });
+    let Some(generation) = stop else { return };
+    let (key, grace) = (distro.to_lowercase(), *GRACE.lock().unwrap());
+    std::thread::spawn(move || {
+        std::thread::sleep(grace);
+        let server = with_distro(&key, |d| {
+            if d.generation != generation || !matches!(d.server, Server::Up(_)) {
+                return None;
+            }
+            match std::mem::replace(&mut d.server, Server::Idle) {
+                Server::Up(c) => Some(c),
+                _ => None,
+            }
+        });
+        drop(server); // outside the lock: the server gets up to 2 s to exit
+    });
+}
+
+/// `distro`'s git server, started (blocking: a stopped distro takes seconds) when there is none. None: run per
+/// call (no helper, or the server failed for this run).
+pub(crate) fn server(distro: &str) -> Option<gitserve::Client> {
+    let helper = HELPER.lock().unwrap().clone()?;
+    let key = distro.to_lowercase();
+    let mut map = DISTROS.lock().unwrap();
+    loop {
+        let d = map.get_or_insert_default().entry(key.clone()).or_default();
+        match &d.server {
+            Server::Up(c) if !c.is_dead() => return Some(c.clone()),
+            Server::Up(_) => {
+                d.deaths.retain(|t| t.elapsed() < Duration::from_secs(60));
+                d.deaths.push(Instant::now());
+                if d.deaths.len() >= 3 {
+                    d.server = Server::Off;
+                    eprintln!(
+                        "dirigent: WSL git server for {distro} stopped 3 times in a minute; running git per call"
+                    );
+                    return None;
+                }
+                break;
+            }
+            Server::Idle => break,
+            Server::Starting => map = STARTED.wait(map).unwrap(),
+            Server::Off => return None,
+        }
+    }
+    let dead = std::mem::replace(&mut map.as_mut().unwrap().get_mut(&key).unwrap().server, Server::Starting);
+    drop(map);
+    drop(dead); // outside the lock: it waits up to 2 s for its `wsl.exe` to exit
+    count_spawn();
+    crate::perf(|| format!("wsl {distro}: starting the git server"));
+    let mut c = crate::cmd("wsl.exe");
+    c.args(["-d", distro, "--cd", "~", "-e", &helper, "git-server"]).env_remove("WSL_UTF8");
+    let started = gitserve::Client::start(c, Duration::from_secs(20), gitserve::CAP);
+    let client = with_distro(&key, |d| match started {
+        Ok(c) => {
+            d.server = Server::Up(c.clone());
+            Some(c)
+        }
+        Err(e) => {
+            d.server = Server::Off;
+            eprintln!("dirigent: WSL git server for {distro} unavailable ({e}); running git per call");
+            None
+        }
+    });
+    STARTED.notify_all();
+    client
+}
+
+/// Whether `distro`'s server was given up for this run (tests).
+pub fn server_off(distro: &str) -> bool {
+    with_distro(distro, |d| matches!(d.server, Server::Off))
 }
 
 /// The distro user's home (Linux path), asked once per distro per run (it starts the distro: seconds when it was

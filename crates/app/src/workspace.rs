@@ -114,6 +114,8 @@ struct Tab {
     /// Windows: the WSL distro its shell runs in (a tab started in `\\wsl.localhost\<distro>\…`); its cwd reports
     /// and hooks name Linux paths, mapped into the distro.
     wsl: Option<String>,
+    /// Keeps `wsl`'s git server up while the tab is open.
+    _wsl_server: Option<git::wsl::Hold>,
     /// Refreshes the tab's repo when it has no watches (inside WSL): the shell's prompt reports call it.
     #[cfg_attr(not(windows), allow(dead_code))]
     touch: Arc<std::sync::Mutex<Option<git::Toucher>>>,
@@ -709,7 +711,8 @@ impl Workspace {
                 };
                 let i = this.add_tab(custom, t.cwd, t.claude_session, t.claude_args, t.expanded);
                 this.tabs[i].auto = t.auto;
-                if t.wsl.is_some() {
+                if let Some(d) = &t.wsl {
+                    this.tabs[i]._wsl_server = Some(git::wsl::Hold::new(d));
                     this.tabs[i].wsl = t.wsl;
                     this.tabs[i].dir_missing = false;
                 }
@@ -1214,6 +1217,7 @@ impl Workspace {
             remember: false,
             syntax: Default::default(),
             main_root: None,
+            _wsl_server: wsl.as_deref().map(git::wsl::Hold::new),
             wsl,
             touch: Default::default(),
         });

@@ -75,6 +75,8 @@ pub struct Watcher {
     latest: Arc<Mutex<Option<Arc<Status>>>>,
     refreshes: Arc<AtomicU64>,
     received: Arc<AtomicU64>,
+    /// A repo inside WSL keeps its distro's git server up (`wsl::Hold`).
+    _server: Option<crate::wsl::Hold>,
 }
 
 impl Watcher {
@@ -82,6 +84,7 @@ impl Watcher {
     /// and for batches that only changed directory listings. An unchanged status can still mean a file's content
     /// changed (same +/- counts), so an open diff should be re-read on every refresh.
     pub fn start(repo: Repo, on_update: impl Fn(Update) + Send + 'static) -> std::io::Result<Self> {
+        let root_for_hold = repo.root.clone();
         let (tx, rx) = mpsc::channel();
         let latest = Arc::new(Mutex::new(None));
         let refreshes = Arc::new(AtomicU64::new(0));
@@ -264,7 +267,8 @@ impl Watcher {
                 });
             }
         })?;
-        Ok(Self { tx, latest, refreshes, received })
+        let _server = crate::wsl::Hold::of(&root_for_hold);
+        Ok(Self { tx, latest, refreshes, received, _server })
     }
 
     /// The last status (None until the first one is ready).

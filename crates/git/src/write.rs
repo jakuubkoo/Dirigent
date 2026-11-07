@@ -5,7 +5,6 @@
 //! Hunks are git's: the diff view shows HEAD→worktree hunks; its buttons act on the overlapping hunks of git's
 //! HEAD→index (`--cached`) and index→worktree diffs, recomputed when the action runs.
 
-use std::io::Write as _;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 
@@ -52,11 +51,8 @@ pub(crate) fn run(root: &Path, args: &[&str], stdin: Option<&[u8]>) -> Result<St
         .stdin(if stdin.is_some() { Stdio::piped() } else { Stdio::null() })
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
-    let mut child = c.spawn().map_err(GitError::Io)?;
-    if let (Some(input), Some(mut pipe)) = (stdin, child.stdin.take()) {
-        pipe.write_all(input).map_err(GitError::Io)?;
-    }
-    let out = child.wait_with_output().map_err(GitError::Io)?;
+    // Never retried: a commit or apply may have happened before its server died.
+    let out = crate::exec::output(&mut c, stdin, crate::exec::WRITE_TIMEOUT, false).map_err(GitError::Io)?;
     let stdout = String::from_utf8_lossy(&out.stdout).into_owned();
     if out.status.success() {
         return Ok(stdout);

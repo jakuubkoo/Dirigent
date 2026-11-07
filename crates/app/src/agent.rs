@@ -363,6 +363,11 @@ impl Hub {
         }
         #[cfg(windows)]
         let wsl = wsl_setup(&dir, &helper);
+        // Git for repos inside WSL runs through the Linux helper as a long-lived server (`git::wsl`).
+        #[cfg(windows)]
+        git::wsl::set_server_helper(
+            wsl.as_ref().filter(|(_, hooks)| *hooks).map(|(d, _)| format!("{d}/bin-wsl/dirigent-hook")),
+        );
         let wsl_tabs: Arc<Mutex<HashMap<u32, String>>> = Default::default();
 
         let board = Arc::new(Mutex::new(Board::default()));

@@ -67,6 +67,9 @@ pub fn run_tool(program: &str, dir: &Path, args: &[&str], cancel: &Cancel, timeo
     // GIT_TERMINAL_PROMPT=0 does for the terminal prompt).
     #[cfg(windows)]
     c.env("GCM_INTERACTIVE", "never");
+    if job.is_some() {
+        crate::wsl::count_spawn();
+    }
     let mut child = c.spawn().map_err(GitError::Io)?;
     #[cfg(windows)]
     let win_job = win::Job::of(&child);
