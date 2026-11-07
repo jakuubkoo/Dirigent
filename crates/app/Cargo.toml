@@ -13,6 +13,8 @@ hook.workspace = true
 git.workspace = true
 syntax.workspace = true
 serde_json = "1"
+# Transcript prefilter in history.rs; already in the graph (git, regex).
+memchr = "2"
 serde = { version = "1", features = ["derive"] }
 async-channel = "2.5"
 # The editor's text buffer (MIT). LF-only line breaks: CRLF is normalized on load, lone CR makes a file read-only.

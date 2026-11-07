@@ -88,6 +88,9 @@ impl Default for Notifications {
 pub struct Settings {
     /// Answer claude's "trust this folder?" dialog with Yes in sessions we start claude in.
     pub trust_auto_accept: bool,
+    /// The New session dialog names the session and its branch with `claude -p` (Haiku); off: no call, the prompt's
+    /// explicit branch and first words only.
+    pub name_with_claude: bool,
     pub plus_opens: PlusOpens,
     /// The whole UI in percent (Ctrl+= / Ctrl+- / Ctrl+0); multiplies every size, the terminal font included.
     pub ui_zoom: u32,
@@ -133,6 +136,7 @@ impl Default for Settings {
     fn default() -> Self {
         Self {
             trust_auto_accept: true,
+            name_with_claude: true,
             plus_opens: PlusOpens::Dialog,
             ui_zoom: 100,
             font_size: crate::theme::TERMINAL_FONT_SIZE,
@@ -151,7 +155,7 @@ impl Default for Settings {
 
 /// Every key: (section, key). Anything else in the file gets an "unknown" note.
 const KEYS: &[(&str, &[&str])] = &[
-    ("general", &["trust_auto_accept", "plus_opens", "ui_zoom"]),
+    ("general", &["trust_auto_accept", "name_with_claude", "plus_opens", "ui_zoom"]),
     ("terminal", &["font_size", "scrollback"]),
     ("notifications", &["needs_you", "done", "sound"]),
     ("diff", &["mode", "split_style", "engine"]),
@@ -165,7 +169,12 @@ impl Settings {
     pub fn to_json(&self) -> String {
         let all = |s: &Settings| {
             json!({
-                "general": { "trust_auto_accept": s.trust_auto_accept, "plus_opens": s.plus_opens, "ui_zoom": s.ui_zoom },
+                "general": {
+                    "trust_auto_accept": s.trust_auto_accept,
+                    "name_with_claude": s.name_with_claude,
+                    "plus_opens": s.plus_opens,
+                    "ui_zoom": s.ui_zoom,
+                },
                 "terminal": { "font_size": s.font_size, "scrollback": s.scrollback },
                 "notifications": {
                     "needs_you": s.notifications.needs_you,
@@ -237,6 +246,7 @@ pub fn parse(text: &str, fallback: &Settings) -> Parsed {
     let mut g = Get { v: &v, notes: &mut notes };
     let mut s = Settings {
         trust_auto_accept: g.get("general", "trust_auto_accept", d.trust_auto_accept, "true or false", |_| true),
+        name_with_claude: g.get("general", "name_with_claude", d.name_with_claude, "true or false", |_| true),
         plus_opens: g.get(
             "general",
             "plus_opens",
@@ -568,6 +578,7 @@ mod tests {
     fn round_trip_and_defaults() {
         let s = Settings {
             trust_auto_accept: false,
+            name_with_claude: false,
             plus_opens: PlusOpens::Claude,
             ui_zoom: 130,
             font_size: 15.,
@@ -613,6 +624,15 @@ mod tests {
             json!({ "terminal": { "scrollback": 500 } }),
             "only what differs"
         );
+        let off = Settings { name_with_claude: false, ..Settings::default() };
+        assert_eq!(
+            serde_json::from_str::<Value>(&off.to_json()).unwrap(),
+            json!({ "general": { "name_with_claude": false } })
+        );
+        assert_eq!(parse(&off.to_json(), &Settings::default()).settings, off, "off read back");
+        assert!(Settings::default().name_with_claude, "on by default");
+        let bad = parse(r#"{"general": {"name_with_claude": "no"}}"#, &Settings::default());
+        assert_eq!((bad.settings.name_with_claude, bad.notes.len()), (true, 1), "bad value: default + a note");
         // A reset (back to the default) drops the key, so a later default change applies again.
         let back = Settings { scrollback: d_scroll(), ..Settings::default() }.to_json();
         assert_eq!(back, "{}\n");

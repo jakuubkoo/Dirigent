@@ -12,16 +12,28 @@ All notable changes to Dirigent are recorded here. The format follows
   on Enter, Tab / Shift+Tab (also over selected lines), Ctrl+S saves. A dot next to the name marks unsaved edits;
   Esc, switching or closing the session, opening another file and closing the window ask before dropping them.
   When an agent changes the open file, it reloads (cursor kept, a short "Reloaded" notice) if you have no unsaved
-  edits; otherwise a banner offers Reload (lose mine), Keep mine or Show diff. Ctrl+Z never goes back past a reload. Saving over a change made on disk asks first.
-  Binary, non-UTF-8 and large files (over 2 MB / 50k lines, or lines over 2000 characters) stay read-only.
-
+  edits; otherwise a banner offers Reload (lose mine), Keep mine or Show diff. Ctrl+Z never goes back past a
+  reload. Saving over a change made on disk asks first. Binary, non-UTF-8 and large files (over 2 MB / 50k lines,
+  or lines over 2000 characters) stay read-only.
 - New session dialog: a branch prefix dropdown (`feat/`, `fix/`, `chore/`, `docs/`, none) next to the branch field,
   `feat/` by default and remembered per project. The slug made from the session name never takes a `/` from it
   (`esc-ctrl-c`, not `esc/ctrl-c`).
-- New session dialog: while Name is empty, the first prompt names the session and its branch: its first words as you
-  type, then `claude -p` on Haiku (off the UI thread, no tools, no saved session) when you leave the prompt or press
-  Create. One call at a time; closing the dialog stops it. A name you type stays; a `Branch: x` line in the prompt
-  gives the branch as written.
+- New session dialog: while Name is empty, `claude -p` on Haiku (off the UI thread, no tools, no saved session) names
+  the session and its branch (prefix included) from the first prompt: right after you paste it, when you leave the
+  prompt or press Create. It names the actual task and ignores instructions like plan mode or commit rules; "naming…"
+  shows meanwhile. One call at a time (a newer one stops the older); closing the dialog stops it. A name or branch you
+  type stays; a `Branch: x` line or a `## Branch` section (`Create feat/windows from main`) gives the branch as
+  written. The prompt's first words (skipping headings and plan mode lines) name it only when claude can't.
+- Settings → General → "Name new sessions with Claude" (on by default): off, the New session dialog makes no
+  `claude -p` call; a branch written in the prompt and its first words still name the session.
+- History: a project's past Claude Code sessions (project menu ⋯ → History…, or "Claude: Session history" in the
+  Command Center), newest first, with Claude's title or your name for it, the first prompt, branch, message count
+  and last activity; type to search titles and prompts. Enter resumes the session in a new tab where it was
+  started, or switches to the tab that already has it. Read from Claude's own transcripts, never changed. A session
+  that a claude outside Dirigent runs (Linux: its command line names it) or that was written in the last 2 minutes is
+  marked "maybe running elsewhere" and asks before resuming, so two claude processes don't write one transcript. When
+  a claude outside Dirigent works in the project (Linux), the list says so in its header. With no session open, the
+  command asks for the project first.
 
 ### Changed
 

@@ -71,6 +71,7 @@ fn command_only() -> Vec<(&'static str, &'static str, Box<dyn gpui::Action>)> {
         ("", "Git: Fetch", Box::new(GitFetch)),
         ("", "Git: Pull (fast-forward only)", Box::new(GitPull)),
         ("", "Git: Push (publish a new branch)", Box::new(GitPush)),
+        ("", "Claude: Session history of this project…", Box::new(SessionHistory)),
     ]
 }
 

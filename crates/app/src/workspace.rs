@@ -56,6 +56,7 @@ actions!(
         GitPull,
         GitPush,
         SwitchBranch,
+        SessionHistory,
         Activate1,
         Activate2,
         Activate3,
@@ -132,6 +133,8 @@ pub(super) struct SessionOpts {
     pub setup: bool,
     /// The project whose defaults apply (None: the one containing the directory).
     pub project: Option<PathBuf>,
+    /// `claude --resume <id>` with the project's flags instead of a fresh claude (History).
+    pub resume: Option<String>,
 }
 
 /// What covers the terminal area: a diff, a file preview or Settings. The active session is hidden meanwhile.
@@ -177,6 +180,8 @@ enum Modal {
     CommandCenter(Box<command_center::Cc>),
     /// Switch / create a branch in the active session's repo.
     Branches(Box<branches_ui::Branches>),
+    /// A project's past Claude sessions.
+    History(Box<history_ui::History>),
     /// "Discard …?" / "Commit … files of this agent?" before a git write; `ok` is the action button's label.
     Confirm {
         title: String,
@@ -230,6 +235,12 @@ enum Then {
     /// Close / restart the tab with this id (claude runs in it).
     Close(usize),
     Restart(usize),
+    /// History: resume this session in a new tab (it may run elsewhere).
+    Resume {
+        dir: PathBuf,
+        id: String,
+        project: PathBuf,
+    },
 }
 
 /// What was about to replace or close the open editor when it asked about its unsaved edits.
@@ -341,6 +352,8 @@ pub struct Workspace {
     notifier: Box<dyn notify::Notifier>,
     /// Files each tab's agent changed (sidebar summary, Changes filter, tree marks).
     tracker: Arc<crate::changes::Tracker>,
+    /// Transcripts read for History (per file version, for the app's lifetime).
+    history: Arc<crate::history::Cache>,
     _changes_task: Option<Task<()>>,
     /// Git writes per repo (lock, running/failed) and the commit boxes (drafts per repo).
     git_ops: HashMap<PathBuf, crate::git_ops::RepoOps>,
@@ -501,6 +514,7 @@ impl Workspace {
             window_active: window.is_window_active(),
             notifier,
             tracker,
+            history: Default::default(),
             _changes_task: None,
             git_ops: HashMap::new(),
             commit_boxes: HashMap::new(),
@@ -849,6 +863,28 @@ impl Workspace {
                 });
             })
             .detach();
+        }
+
+        if let Ok(spec) = std::env::var("DIRIGENT_PERF_HISTORY") {
+            // Screenshot harness: `<ms>[:enter|:picker][,…]` (ms since start) opens History of the active session's
+            // project, presses Enter in it (or in the picker), or opens the picker for History.
+            for step in spec.split(',') {
+                let (ms, what) = step.split_once(':').unwrap_or((step, ""));
+                let Ok(ms) = ms.parse() else { continue };
+                let what = what.to_string();
+                cx.spawn_in(window, async move |this, cx| {
+                    cx.background_executor().timer(Duration::from_millis(ms)).await;
+                    let _ = this.update_in(cx, |w, window, cx| match what.as_str() {
+                        "enter" if matches!(w.modal, Some(Modal::Picker(_))) => {
+                            w.picker_open(None, false, false, window, cx)
+                        }
+                        "enter" => w.history_open(None, window, cx),
+                        "picker" => w.open_picker(true, window, cx),
+                        _ => w.history_of_active(window, cx),
+                    });
+                })
+                .detach();
+            }
         }
 
         if let Some(ms) = std::env::var("DIRIGENT_PERF_MENU").ok().and_then(|v| v.parse().ok()) {
@@ -1350,14 +1386,20 @@ impl Workspace {
         self.tabs[i].remember = true;
         self.activate(i, window, cx);
         self.mark_dirty(cx);
-        let claude = opts.claude.unwrap_or(project.auto_claude);
+        if let Some(id) = &opts.resume {
+            // Set after `activate`: a restored-looking tab would get the resume banner instead of the command.
+            self.tabs[i].claude_session = Some(id.clone());
+            self.tabs[i].claude_args = project.claude_args.clone();
+        }
+        let claude = opts.resume.is_some() || opts.claude.unwrap_or(project.auto_claude);
         let setup = project.setup_cmd.as_deref().filter(|_| opts.setup);
         let prompt = opts.prompt.filter(|p| claude && !p.trim().is_empty());
         let prompt_file = prompt.as_ref().map(|_| agent::prompt_file(self.tabs[i].id));
-        if let (Some(line), Some(v)) = (
-            crate::projects::start_line(setup, claude, &project.claude_args, prompt_file.as_deref()),
-            &self.tabs[i].view,
-        ) {
+        let line = match opts.resume {
+            Some(_) => resume_command(&self.tabs[i]),
+            None => crate::projects::start_line(setup, claude, &project.claude_args, prompt_file.as_deref()),
+        };
+        if let (Some(line), Some(v)) = (line, &self.tabs[i].view) {
             // Our shim is first on the session's PATH: claude starts with our hooks. The PTY holds the line until the
             // shell has read its rc files.
             let session = v.read(cx).session.clone();
@@ -1675,6 +1717,7 @@ impl Workspace {
             Modal::Worktrees(_) => return self.worktrees_key(ev, window, cx),
             Modal::CommandCenter(_) => return self.cc_key(ev, window, cx),
             Modal::Branches(_) => return self.branches_key(ev, window, cx),
+            Modal::History(_) => return self.history_key(ev, window, cx),
             Modal::ProjectDefaults(d) if ks.key == "tab" || (d.focus == 0 && ks.key == "space") => {
                 if ks.key == "tab" {
                     d.focus = (d.focus + if ks.modifiers.shift { 3 } else { 1 }) % 4;
@@ -2199,6 +2242,7 @@ impl Workspace {
 mod branches_ui;
 mod command_center;
 mod git_write;
+mod history_ui;
 mod perf_editor;
 mod projects_ui;
 mod setup;
@@ -2531,6 +2575,9 @@ impl Workspace {
         }
         if old.fetch_minutes != new.fetch_minutes {
             self.restart_fetch_timer(cx);
+        }
+        if old.name_with_claude != new.name_with_claude {
+            self.setup_naming_setting(new.name_with_claude, cx);
         }
         if old.hosts != new.hosts {
             // Forge detection and every browser URL follow the rules: look the strips up again.
