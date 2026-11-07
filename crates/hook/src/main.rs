@@ -1,6 +1,7 @@
 //! `dirigent-hook <socket> <tab> hook|status`, run by Claude Code for every hook event and statusLine refresh;
 //! `dirigent-hook <socket> <tab> argv <claude args...>`, the old sh shim's flag report (older runtime dirs).
 //! Started under the name `claude` it is the shim instead (`hook::shim`).
+//! Windows: `dirigent-hook <pipe> 0 relay` passes a message the Linux helper built inside WSL on to the app.
 //!
 //! Fire-and-forget: forwards a small message to the app (Unix a non-blocking datagram, Windows a named pipe). If the
 //! app isn't running the send fails instantly and is ignored. Always exits 0 so Claude Code is never slowed down or
@@ -23,6 +24,13 @@ fn main() {
     }
     let args: Vec<String> = std::env::args().collect();
     let [_, socket, tab, mode, rest @ ..] = args.as_slice() else { return };
+    // Windows, started from WSL through interop: a message the Linux helper built, passed on as is.
+    if cfg!(windows) && mode == "relay" {
+        let mut bytes = Vec::new();
+        let _ = std::io::stdin().take(64 * 1024).read_to_end(&mut bytes);
+        send(socket, &bytes);
+        return;
+    }
     let mut input = String::new();
     let kind = if mode == "argv" {
         // Never touch stdin here: it is the user's terminal.
@@ -38,7 +46,7 @@ fn main() {
     };
 
     if let (Ok(tab), Some(kind)) = (tab.parse(), kind)
-        && let Ok(bytes) = serde_json::to_vec(&Msg { tab, kind })
+        && let Ok(bytes) = serde_json::to_vec(&Msg::new(tab, kind))
     {
         send(socket, &bytes);
     }

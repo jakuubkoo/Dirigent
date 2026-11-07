@@ -9,11 +9,38 @@ pub mod pipe;
 pub mod shell;
 pub mod shim;
 
+/// Inside a WSL session: the Windows `dirigent-hook.exe` (as a Linux path) that carries our messages to the app's
+/// pipe, which Linux can't open. Unset everywhere else.
+pub const RELAY: &str = "DIRIGENT_RELAY";
+
 /// Fire-and-forget to the app: Unix a non-blocking datagram to the socket path, Windows the pipe `socket` (busy:
-/// waited for at most 20 ms). App gone: nothing, instantly.
+/// waited for at most 20 ms). App gone: nothing, instantly. Inside WSL (`RELAY` set) the Windows helper is started
+/// with the bytes on stdin and not waited for (~40 ms through WSL interop, off Claude's path).
 #[cfg(unix)]
 pub fn send(socket: &str, bytes: &[u8]) {
     use std::os::unix::net::UnixDatagram;
+    if let Some(relay) = std::env::var_os(RELAY) {
+        use std::io::Write as _;
+        use std::process::{Command, Stdio};
+        // Started by an `sh` that puts it in the background and exits at once (reaped here): the relay belongs to
+        // init, never a zombie child of claude, which the shim execs right after. Its stdin goes by fd 3: sh gives
+        // a background job /dev/null as stdin (dash even over an explicit `<&0`).
+        if let Ok(mut c) = Command::new("/bin/sh")
+            .args(["-c", r#"exec 3<&0; "$@" <&3 3<&- &"#, "sh"])
+            .arg(relay)
+            .args([socket, "0", "relay"])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+        {
+            if let Some(mut stdin) = c.stdin.take() {
+                let _ = stdin.write_all(bytes);
+            }
+            let _ = c.wait();
+        }
+        return;
+    }
     if let Ok(sock) = UnixDatagram::unbound()
         && sock.set_nonblocking(true).is_ok()
     {
@@ -33,6 +60,31 @@ pub fn send(socket: &str, bytes: &[u8]) {
 pub struct Msg {
     pub tab: u32,
     pub kind: Kind,
+    /// Relayed messages (WSL) can overtake each other: when they were sent (Linux `CLOCK_MONOTONIC` ns, one clock
+    /// per distro), so the app drops one older than the last it applied. None (and absent on the wire) otherwise.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub seq: Option<u64>,
+}
+
+impl Msg {
+    /// A message from this process: `seq` set only when it goes through the relay.
+    pub fn new(tab: u32, kind: Kind) -> Self {
+        Self { tab, kind, seq: relay_seq() }
+    }
+}
+
+#[cfg(unix)]
+fn relay_seq() -> Option<u64> {
+    std::env::var_os(RELAY)?;
+    let mut t = libc::timespec { tv_sec: 0, tv_nsec: 0 };
+    // SAFETY: a valid out pointer.
+    (unsafe { libc::clock_gettime(libc::CLOCK_MONOTONIC, &mut t) } == 0)
+        .then(|| t.tv_sec as u64 * 1_000_000_000 + t.tv_nsec as u64)
+}
+
+#[cfg(windows)]
+fn relay_seq() -> Option<u64> {
+    None
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
@@ -506,8 +558,11 @@ mod tests {
 
     #[test]
     fn wire_roundtrip() {
-        let m = Msg { tab: 3, kind: Kind::Argv { args: v(&["--model", "a b"]) } };
-        let back: Msg = serde_json::from_slice(&serde_json::to_vec(&m).unwrap()).unwrap();
-        assert_eq!(back, m);
+        let m = Msg { tab: 3, kind: Kind::Argv { args: v(&["--model", "a b"]) }, seq: None };
+        let bytes = serde_json::to_vec(&m).unwrap();
+        assert!(!String::from_utf8_lossy(&bytes).contains("seq"), "unchanged wire format without a relay");
+        assert_eq!(serde_json::from_slice::<Msg>(&bytes).unwrap(), m);
+        let m = Msg { seq: Some(42), ..m };
+        assert_eq!(serde_json::from_slice::<Msg>(&serde_json::to_vec(&m).unwrap()).unwrap(), m);
     }
 }

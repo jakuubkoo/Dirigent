@@ -69,7 +69,7 @@ fn report(args: &[OsString]) {
         total += a.len();
         total <= 8 * 1024
     });
-    if let Ok(bytes) = serde_json::to_vec(&Msg { tab, kind: Kind::Argv { args: args.collect() } }) {
+    if let Ok(bytes) = serde_json::to_vec(&Msg::new(tab, Kind::Argv { args: args.collect() })) {
         crate::send(&socket, &bytes);
     }
 }

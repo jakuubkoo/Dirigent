@@ -90,6 +90,8 @@ pub struct Board {
     pub seven_day: Option<Limit>,
     /// Hooks arriving while our statusLine never ran mean its command didn't work in Claude's shell: said once.
     status_check: StatusCheck,
+    /// Per tab, the newest `Msg::seq` applied (relayed WSL messages only): an older one arrived late and is dropped.
+    seqs: HashMap<u32, u64>,
 }
 
 #[derive(Default, Debug)]
@@ -122,6 +124,13 @@ impl StatusCheck {
 impl Board {
     /// Applies one message; returns whether anything the UI shows changed.
     pub fn apply(&mut self, msg: Msg) -> bool {
+        if let Some(seq) = msg.seq {
+            let last = self.seqs.entry(msg.tab).or_default();
+            if seq < *last {
+                return false;
+            }
+            *last = seq;
+        }
         let agent = self.tabs.entry(msg.tab).or_default();
         let before = agent.clone();
         let (five, seven) = (self.five_hour, self.seven_day);
@@ -448,7 +457,10 @@ impl Hub {
     }
 
     pub fn remove_tab(&self, tab: u32) {
-        self.board.lock().unwrap().tabs.remove(&tab);
+        let mut board = self.board.lock().unwrap();
+        board.tabs.remove(&tab);
+        board.seqs.remove(&tab);
+        drop(board);
         let _ = std::fs::remove_file(self.dir.join(format!("tab-{tab}.json")));
     }
 }
@@ -609,6 +621,7 @@ mod tests {
     fn hook_id(tab: u32, event: &str, nt: Option<&str>, id: &str) -> Msg {
         Msg {
             tab,
+            seq: None,
             kind: Kind::Hook {
                 event: event.into(),
                 notification_type: nt.map(Into::into),
@@ -626,7 +639,42 @@ mod tests {
     /// A real hook payload (crates/hook/tests/fixtures), parsed like the helper does.
     fn real(tab: u32, name: &str) -> Msg {
         let path = format!("{}/../hook/tests/fixtures/{name}.json", env!("CARGO_MANIFEST_DIR"));
-        Msg { tab, kind: hook::parse("hook", &std::fs::read_to_string(path).unwrap()).unwrap() }
+        Msg { tab, seq: None, kind: hook::parse("hook", &std::fs::read_to_string(path).unwrap()).unwrap() }
+    }
+
+    /// Relayed (WSL) messages can overtake each other: the newest by `seq` wins in any arrival order; without a
+    /// `seq` (native sessions) arrival order counts, as before.
+    #[test]
+    fn late_relayed_messages_are_dropped() {
+        let events = ["UserPromptSubmit", "PreToolUse", "PostToolUse", "Stop"];
+        let mut orders = 0;
+        for a in 0..4 {
+            for b2 in 0..4 {
+                for c in 0..4 {
+                    if a == b2 || a == c || b2 == c {
+                        continue;
+                    }
+                    let d = (0..4).find(|x| ![a, b2, c].contains(x)).unwrap();
+                    orders += 1;
+                    let mut b = Board::default();
+                    for i in [a, b2, c, d] {
+                        b.apply(Msg { seq: Some(i as u64 + 1), ..hook(1, events[i], None) });
+                    }
+                    assert_eq!(b.get(1).state, State::Done, "{:?}", [a, b2, c, d]);
+                    assert_eq!(b.get(1).prompts, u64::from(a == 0), "a late prompt doesn't count");
+                }
+            }
+        }
+        assert_eq!(orders, 24);
+        let lim = |p| Some(Limit { used_pct: p, resets_at: 0 });
+        let mut b = Board::default();
+        b.apply(Msg { seq: Some(5), ..status(1, None, lim(20.0)) });
+        assert!(!b.apply(Msg { seq: Some(4), ..status(1, None, lim(10.0)) }), "older status dropped");
+        assert_eq!(b.five_hour.map(|l| l.used_pct), Some(20.0));
+        let mut b = Board::default();
+        b.apply(hook(1, "Stop", None));
+        b.apply(hook(1, "PostToolUse", None));
+        assert_eq!(b.get(1).state, State::Working, "native: arrival order");
     }
 
     /// One notification per change into NeedsYou/Done; the PermissionRequest's detail survives the generic
@@ -664,6 +712,7 @@ mod tests {
     fn status(tab: u32, ctx: Option<f32>, five: Option<Limit>) -> Msg {
         Msg {
             tab,
+            seq: None,
             kind: Kind::Status {
                 model: Some("Opus 5.5".into()),
                 context_pct: ctx,
@@ -839,8 +888,11 @@ mod tests {
     #[test]
     fn session_ids_and_failed_resume() {
         let mut b = Board::default();
-        let argv =
-            |args: &[&str]| Msg { tab: 1, kind: Kind::Argv { args: args.iter().map(|s| s.to_string()).collect() } };
+        let argv = |args: &[&str]| Msg {
+            tab: 1,
+            seq: None,
+            kind: Kind::Argv { args: args.iter().map(|s| s.to_string()).collect() },
+        };
         // /clear: SessionEnd(old) then SessionStart(new) — as observed on claude 2.1.318.
         b.apply(argv(&["--model", "haiku"]));
         b.apply(hook_id(1, "SessionStart", None, "old"));
