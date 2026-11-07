@@ -290,19 +290,32 @@ impl Hub {
         if let Some(runtime) = dir.parent() {
             remove_stale_dirs(runtime);
         }
+        let helper = std::env::current_exe()?.with_file_name(format!("dirigent-hook{}", std::env::consts::EXE_SUFFIX));
+        Self::start_in(tracker, dir, helper)
+    }
+
+    /// `start` with a given runtime dir and helper (tests).
+    fn start_in(tracker: Arc<crate::changes::Tracker>, dir: PathBuf, helper: PathBuf) -> std::io::Result<Self> {
         let (bin, zdotdir) = (dir.join("bin"), dir.join("zsh"));
         std::fs::create_dir_all(&bin)?;
         std::fs::create_dir_all(&zdotdir)?;
+        // The `claude` shim is the helper under another name (`hook::shim`).
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
             std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700))?;
-            write_exec(&bin.join("claude"), SHIM)?;
+            std::os::unix::fs::symlink(&helper, bin.join("claude"))?;
+        }
+        // Windows: hardlinks (a copy across volumes): `claude.exe` the shim, `dirigent-hook.exe` for the statusLine,
+        // which runs through a shell and finds it on the session's PATH by name (no path to quote).
+        #[cfg(windows)]
+        for name in ["claude.exe", "dirigent-hook.exe"] {
+            let to = bin.join(name);
+            std::fs::hard_link(&helper, &to).or_else(|_| std::fs::copy(&helper, &to).map(drop))?;
         }
         for (name, body) in ZSH_WRAPPERS {
             std::fs::write(zdotdir.join(name), body)?;
         }
-        let helper = std::env::current_exe()?.with_file_name("dirigent-hook");
 
         let board = Arc::new(Mutex::new(Board::default()));
         let (tx, changes) = async_channel::bounded(1);
@@ -463,19 +476,12 @@ fn alive(pid: u32) -> bool {
     }
 }
 
-#[cfg(unix)]
-fn write_exec(path: &Path, body: &str) -> std::io::Result<()> {
-    use std::os::unix::fs::PermissionsExt;
-    std::fs::write(path, body)?;
-    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755))
-}
-
 fn sh_quote(p: &Path) -> String {
     format!("'{}'", p.display().to_string().replace('\'', r"'\''"))
 }
 
 /// Names a file whose text the shim passes to claude as the first prompt (then the file and the variable go).
-pub const PROMPT_ENV: &str = "DIRIGENT_PROMPT_FILE";
+pub const PROMPT_ENV: &str = hook::shim::PROMPT_ENV;
 
 /// A new file for tab `tab`'s first prompt in this run's runtime dir (`start_line`, then the shim reads it).
 pub fn prompt_file(tab: usize) -> PathBuf {
@@ -493,40 +499,6 @@ pub fn write_prompt(path: &Path, prompt: &str) -> std::io::Result<()> {
     std::os::unix::fs::OpenOptionsExt::mode(&mut o, 0o600);
     o.open(path)?.write_all(prompt.as_bytes())
 }
-
-/// `claude` shim: runs the next `claude` on PATH with our settings (hooks + statusLine) layered on top. POSIX sh, so
-/// a first prompt in a file (`DIRIGENT_PROMPT_FILE`) reaches claude intact whatever your shell and aliases are.
-#[cfg(unix)]
-const SHIM: &str = r#"#!/bin/sh
-# dirigent: run the real claude with dirigent hooks + statusLine (--settings). Your settings stay untouched.
-self_dir=$(dirname "$0")
-# A first prompt from the New session dialog: the file's text is the prompt (newlines and quotes intact), then the
-# file and the variable go (claude and what it runs never see it). Run again from history, the file is gone: claude
-# starts without it.
-if [ -n "${DIRIGENT_PROMPT_FILE:-}" ]; then
-  prompt_file=$DIRIGENT_PROMPT_FILE
-  unset DIRIGENT_PROMPT_FILE
-  if [ -f "$prompt_file" ]; then
-    prompt=$(cat "$prompt_file")
-    rm -f "$prompt_file"
-    set -- "$@" -- "$prompt"
-  fi
-fi
-IFS=:
-for d in $PATH; do
-  [ -z "$d" ] || [ "$d" = "$self_dir" ] && continue
-  if [ -x "$d/claude" ] && [ ! -d "$d/claude" ]; then
-    if [ -f "$DIRIGENT_CLAUDE_SETTINGS" ]; then
-      # Remember the flags for resuming later (fire-and-forget, never reads the terminal).
-      [ -x "$DIRIGENT_HOOK" ] && "$DIRIGENT_HOOK" "$DIRIGENT_SOCKET" "$DIRIGENT_TAB_ID" argv "$@" </dev/null
-      exec "$d/claude" --settings "$DIRIGENT_CLAUDE_SETTINGS" "$@"
-    fi
-    exec "$d/claude" "$@"
-  fi
-done
-echo "dirigent: no claude found on PATH" >&2
-exit 127
-"#;
 
 /// zsh startup wrappers: each sources the user's own file, then (rc/login) puts the shim dir first in `path` and
 /// restores ZDOTDIR, so the user's config and child shells behave exactly as without dirigent.
@@ -843,8 +815,30 @@ mod tests {
         assert_eq!(b.five_hour, Some(five));
     }
 
+    #[cfg(unix)]
+    fn write_exec(path: &Path, body: &str) -> std::io::Result<()> {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::write(path, body)?;
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755))
+    }
+
+    /// The built `dirigent-hook` (`cargo test` at the workspace root builds it; the app finds it next to itself).
+    #[cfg(unix)]
+    fn helper_bin() -> PathBuf {
+        let exe = std::env::current_exe().unwrap();
+        let p = exe.parent().unwrap().parent().unwrap().join(format!("dirigent-hook{}", std::env::consts::EXE_SUFFIX));
+        assert!(p.is_file(), "{} missing: run cargo test at the workspace root", p.display());
+        p
+    }
+
+    /// The shim exactly as `Hub::start` makes it.
+    #[cfg(unix)]
+    fn install_shim(dir: &Path) {
+        std::os::unix::fs::symlink(helper_bin(), dir.join("claude")).unwrap();
+    }
+
     #[test]
-    #[cfg(unix)] // POSIX shim, sh quoting, zsh: Windows gets its own with the hooks step
+    #[cfg(unix)] // sh quoting: the Windows file has its own test
     fn settings_file_shape() {
         let hub = Hub {
             board: Default::default(),
@@ -862,18 +856,18 @@ mod tests {
     }
 
     #[test]
-    #[cfg(unix)] // POSIX shim, sh quoting, zsh: Windows gets its own with the hooks step
+    #[cfg(unix)] // sh scripts as claude; Windows: crates/hook/tests/shim.rs
     fn shim_runs_real_claude_with_settings_and_skips_itself() {
         let d = std::env::temp_dir().join(format!("dirigent-shim-test-{}", std::process::id()));
         let (shim_dir, real_dir) = (d.join("shim"), d.join("real"));
         std::fs::create_dir_all(&shim_dir).unwrap();
         std::fs::create_dir_all(&real_dir).unwrap();
-        write_exec(&shim_dir.join("claude"), SHIM).unwrap();
+        install_shim(&shim_dir);
         write_exec(&real_dir.join("claude"), "#!/bin/sh\necho real \"$@\"\n").unwrap();
-        // Stand-in for dirigent-hook: records what the shim reports.
-        let reported = d.join("argv.txt");
-        let fake_hook = d.join("hook.sh");
-        write_exec(&fake_hook, &format!("#!/bin/sh\nshift 3; printf '%s|' \"$@\" > {}\n", reported.display())).unwrap();
+        // Stand-in for the app: receives what the shim reports.
+        let app_sock = d.join("app.sock");
+        let app = std::os::unix::net::UnixDatagram::bind(&app_sock).unwrap();
+        app.set_read_timeout(Some(std::time::Duration::from_secs(2))).unwrap();
         let settings = d.join("s.json");
         std::fs::write(&settings, "{}").unwrap();
         let run = |settings: &Path| {
@@ -882,28 +876,31 @@ mod tests {
                 .arg("a b")
                 .env("PATH", format!("{}:{}:/usr/bin:/bin", shim_dir.display(), real_dir.display()))
                 .env("DIRIGENT_CLAUDE_SETTINGS", settings)
-                .env("DIRIGENT_HOOK", &fake_hook)
-                .env("DIRIGENT_SOCKET", "/nowhere")
+                .env("DIRIGENT_SOCKET", &app_sock)
                 .env("DIRIGENT_TAB_ID", "3")
+                .env_remove("DIRIGENT_BIN")
                 .output()
                 .unwrap();
             String::from_utf8(out.stdout).unwrap()
         };
         assert_eq!(run(&settings), format!("real --settings {} --model a b\n", settings.display()));
-        assert_eq!(std::fs::read_to_string(&reported).unwrap(), "--model|a b|", "argv reported before exec");
+        let mut buf = [0u8; 4096];
+        let n = app.recv(&mut buf).unwrap();
+        let msg: Msg = serde_json::from_slice(&buf[..n]).unwrap();
+        assert_eq!(msg.kind, Kind::Argv { args: vec!["--model".into(), "a b".into()] }, "argv reported before exec");
         // Settings gone (app quit): plain claude, never a broken --settings.
         assert_eq!(run(&d.join("missing.json")), "real --model a b\n");
         let _ = std::fs::remove_dir_all(&d);
     }
 
     #[test]
-    #[cfg(unix)] // POSIX shim, sh quoting, zsh: Windows gets its own with the hooks step
+    #[cfg(unix)] // POSIX shells; Windows: typed_lines_reach_claude_intact_in_powershell_and_cmd
     fn shim_passes_a_prompt_file_intact_through_aliases_and_deletes_it() {
         let d = std::env::temp_dir().join(format!("dirigent-shim-prompt-test-{}", std::process::id()));
         let (shim_dir, real_dir) = (d.join("shim"), d.join("real"));
         std::fs::create_dir_all(&shim_dir).unwrap();
         std::fs::create_dir_all(&real_dir).unwrap();
-        write_exec(&shim_dir.join("claude"), SHIM).unwrap();
+        install_shim(&shim_dir);
         // Each argument in brackets (one per prompt, exactly as written), then whether the variable reached claude.
         write_exec(
             &real_dir.join("claude"),
@@ -928,6 +925,7 @@ mod tests {
                     .arg(&script)
                     .env("PATH", format!("{}:{}:/usr/bin:/bin", shim_dir.display(), real_dir.display()))
                     .env_remove("DIRIGENT_CLAUDE_SETTINGS")
+                    .env_remove("DIRIGENT_BIN")
                     .env_remove(PROMPT_ENV)
                     .output()
                     .unwrap();
@@ -945,7 +943,7 @@ mod tests {
     }
 
     #[test]
-    #[cfg(unix)] // POSIX shim, sh quoting, zsh: Windows gets its own with the hooks step
+    #[cfg(unix)] // zsh; Windows: shell.rs tests
     fn zsh_wrapper_reports_cwd_after_users_rc() {
         if !Path::new("/usr/bin/zsh").exists() && !Path::new("/bin/zsh").exists() {
             return;

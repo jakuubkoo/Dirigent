@@ -6,6 +6,28 @@ use serde_json::Value;
 pub mod notice;
 #[cfg(windows)]
 pub mod pipe;
+pub mod shell;
+pub mod shim;
+
+/// Fire-and-forget to the app: Unix a non-blocking datagram to the socket path, Windows the pipe `socket` (busy:
+/// waited for at most 20 ms). App gone: nothing, instantly.
+#[cfg(unix)]
+pub fn send(socket: &str, bytes: &[u8]) {
+    use std::os::unix::net::UnixDatagram;
+    if let Ok(sock) = UnixDatagram::unbound()
+        && sock.set_nonblocking(true).is_ok()
+    {
+        let _ = sock.send_to(bytes, socket);
+    }
+}
+
+#[cfg(windows)]
+pub fn send(socket: &str, bytes: &[u8]) {
+    use std::io::Write as _;
+    if let Ok(mut pipe) = pipe::connect(socket, std::time::Duration::from_millis(20)) {
+        let _ = pipe.write_all(bytes);
+    }
+}
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 pub struct Msg {
