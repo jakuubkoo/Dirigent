@@ -28,7 +28,8 @@ fn main() {
     if cfg!(windows) && mode == "relay" {
         let mut bytes = Vec::new();
         let _ = std::io::stdin().take(64 * 1024).read_to_end(&mut bytes);
-        send(socket, &bytes);
+        #[cfg(windows)]
+        hook::relay(socket, &bytes);
         return;
     }
     let mut input = String::new();

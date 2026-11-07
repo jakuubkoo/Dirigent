@@ -56,6 +56,28 @@ pub fn send(socket: &str, bytes: &[u8]) {
     }
 }
 
+/// Windows, the WSL relay: off Claude's path, and relays arrive in bursts (every hook starts one without waiting), so
+/// it waits for a free pipe instance up to 2 s instead of `send`'s 20 ms. App gone: nothing, instantly.
+#[cfg(windows)]
+pub fn relay(socket: &str, bytes: &[u8]) {
+    use std::io::Write as _;
+    use std::time::{Duration, Instant};
+    let end = Instant::now() + Duration::from_secs(2);
+    loop {
+        match pipe::connect(socket, Duration::from_millis(100)) {
+            Ok(mut p) => {
+                let _ = p.write_all(bytes);
+                return;
+            }
+            // All busy, or another relay took the freed one first: try again.
+            Err(e)
+                if e.raw_os_error() == Some(windows_sys::Win32::Foundation::ERROR_PIPE_BUSY as i32)
+                    && Instant::now() < end => {}
+            Err(_) => return,
+        }
+    }
+}
+
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 pub struct Msg {
     pub tab: u32,
