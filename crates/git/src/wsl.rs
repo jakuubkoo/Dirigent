@@ -137,8 +137,9 @@ static DISTROS: Mutex<Option<HashMap<String, Distro>>> = Mutex::new(None);
 static STARTED: Condvar = Condvar::new();
 
 /// The Linux helper (its path inside every distro, `/mnt/c/…/dirigent-hook`) that serves git; None: per call.
-/// A new path stops running servers. Setting it again lets distros whose server was given up try once more (and forgets past
-/// deaths).
+/// A new path stops running servers. Setting it again lets distros whose server was given up try once more (and
+/// forgets past deaths). A server already starting with the old path stays on it: fine, the app sets this once at
+/// startup.
 pub fn set_server_helper(path: Option<String>) {
     let changed = std::mem::replace(&mut *HELPER.lock().unwrap(), path.clone()) != path;
     let mut running = Vec::new();
