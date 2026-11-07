@@ -32,6 +32,13 @@ struct Change {
     created: bool,
     /// The parent directory's listing changed.
     listing: bool,
+    /// Windows: a content/metadata change (not a listing change). For a directory that is only its last-write
+    /// time moving because something inside changed, which that directory's own watch already reported.
+    #[cfg(windows)]
+    content: bool,
+    /// Windows: removed or renamed away (a watched directory leaves `Watched`).
+    #[cfg(windows)]
+    gone: bool,
 }
 
 enum Ev {
@@ -87,6 +94,16 @@ impl Watcher {
                 let change = Change {
                     created: matches!(ev.kind, EventKind::Create(_) | EventKind::Modify(ModifyKind::Name(_))),
                     listing: changes_listing(&ev.kind),
+                    #[cfg(windows)]
+                    content: matches!(
+                        ev.kind,
+                        EventKind::Modify(ModifyKind::Data(_) | ModifyKind::Metadata(_) | ModifyKind::Any)
+                    ),
+                    #[cfg(windows)]
+                    gone: matches!(
+                        ev.kind,
+                        EventKind::Remove(_) | EventKind::Modify(ModifyKind::Name(notify::event::RenameMode::From))
+                    ),
                 };
                 let paths: Vec<_> = ev
                     .paths
@@ -118,8 +135,17 @@ impl Watcher {
                 }
             }
             let in_git = |p: &Path| p.starts_with(&repo.git_dir) || shared(&repo).is_some_and(|c| p.starts_with(c));
+            // Every directory we watch (Windows only; see `Change::content`). Paths in events are built from the
+            // watched paths, so an exact lookup matches: no syscall per event.
+            let mut watched = Watched::default();
+            #[cfg(windows)]
+            for g in [Some(repo.git_dir.clone()), shared(&repo)].into_iter().flatten() {
+                for d in ["", "refs", "refs/heads", "refs/remotes"] {
+                    watched.0.insert(g.join(d).components().collect());
+                }
+            }
             let started = Instant::now();
-            let n = watch_tree(&mut w, &repo.root, &mut watch_error);
+            let n = watch_tree(&mut w, &repo.root, &mut watch_error, &mut watched);
             crate::perf(|| format!("git watch {}: {n} dirs in {:.1} ms", repo.root.display(), ms(started)));
 
             let mut last: Option<Arc<Status>> = None;
@@ -153,7 +179,21 @@ impl Watcher {
                 }
                 first = false;
                 let paths: HashSet<(PathBuf, Change)> = std::mem::take(&mut pending).into_iter().collect();
+                #[cfg(windows)]
+                for (p, c) in &paths {
+                    if c.gone {
+                        watched.0.remove(p);
+                    }
+                }
+                #[cfg(windows)]
+                let paths: HashSet<(PathBuf, Change)> =
+                    paths.into_iter().filter(|(p, c)| !(c.content && watched.0.contains(p))).collect();
                 let git_hit = paths.iter().any(|(p, _)| in_git(p));
+                crate::perf(|| {
+                    let mut v: Vec<_> = paths.iter().map(|(p, _)| p.display().to_string()).collect();
+                    v.sort();
+                    format!("git event batch: {}", v.join(", "))
+                });
                 let work: Vec<&(PathBuf, Change)> = paths.iter().filter(|(p, _)| !in_git(p)).collect();
                 let dirs: Vec<PathBuf> = work
                     .iter()
@@ -170,7 +210,7 @@ impl Watcher {
                 let relevant: Vec<_> = work.into_iter().filter(|(p, _)| !ignored.contains(p)).collect();
                 for (p, c) in &relevant {
                     if c.created && p.is_dir() {
-                        watch_tree(&mut w, p, &mut watch_error);
+                        watch_tree(&mut w, p, &mut watch_error, &mut watched);
                     }
                 }
                 if !force && !git_hit && relevant.is_empty() {
@@ -262,9 +302,18 @@ fn counts(path: &Path, git_dir: &Path, common: Option<&Path>) -> bool {
     }
 }
 
+/// The directories with a watch of their own (filled on Windows only).
+#[derive(Default)]
+struct Watched(#[cfg(windows)] HashSet<PathBuf>);
+
 /// Watches `dir` and every directory below it that git doesn't ignore (nested .gitignore files, info/exclude and
 /// the global excludes file all apply). Returns how many directories got a watch.
-fn watch_tree(w: &mut notify::RecommendedWatcher, dir: &Path, error: &mut Option<String>) -> usize {
+fn watch_tree(
+    w: &mut notify::RecommendedWatcher,
+    dir: &Path,
+    error: &mut Option<String>,
+    #[cfg_attr(unix, allow(unused_variables))] watched: &mut Watched,
+) -> usize {
     let walk = crate::fs::walker(dir).build();
     let mut n = 0;
     for entry in walk.flatten() {
@@ -272,7 +321,11 @@ fn watch_tree(w: &mut notify::RecommendedWatcher, dir: &Path, error: &mut Option
             continue;
         }
         match w.watch(entry.path(), RecursiveMode::NonRecursive) {
-            Ok(()) => n += 1,
+            Ok(()) => {
+                n += 1;
+                #[cfg(windows)]
+                watched.0.insert(entry.path().to_path_buf());
+            }
             Err(e) if matches!(e.kind, notify::ErrorKind::MaxFilesWatch) => {
                 *error = Some("Too many directories to watch (OS inotify limit): changes may be missed".into());
                 break;
