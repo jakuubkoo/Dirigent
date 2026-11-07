@@ -225,7 +225,8 @@ pub fn resume_args(args: &[String]) -> Vec<String> {
 }
 
 /// Splits a typed flag line into words like a shell would for plain words: whitespace separates, `'…'` and `"…"`
-/// group (no expansion), `\` escapes the next char. An unterminated quote takes the rest of the line.
+/// group (no expansion), `\` escapes the next char (Windows: a plain character, it separates paths). An
+/// unterminated quote takes the rest of the line.
 pub fn split_words(line: &str) -> Vec<String> {
     let mut out = Vec::new();
     let mut word: Option<String> = None;
@@ -242,7 +243,7 @@ pub fn split_words(line: &str) -> Vec<String> {
                     w.push(q);
                 }
             }
-            '\\' => word.get_or_insert_with(String::new).extend(chars.next()),
+            '\\' if cfg!(unix) => word.get_or_insert_with(String::new).extend(chars.next()),
             c => word.get_or_insert_with(String::new).push(c),
         }
     }

@@ -549,7 +549,7 @@ impl Workspace {
             }
             "defaults" => {
                 let p = self.projects.get(&root).cloned().unwrap_or_default();
-                let flags = p.claude_args.iter().map(|a| sh_word(a)).collect::<Vec<_>>().join(" ");
+                let flags = p.claude_args.iter().map(|a| crate::projects::flag_word(a)).collect::<Vec<_>>().join(" ");
                 self.modal = Some(Modal::ProjectDefaults(Box::new(Defaults {
                     root,
                     auto: p.auto_claude,

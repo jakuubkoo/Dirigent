@@ -31,6 +31,16 @@ function global:prompt {
 /// cmd's prompt with the same OSC 7 (`$P` = the raw path, parsed leniently), then the default `C:\x>`.
 const CMD_PROMPT: &str = r"$E]7;file://localhost/$P$E\$P$G";
 
+/// How `shell` reads a typed line.
+pub fn syntax(shell: Shell) -> crate::projects::Syntax {
+    use crate::projects::Syntax;
+    match shell {
+        Shell::Cmd => Syntax::Cmd,
+        Shell::GitBash => Syntax::Posix,
+        Shell::Auto | Shell::Pwsh | Shell::Powershell => Syntax::PowerShell,
+    }
+}
+
 /// The program, arguments and environment for `shell`.
 pub fn command(shell: Shell) -> CommandBuilder {
     let shell = match shell {

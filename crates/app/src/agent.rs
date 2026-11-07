@@ -529,6 +529,8 @@ fn sh_quote(p: &Path) -> String {
 
 /// Names a file whose text the shim passes to claude as the first prompt (then the file and the variable go).
 pub const PROMPT_ENV: &str = hook::shim::PROMPT_ENV;
+/// Windows: names a file with claude's flags (JSON), which the shim reads; typed lines carry no flags there.
+pub const ARGS_ENV: &str = hook::shim::ARGS_ENV;
 
 /// A new file for tab `tab`'s first prompt in this run's runtime dir (`start_line`, then the shim reads it).
 pub fn prompt_file(tab: usize) -> PathBuf {
@@ -536,7 +538,14 @@ pub fn prompt_file(tab: usize) -> PathBuf {
     runtime_dir().join(format!("prompt-{tab}-{nanos}.txt"))
 }
 
-/// Writes a first prompt for the shim (only you can read it). Blocking: call off the UI thread.
+/// A new file for tab `tab`'s claude flags (Windows; `start_line`, then the shim reads it).
+pub fn args_file(tab: usize) -> PathBuf {
+    let nanos = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_nanos());
+    runtime_dir().join(format!("args-{tab}-{nanos}.json"))
+}
+
+/// Writes a first prompt or the flags file for the shim (only you can read it, never over an existing file).
+/// Blocking: call off the UI thread.
 pub fn write_prompt(path: &Path, prompt: &str) -> std::io::Result<()> {
     use std::io::Write;
     let mut o = std::fs::OpenOptions::new();
@@ -956,7 +965,15 @@ mod tests {
         .unwrap();
         let prompt = "Branch: feat/x\n\nFix the 'login' \"bug\": $HOME `id` \\n\n  - keep it\n-starts with a dash";
         let file = d.join("prompt-1-1.txt");
-        let line = crate::projects::start_line(None, true, &["--effort".into(), "high".into()], Some(&file)).unwrap();
+        let line = crate::projects::start_line(
+            Default::default(),
+            None,
+            true,
+            &["--effort".into(), "high".into()],
+            Some(&file),
+            None,
+        )
+        .unwrap();
         // The line as a session's shell runs it, after an alias that adds flags of its own.
         let script = d.join("typed.sh");
         std::fs::write(&script, format!("alias claude='claude --model \"a b\"'\n{line}\n")).unwrap();

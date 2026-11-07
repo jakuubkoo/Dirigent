@@ -21,7 +21,7 @@ use crate::settings::{
 };
 use crate::theme::{self, height, radius, space, text_size, z};
 use crate::ui::{self, icon, tip};
-use crate::workspace::{Workspace, home, sh_word, tilde};
+use crate::workspace::{Workspace, home, tilde};
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum Cat {
@@ -388,7 +388,7 @@ impl Defaults {
     fn of(p: &Project) -> Self {
         Self {
             auto: p.auto_claude,
-            flags: p.claude_args.iter().map(|a| sh_word(a)).collect::<Vec<_>>().join(" "),
+            flags: p.claude_args.iter().map(|a| crate::projects::flag_word(a)).collect::<Vec<_>>().join(" "),
             setup: p.setup_cmd.clone().unwrap_or_default(),
             wt_dir: p.worktrees_dir.as_deref().map(tilde).unwrap_or_default(),
         }
