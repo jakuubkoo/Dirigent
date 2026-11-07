@@ -166,7 +166,13 @@ fn dropping_the_client_ends_the_server_and_what_it_runs() {
     let pg = first_line_pid(&mut p);
     drop(c);
     wait_gone(pg);
-    // SAFETY: signal 0 only checks; the server was reaped by the drop.
-    assert!(unsafe { libc::kill(pid, 0) } != 0, "server gone");
+    // The reader thread may still hold the client for a moment after handing out the last answer; then it, not the
+    // drop above, ends and reaps the server.
+    let end = Instant::now() + Duration::from_secs(3);
+    // SAFETY: signal 0 only checks.
+    while unsafe { libc::kill(pid, 0) } == 0 {
+        assert!(Instant::now() < end, "server gone");
+        std::thread::sleep(Duration::from_millis(20));
+    }
     assert!(gitserve::is_stopped(&p.next(Duration::from_secs(1)).unwrap_err()));
 }
