@@ -7,7 +7,7 @@
 
 use std::io::Write as _;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::Stdio;
 
 use crate::{FileChange, Repo};
 
@@ -103,9 +103,15 @@ pub fn unstage(repo: &Repo, files: &[FileChange]) -> Result<()> {
 }
 
 /// Moves a file to the desktop trash (`gio trash`); never deletes. Fails if it can't be trashed.
+#[cfg(unix)]
 pub fn trash(path: &Path) -> Result<()> {
-    let out =
-        Command::new("gio").arg("trash").arg("--").arg(path).stdin(Stdio::null()).output().map_err(GitError::Io)?;
+    let out = std::process::Command::new("gio")
+        .arg("trash")
+        .arg("--")
+        .arg(path)
+        .stdin(Stdio::null())
+        .output()
+        .map_err(GitError::Io)?;
     if out.status.success() {
         Ok(())
     } else {
@@ -115,6 +121,58 @@ pub fn trash(path: &Path) -> Result<()> {
             String::from_utf8_lossy(&out.stderr).trim()
         )))
     }
+}
+
+/// The app's main window (owner of the Recycle Bin's "delete permanently?" question) and its UI thread.
+#[cfg(windows)]
+static UI_OWNER: std::sync::OnceLock<(isize, std::thread::ThreadId)> = std::sync::OnceLock::new();
+
+/// Windows: call once on the UI thread with the main window's HWND. A Recycle Bin question is then owned by that
+/// window (on top of it, never hidden behind it), and `trash` refuses to run on that thread.
+#[cfg(windows)]
+pub fn set_ui_owner(hwnd: isize) {
+    let _ = UI_OWNER.set((hwnd, std::thread::current().id()));
+}
+
+/// Moves a file or directory to the Recycle Bin; never deletes. A drive without a Recycle Bin (network share) is
+/// an error and the file stays. If Windows would still delete it outright (e.g. bigger than the bin), it asks
+/// the user first. Blocking: never on the UI thread (an error there).
+#[cfg(windows)]
+pub fn trash(path: &Path) -> Result<()> {
+    use std::os::windows::ffi::OsStrExt as _;
+    use windows_sys::Win32::UI::Shell::{
+        FO_DELETE, FOF_ALLOWUNDO, FOF_NOCONFIRMATION, FOF_NOERRORUI, FOF_SILENT, FOF_WANTNUKEWARNING, SHFILEOPSTRUCTW,
+        SHFileOperationW, SHQUERYRBINFO, SHQueryRecycleBinW,
+    };
+    let owner = UI_OWNER.get();
+    if owner.is_some_and(|(_, ui)| *ui == std::thread::current().id()) {
+        return Err(GitError::Failed("trash must not run on the UI thread".into()));
+    }
+    let fail = |why: &str| GitError::Failed(format!("Couldn't move {} to the Recycle Bin: {why}", path.display()));
+    let abs = crate::plain_path(std::path::absolute(path).map_err(GitError::Io)?);
+    let wide = |p: &Path| p.as_os_str().encode_wide().chain([0, 0]).collect::<Vec<u16>>();
+    let root = abs.ancestors().last().unwrap_or(&abs).to_path_buf();
+    let mut info = SHQUERYRBINFO { cbSize: std::mem::size_of::<SHQUERYRBINFO>() as u32, i64Size: 0, i64NumItems: 0 };
+    // SAFETY: a NUL-terminated path and a sized out struct.
+    if unsafe { SHQueryRecycleBinW(wide(&root).as_ptr(), &mut info) } < 0 {
+        return Err(fail("this drive has no Recycle Bin. Nothing was deleted"));
+    }
+    let from = wide(&abs); // double-NUL terminated list of one
+    // SAFETY: all-zero is a valid SHFILEOPSTRUCTW (null handles and pointers); the fields we need are set below.
+    let mut op: SHFILEOPSTRUCTW = unsafe { std::mem::zeroed() };
+    op.hwnd = owner.map_or(0, |(h, _)| *h) as _;
+    op.wFunc = FO_DELETE;
+    op.pFrom = from.as_ptr();
+    op.fFlags = (FOF_ALLOWUNDO | FOF_NOCONFIRMATION | FOF_SILENT | FOF_NOERRORUI | FOF_WANTNUKEWARNING) as u16;
+    // SAFETY: `op` points at `from`, alive for the call.
+    let rc = unsafe { SHFileOperationW(&mut op) };
+    if rc != 0 {
+        return Err(fail(&format!("error {rc:#x}")));
+    }
+    if op.fAnyOperationsAborted != 0 {
+        return Err(fail("cancelled"));
+    }
+    Ok(())
 }
 
 /// Back to HEAD, index and worktree. Files HEAD doesn't have (untracked, or added in the index) go to the trash.
