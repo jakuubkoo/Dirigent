@@ -21,14 +21,11 @@ pub fn claude_shell() -> ClaudeShell {
 }
 
 /// The statusLine `command` for Claude Code on Windows (statusLine has no exec form): a bare `dirigent-hook`,
-/// found through the session's PATH (no path to quote, which Git Bash and PowerShell treat differently), with the
-/// JSON on stdin forwarded explicitly under PowerShell (it hands its stdin to a native command only when piped).
-pub fn status_command(shell: &ClaudeShell, pipe: &str, tab: u32) -> String {
-    let run = format!("dirigent-hook {pipe} {tab} status");
-    match shell {
-        ClaudeShell::GitBash(_) => run,
-        ClaudeShell::PowerShell => format!("$input | {run}"),
-    }
+/// found through the session's PATH: no path to quote, which Git Bash and PowerShell treat differently. The same
+/// line works in both: a native command first on the line inherits the shell's stdin (the JSON). Not `$input |`:
+/// PowerShell's `-Command` leaves it empty (tested through both shells on the CI runner).
+pub fn status_command(pipe: &str, tab: u32) -> String {
+    format!("dirigent-hook {pipe} {tab} status")
 }
 
 /// Git for Windows' `bash.exe`: next to the `git.exe` on PATH (`…\Git\cmd\git.exe` → `…\Git\bin\bash.exe`), else in
@@ -58,9 +55,7 @@ mod tests {
 
     #[test]
     fn status_commands() {
-        let bash = ClaudeShell::GitBash("C:/Git/bin/bash.exe".into());
-        assert_eq!(status_command(&bash, "dirigent-hook-9", 4), "dirigent-hook dirigent-hook-9 4 status");
-        assert_eq!(status_command(&ClaudeShell::PowerShell, "p", 1), "$input | dirigent-hook p 1 status");
+        assert_eq!(status_command("dirigent-hook-9", 4), "dirigent-hook dirigent-hook-9 4 status");
     }
 
     #[test]

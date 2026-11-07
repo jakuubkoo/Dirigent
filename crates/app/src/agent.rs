@@ -436,14 +436,14 @@ impl Hub {
     }
 
     /// Windows: hooks in exec form (the helper's path and arguments, no shell, nothing to quote); the statusLine has
-    /// no exec form, so it is a bare command line for the shell Claude Code will pick (`hook::shell`).
+    /// no exec form, so it is a bare command line that works in either shell Claude Code picks (`hook::shell`).
     #[cfg(windows)]
     fn settings_json(&self, tab: u32) -> String {
         let (helper, pipe) = (self.helper.to_string_lossy().replace('\\', "/"), self.sock.to_string_lossy());
         let handler = serde_json::json!([{ "hooks": [{
             "type": "command", "command": helper, "args": [pipe, tab.to_string(), "hook"], "async": true,
         }] }]);
-        let line = hook::shell::status_command(&hook::shell::claude_shell(), &pipe, tab);
+        let line = hook::shell::status_command(&pipe, tab);
         hooks_json(handler, serde_json::json!({ "type": "command", "command": line }))
     }
 
@@ -1108,7 +1108,7 @@ mod tests {
         assert_eq!(stop["args"], serde_json::json!(["dirigent-hook-9", "4", "hook"]));
         assert_eq!(stop["async"], true);
         assert_eq!(v["hooks"].as_object().unwrap().len(), 9);
-        let line = hook::shell::status_command(&hook::shell::claude_shell(), "dirigent-hook-9", 4);
+        let line = hook::shell::status_command("dirigent-hook-9", 4);
         assert_eq!(v["statusLine"]["command"], line.as_str());
     }
 
@@ -1148,7 +1148,8 @@ mod tests {
             cmd.env("FAKE_CLAUDE_OUT", &out);
             if shell == Shell::Cmd {
                 // cmd has no profile to fix PATH: the shim must come first, as the app's PATH prepend does.
-                cmd.env("PATH", std::env::join_paths([shim.clone(), real.clone()]).unwrap());
+                let first = [shim.clone(), real.clone()].into_iter().chain(std::env::split_paths(&sys));
+                cmd.env("PATH", std::env::join_paths(first).unwrap());
             }
             let size = session::Size { cols: 200, rows: 30, cell_width: 8, cell_height: 16 };
             let s = session::Session::spawn_command(cmd, &d, size).unwrap();

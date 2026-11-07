@@ -257,10 +257,12 @@ mod tests {
 
     #[test]
     fn split_words_like_a_shell() {
-        assert_eq!(
-            split_words("  --model opus --add-dir '/a b' \"c\"d\\ e ''"),
-            ["--model", "opus", "--add-dir", "/a b", "cd e", ""]
-        );
+        // Windows: `\` is a plain character (it separates paths there).
+        let escaped: &[&str] = if cfg!(windows) { &["cd\\", "e"] } else { &["cd e"] };
+        let mut want = vec!["--model", "opus", "--add-dir", "/a b"];
+        want.extend(escaped);
+        want.push("");
+        assert_eq!(split_words("  --model opus --add-dir '/a b' \"c\"d\\ e ''"), want);
         assert!(split_words("   ").is_empty());
         // Typed defaults go through the resume allowlist: bypasses never survive.
         let words = split_words(

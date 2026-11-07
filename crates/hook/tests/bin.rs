@@ -180,7 +180,7 @@ fn status_command_reaches_the_app_through_both_shells() {
     assert!(shells.len() == 2, "the runner has Git Bash: both shells must be tested");
     for (i, shell) in shells.iter().enumerate() {
         let app = App::start(&d, &format!("status-{i}"));
-        let line = status_command(shell, &app.addr, 7);
+        let line = status_command(&app.addr, 7);
         let mut c = match shell {
             ClaudeShell::GitBash(bash) => {
                 let mut c = Command::new(bash);
