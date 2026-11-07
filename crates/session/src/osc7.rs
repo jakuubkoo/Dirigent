@@ -86,10 +86,19 @@ fn terminator(b: &[u8]) -> Option<(usize, usize)> {
 /// `file://host/path` → path, only if `host` is this machine (empty, `localhost` or our hostname): an OSC 7 from
 /// a remote shell (ssh) describes a directory that doesn't exist here.
 pub fn parse(payload: &[u8], hostname: &str) -> Option<PathBuf> {
+    parse_if(payload, |host| host.is_empty() || host == "localhost" || host.eq_ignore_ascii_case(hostname))
+}
+
+/// `parse` with any host: for a shell known to run on this machine under another name (a WSL distro's hostname).
+pub fn parse_any_host(payload: &[u8]) -> Option<PathBuf> {
+    parse_if(payload, |_| true)
+}
+
+fn parse_if(payload: &[u8], local: impl Fn(&str) -> bool) -> Option<PathBuf> {
     let rest = payload.strip_prefix(b"file://")?;
     let slash = rest.iter().position(|&b| b == b'/')?;
     let host = std::str::from_utf8(&rest[..slash]).ok()?;
-    if !(host.is_empty() || host == "localhost" || host.eq_ignore_ascii_case(hostname)) {
+    if !local(host) {
         return None;
     }
     Some(to_path(decode(&rest[slash..])))
@@ -189,5 +198,14 @@ mod tests {
         assert_eq!(p(b"file://box/D:/").as_deref(), Some(r"D:\"), "host case-insensitive");
         assert_eq!(p(b"file://localhost/C:\\Code\\a b").as_deref(), Some(r"C:\Code\a b"), "cmd's raw $P");
         assert_eq!(p(b"file://other/C:/x"), None, "remote shell");
+        // A WSL shell (any host: the tab is known to be WSL); the app maps the Linux path into the distro.
+        assert_eq!(parse_any_host(b"file://wsl-box/home/j/a%20b"), Some(r"\home\j\a b".into()));
+    }
+
+    #[test]
+    fn any_host_only_when_asked() {
+        assert_eq!(parse(b"file://myhost/x", "box"), None);
+        assert!(parse_any_host(b"file://myhost/x").is_some());
+        assert_eq!(parse_any_host(b"http://myhost/x"), None);
     }
 }

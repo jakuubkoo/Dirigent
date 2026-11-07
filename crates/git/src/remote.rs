@@ -9,7 +9,7 @@ use std::io::Read as _;
 use std::path::Path;
 use std::process::Stdio;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 use crate::write::{GitError, run};
@@ -32,9 +32,16 @@ pub struct Output {
 /// Runs `program args` in `dir` with no terminal: stdin null, its own session (no controlling tty), prompts off.
 /// Killed (with its children, e.g. ssh) on `cancel` or after `timeout`. Non-zero exit → `Failed` with the output.
 pub fn run_tool(program: &str, dir: &Path, args: &[&str], cancel: &Cancel, timeout: Duration) -> Result<Output> {
-    let mut c = crate::cmd(program);
+    let mut c = crate::native_or_wsl(dir, program);
+    // Inside WSL: every process of this run carries the tag, so cancel finds them (ssh included) in the distro.
+    let job = crate::wsl::of(dir).map(|(distro, _)| {
+        static N: AtomicU64 = AtomicU64::new(0);
+        (distro, format!("{}-{}", std::process::id(), N.fetch_add(1, Ordering::Relaxed)))
+    });
+    if let Some((_, tag)) = &job {
+        c.env("DIRIGENT_JOB", tag);
+    }
     c.args(args)
-        .current_dir(dir)
         .env("LC_ALL", "C")
         .env("GIT_TERMINAL_PROMPT", "0")
         .env("GH_PROMPT_DISABLED", "1")
@@ -60,9 +67,12 @@ pub fn run_tool(program: &str, dir: &Path, args: &[&str], cancel: &Cancel, timeo
     // GIT_TERMINAL_PROMPT=0 does for the terminal prompt).
     #[cfg(windows)]
     c.env("GCM_INTERACTIVE", "never");
+    if job.is_some() {
+        crate::wsl::count_spawn();
+    }
     let mut child = c.spawn().map_err(GitError::Io)?;
     #[cfg(windows)]
-    let job = win::Job::of(&child);
+    let win_job = win::Job::of(&child);
     let reader = |mut pipe: Box<dyn std::io::Read + Send>| {
         std::thread::spawn(move || {
             let mut buf = Vec::new();
@@ -80,10 +90,13 @@ pub fn run_tool(program: &str, dir: &Path, args: &[&str], cancel: &Cancel, timeo
         }
         if cancel.load(Ordering::Relaxed) || started.elapsed() > timeout {
             #[cfg(windows)]
-            if let Some(job) = &job {
-                job.terminate();
+            if let Some(j) = &win_job {
+                j.terminate();
             }
             kill_tree(&mut child);
+            if let Some((distro, tag)) = &job {
+                kill_in_wsl(distro, tag);
+            }
             let _ = child.wait();
             break None;
         }
@@ -103,6 +116,18 @@ pub fn run_tool(program: &str, dir: &Path, args: &[&str], cancel: &Cancel, timeo
 fn kill_tree(child: &mut std::process::Child) {
     // SAFETY: the child leads its own process group (setsid): this kills it and e.g. its ssh.
     unsafe { libc::kill(-(child.id() as i32), libc::SIGKILL) };
+}
+
+/// Kills every process in `distro` whose environment has `DIRIGENT_JOB=<tag>` (git and what it started): ending
+/// `wsl.exe` on the Windows side doesn't reliably end them.
+fn kill_in_wsl(distro: &str, tag: &str) {
+    const KILL: &str = r#"for f in $(grep -lsxzF "DIRIGENT_JOB=$1" /proc/[0-9]*/environ); do p=${f#/proc/}; kill -9 "${p%/environ}"; done"#;
+    let _ = crate::cmd("wsl.exe")
+        .args(["-d", distro, "-e", "sh", "-c", KILL, "sh", tag])
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status();
 }
 
 /// Windows: the job (`win::Job`) already took the tree; this is the fallback when the job couldn't be made.

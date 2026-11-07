@@ -68,6 +68,9 @@ pub struct TabState {
     /// Files this tab's agent changed (its Claude session's set).
     #[serde(default)]
     pub changes: Option<crate::changes::Saved>,
+    /// Windows: the WSL distro its shell runs in (also after `cd /mnt/c/…`). Never written elsewhere.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub wsl: Option<String>,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq)]
@@ -220,17 +223,22 @@ pub fn write_atomic(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
 }
 
 /// Whether Claude Code still has a transcript for this session. Blocking IO: call off the UI thread.
-pub fn transcript_exists(session_id: &str) -> bool {
-    transcript_path(session_id).is_some()
+pub fn transcript_exists(session_id: &str, wsl: Option<&str>) -> bool {
+    transcript_path(session_id, wsl).is_some()
 }
 
 /// This session's transcript (`~/.claude/projects/*/<id>.jsonl`, the same cross-project lookup
-/// `claude --resume <id>` does). Blocking IO: call off the UI thread.
-pub fn transcript_path(session_id: &str) -> Option<PathBuf> {
+/// `claude --resume <id>` does). `wsl`: a session of claude inside that WSL distro (its Linux home's `.claude`).
+/// Blocking IO: call off the UI thread.
+pub fn transcript_path(session_id: &str, wsl: Option<&str>) -> Option<PathBuf> {
     if session_id.is_empty() || !session_id.chars().all(|c| c.is_ascii_hexdigit() || c == '-') {
         return None;
     }
-    let projects = std::env::home_dir().unwrap_or_default().join(".claude").join("projects");
+    let home = match wsl {
+        Some(d) => git::wsl::to_windows(d, &git::wsl::home(d)?),
+        None => std::env::home_dir().unwrap_or_default(),
+    };
+    let projects = home.join(".claude").join("projects");
     let dirs = std::fs::read_dir(projects).ok()?;
     dirs.flatten().map(|d| d.path().join(format!("{session_id}.jsonl"))).find(|p| p.is_file())
 }
@@ -299,6 +307,7 @@ mod tests {
                     session: Some("00000000-0000-4000-8000-000000000005".into()),
                     files: vec![("/home/x/api/src/a.rs".into(), crate::changes::Touch { via_command: true })],
                 }),
+                wsl: None,
             }],
             active: 0,
             window: Some(WindowState { mode: WindowMode::Maximized, x: 10., y: 20., w: 1200., h: 750. }),
@@ -370,8 +379,8 @@ mod tests {
 
     #[test]
     fn transcript_lookup_rejects_odd_ids() {
-        assert!(!transcript_exists("../../etc/passwd"));
-        assert!(!transcript_exists(""));
-        assert!(!transcript_exists("00000000-0000-4000-8000-000000000000"));
+        assert!(!transcript_exists("../../etc/passwd", None));
+        assert!(!transcript_exists("", None));
+        assert!(!transcript_exists("00000000-0000-4000-8000-000000000000", None));
     }
 }

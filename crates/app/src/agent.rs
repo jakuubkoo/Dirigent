@@ -90,6 +90,8 @@ pub struct Board {
     pub seven_day: Option<Limit>,
     /// Hooks arriving while our statusLine never ran mean its command didn't work in Claude's shell: said once.
     status_check: StatusCheck,
+    /// Per tab, the newest `Msg::seq` applied (relayed WSL messages only): an older one arrived late and is dropped.
+    seqs: HashMap<u32, u64>,
 }
 
 #[derive(Default, Debug)]
@@ -122,6 +124,13 @@ impl StatusCheck {
 impl Board {
     /// Applies one message; returns whether anything the UI shows changed.
     pub fn apply(&mut self, msg: Msg) -> bool {
+        if let Some(seq) = msg.seq {
+            let last = self.seqs.entry(msg.tab).or_default();
+            if seq < *last {
+                return false;
+            }
+            *last = seq;
+        }
         let agent = self.tabs.entry(msg.tab).or_default();
         let before = agent.clone();
         let (five, seven) = (self.five_hour, self.seven_day);
@@ -312,6 +321,11 @@ pub struct Hub {
     bin: PathBuf,
     zdotdir: PathBuf,
     helper: PathBuf,
+    /// WSL tabs and their distro: their hooks carry Linux paths, mapped into the distro on arrival.
+    wsl_tabs: Arc<Mutex<HashMap<u32, String>>>,
+    /// Windows: the runtime dir as WSL sees it (`/mnt/c/…`), and whether the Linux helper is there (`bin-wsl`).
+    #[cfg(windows)]
+    wsl: Option<(String, bool)>,
 }
 
 impl Hub {
@@ -347,14 +361,26 @@ impl Hub {
         for (name, body) in ZSH_WRAPPERS {
             std::fs::write(zdotdir.join(name), body)?;
         }
+        #[cfg(windows)]
+        let wsl = wsl_setup(&dir, &helper);
+        // Git for repos inside WSL runs through the Linux helper as a long-lived server (`git::wsl`).
+        #[cfg(windows)]
+        git::wsl::set_server_helper(
+            wsl.as_ref().filter(|(_, hooks)| *hooks).map(|(d, _)| format!("{d}/bin-wsl/dirigent-hook")),
+        );
+        let wsl_tabs: Arc<Mutex<HashMap<u32, String>>> = Default::default();
 
         let board = Arc::new(Mutex::new(Board::default()));
         let (tx, changes) = async_channel::bounded(1);
         let handle = {
             let board = board.clone();
             // False once the UI is gone.
+            let wsl_tabs = wsl_tabs.clone();
             move |bytes: &[u8]| {
-                let Ok(msg) = serde_json::from_slice::<Msg>(bytes) else { return true };
+                let Ok(mut msg) = serde_json::from_slice::<Msg>(bytes) else { return true };
+                if let Some(distro) = wsl_tabs.lock().unwrap().get(&msg.tab) {
+                    in_distro(&mut msg.kind, distro);
+                }
                 crate::perf::event_with(|| format!("agent msg {msg:?}"));
                 tracker.hook(msg.tab, &msg.kind);
                 !(board.lock().unwrap().apply(msg) && tx.try_send(()).is_err() && tx.is_closed())
@@ -394,7 +420,42 @@ impl Hub {
             }
             PathBuf::from(name)
         };
-        Ok(Self { board, changes, dir, sock, bin, zdotdir, helper })
+        Ok(Self {
+            board,
+            changes,
+            dir,
+            sock,
+            bin,
+            zdotdir,
+            helper,
+            wsl_tabs,
+            #[cfg(windows)]
+            wsl,
+        })
+    }
+
+    /// `session_env` for a tab whose shell runs inside WSL `distro`: every value in its Linux form, passed by name
+    /// through `WSLENV` (nothing else of ours crosses), no PATH (the start script puts the shim first). Without the
+    /// Linux helper the tab still runs, without hooks.
+    #[cfg(windows)]
+    pub fn wsl_env(&self, tab: u32, distro: &str) -> std::io::Result<Vec<(String, String)>> {
+        let Some((dir, hooks)) = &self.wsl else {
+            return Err(std::io::Error::other("the runtime dir has no path inside WSL"));
+        };
+        self.wsl_tabs.lock().unwrap().insert(tab, distro.to_string());
+        let relay = git::wsl::to_linux(&git::plain_path(self.helper.canonicalize()?).to_string_lossy())
+            .ok_or_else(|| std::io::Error::other("the helper has no path inside WSL"))?;
+        let (env, settings) = wsl_session(dir, &relay, &self.sock.to_string_lossy(), tab, *hooks);
+        if let Some((name, json)) = settings {
+            std::fs::write(self.dir.join(name), json)?;
+        }
+        Ok(env)
+    }
+
+    /// The start script's path inside WSL (`wsl.exe … -e sh <it>`).
+    #[cfg(windows)]
+    pub fn wsl_start(&self) -> Option<String> {
+        self.wsl.as_ref().map(|(dir, _)| format!("{dir}/wsl-start.sh"))
     }
 
     /// Writes the tab's settings file and returns the env for its shell.
@@ -448,7 +509,13 @@ impl Hub {
     }
 
     pub fn remove_tab(&self, tab: u32) {
-        self.board.lock().unwrap().tabs.remove(&tab);
+        if self.wsl_tabs.lock().unwrap().remove(&tab).is_some() {
+            let _ = std::fs::remove_file(self.dir.join(format!("tab-{tab}-wsl.json")));
+        }
+        let mut board = self.board.lock().unwrap();
+        board.tabs.remove(&tab);
+        board.seqs.remove(&tab);
+        drop(board);
         let _ = std::fs::remove_file(self.dir.join(format!("tab-{tab}.json")));
     }
 }
@@ -524,8 +591,113 @@ fn alive(pid: u32) -> bool {
 
 #[cfg(unix)]
 fn sh_quote(p: &Path) -> String {
-    format!("'{}'", p.display().to_string().replace('\'', r"'\''"))
+    sh_quote_str(&p.display().to_string())
 }
+
+fn sh_quote_str(s: &str) -> String {
+    format!("'{}'", s.replace('\'', r"'\''"))
+}
+
+/// A WSL tab's shell env and (with the Linux helper: `hooks`) its Claude settings file (name, JSON). `dir` is the
+/// runtime dir and `relay` the Windows helper, both as WSL sees them. Every value goes by name through `WSLENV`
+/// (WSL passes nothing else), already in its Linux form (no `/p` translation).
+#[cfg_attr(not(windows), allow(dead_code))]
+fn wsl_session(dir: &str, relay: &str, pipe: &str, tab: u32, hooks: bool) -> WslSession {
+    let mut env = vec![
+        ("DIRIGENT_TAB_ID", tab.to_string()),
+        ("DIRIGENT_SOCKET", pipe.to_string()),
+        ("DIRIGENT_BIN", format!("{dir}/bin-wsl")),
+        ("DIRIGENT_HOOK", format!("{dir}/bin-wsl/dirigent-hook")),
+        (hook::RELAY, relay.to_string()),
+        ("DIRIGENT_ZDOTDIR", format!("{dir}/zsh")),
+        ("DIRIGENT_BASHRC", format!("{dir}/wsl-bashrc")),
+    ];
+    let settings = hooks.then(|| {
+        let name = format!("tab-{tab}-wsl.json");
+        let helper = sh_quote_str(&format!("{dir}/bin-wsl/dirigent-hook"));
+        let cmd = |mode: &str| format!("{helper} {} {tab} {mode}", sh_quote_str(pipe));
+        let handler = serde_json::json!([{ "hooks": [{ "type": "command", "command": cmd("hook"), "async": true }] }]);
+        let status = serde_json::json!({ "type": "command", "command": cmd("status") });
+        env.push(("DIRIGENT_CLAUDE_SETTINGS", format!("{dir}/{name}")));
+        (name, hooks_json(handler, status))
+    });
+    let wslenv = env.iter().map(|(k, _)| *k).collect::<Vec<_>>().join(":");
+    let mut env: Vec<(String, String)> = env.into_iter().map(|(k, v)| (k.to_string(), v)).collect();
+    env.push(("WSLENV".into(), wslenv));
+    (env, settings)
+}
+
+#[cfg_attr(not(windows), allow(dead_code))]
+type WslSession = (Vec<(String, String)>, Option<(String, String)>);
+
+/// A hook from a WSL tab names Linux paths (its cwd, the file a tool wrote): the app's paths inside the distro.
+fn in_distro(kind: &mut Kind, distro: &str) {
+    if let Kind::Hook { cwd, path, .. } = kind {
+        for p in [cwd, path].into_iter().flatten().filter(|p| p.starts_with('/')) {
+            *p = git::wsl::to_windows(distro, p).to_string_lossy().into_owned();
+        }
+    }
+}
+
+/// Windows: what WSL sessions need in the runtime dir: the start script, the bash wrapper and the Linux helper as
+/// `bin-wsl/claude` and `bin-wsl/dirigent-hook` (shipped as `wsl/dirigent-hook` next to the exe; `DIRIGENT_WSL_HOOK`
+/// overrides). Returns the runtime dir as WSL sees it and whether the helper is there; None: no WSL sessions with
+/// hooks (the dir has no `/mnt/<drive>` path).
+#[cfg(windows)]
+fn wsl_setup(dir: &Path, helper: &Path) -> Option<(String, bool)> {
+    let linux = git::wsl::to_linux(&git::plain_path(dir.canonicalize().ok()?).to_string_lossy())?;
+    let _ = std::fs::write(dir.join("wsl-start.sh"), WSL_START);
+    let _ = std::fs::write(dir.join("wsl-bashrc"), WSL_BASHRC);
+    let linux_helper = std::env::var_os("DIRIGENT_WSL_HOOK")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| helper.with_file_name("wsl").join("dirigent-hook"));
+    let bin = dir.join("bin-wsl");
+    let hooks = std::fs::create_dir_all(&bin).is_ok()
+        && ["claude", "dirigent-hook"].iter().all(|n| std::fs::copy(&linux_helper, bin.join(n)).is_ok());
+    if !hooks {
+        eprintln!(
+            "dirigent: no Linux helper at {}: WSL sessions run without Claude Code hooks",
+            linux_helper.display()
+        );
+    }
+    Some((linux, hooks))
+}
+
+/// Starts the user's login shell inside WSL (`wsl.exe -d <distro> --cd <dir> -e sh <this>`): zsh through our
+/// ZDOTDIR wrappers (as on Linux), bash with `wsl-bashrc`, others with only the PATH prepend. Says once if WSL
+/// interop is off: then the Windows helper can't run and Claude Code's states don't reach the app.
+#[cfg(windows)]
+const WSL_START: &str = r#"# dirigent: your login shell inside WSL, with the claude shim first on PATH and cwd reports
+if ! [ -e /proc/sys/fs/binfmt_misc/WSLInterop ] && ! [ -e /proc/sys/fs/binfmt_misc/WSLInterop-late ]; then
+  printf '%s
+' "dirigent: WSL interop is off in this distro ([interop] in /etc/wsl.conf): Claude Code's states won't show."
+fi
+shell=$(getent passwd "$(id -un)" | cut -d: -f7)
+[ -x "$shell" ] || shell=/bin/sh
+case $shell in
+*/zsh)
+  if [ -n "${ZDOTDIR+x}" ]; then DIRIGENT_ZDOTDIR_ORIG=$ZDOTDIR DIRIGENT_ZDOTDIR_WAS_UNSET=
+  else DIRIGENT_ZDOTDIR_ORIG=$HOME DIRIGENT_ZDOTDIR_WAS_UNSET=1; fi
+  export DIRIGENT_ZDOTDIR_ORIG DIRIGENT_ZDOTDIR_WAS_UNSET ZDOTDIR=$DIRIGENT_ZDOTDIR
+  exec "$shell" -l ;;
+*/bash) exec "$shell" --rcfile "$DIRIGENT_BASHRC" -i ;;
+*) PATH=$DIRIGENT_BIN:$PATH; export PATH; exec "$shell" -l ;;
+esac
+"#;
+
+/// bash inside WSL: what a login bash reads, then the claude shim first on PATH and the cwd at every prompt
+/// (OSC 7 with an empty host; the app maps the Linux path into the distro). Linux sessions don't use it.
+#[cfg(windows)]
+const WSL_BASHRC: &str = r#"# dirigent wrapper (WSL)
+[ -f /etc/profile ] && . /etc/profile
+if [ -f ~/.bash_profile ]; then . ~/.bash_profile
+elif [ -f ~/.bash_login ]; then . ~/.bash_login
+elif [ -f ~/.profile ]; then . ~/.profile
+fi
+PATH=$DIRIGENT_BIN:$PATH
+__dirigent_osc7() { printf '\e]7;file://%s\e\\' "${PWD//%/%25}"; }
+PROMPT_COMMAND="__dirigent_osc7${PROMPT_COMMAND:+;$PROMPT_COMMAND}"
+"#;
 
 /// Names a file whose text the shim passes to claude as the first prompt (then the file and the variable go).
 pub const PROMPT_ENV: &str = hook::shim::PROMPT_ENV;
@@ -536,6 +708,12 @@ pub const ARGS_ENV: &str = hook::shim::ARGS_ENV;
 pub fn prompt_file(tab: usize) -> PathBuf {
     let nanos = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_nanos());
     runtime_dir().join(format!("prompt-{tab}-{nanos}.txt"))
+}
+
+/// A file in the runtime dir as WSL sees it (`/mnt/c/…`, long names: `%TEMP%` can be an 8.3 path).
+pub fn linux_path(p: &Path) -> Option<String> {
+    let dir = git::plain_path(p.parent()?.canonicalize().ok()?);
+    git::wsl::to_linux(&dir.join(p.file_name()?).to_string_lossy())
 }
 
 /// A new file for tab `tab`'s claude flags (Windows; `start_line`, then the shim reads it).
@@ -609,6 +787,7 @@ mod tests {
     fn hook_id(tab: u32, event: &str, nt: Option<&str>, id: &str) -> Msg {
         Msg {
             tab,
+            seq: None,
             kind: Kind::Hook {
                 event: event.into(),
                 notification_type: nt.map(Into::into),
@@ -626,7 +805,42 @@ mod tests {
     /// A real hook payload (crates/hook/tests/fixtures), parsed like the helper does.
     fn real(tab: u32, name: &str) -> Msg {
         let path = format!("{}/../hook/tests/fixtures/{name}.json", env!("CARGO_MANIFEST_DIR"));
-        Msg { tab, kind: hook::parse("hook", &std::fs::read_to_string(path).unwrap()).unwrap() }
+        Msg { tab, seq: None, kind: hook::parse("hook", &std::fs::read_to_string(path).unwrap()).unwrap() }
+    }
+
+    /// Relayed (WSL) messages can overtake each other: the newest by `seq` wins in any arrival order; without a
+    /// `seq` (native sessions) arrival order counts, as before.
+    #[test]
+    fn late_relayed_messages_are_dropped() {
+        let events = ["UserPromptSubmit", "PreToolUse", "PostToolUse", "Stop"];
+        let mut orders = 0;
+        for a in 0..4 {
+            for b2 in 0..4 {
+                for c in 0..4 {
+                    if a == b2 || a == c || b2 == c {
+                        continue;
+                    }
+                    let d = (0..4).find(|x| ![a, b2, c].contains(x)).unwrap();
+                    orders += 1;
+                    let mut b = Board::default();
+                    for i in [a, b2, c, d] {
+                        b.apply(Msg { seq: Some(i as u64 + 1), ..hook(1, events[i], None) });
+                    }
+                    assert_eq!(b.get(1).state, State::Done, "{:?}", [a, b2, c, d]);
+                    assert_eq!(b.get(1).prompts, u64::from(a == 0), "a late prompt doesn't count");
+                }
+            }
+        }
+        assert_eq!(orders, 24);
+        let lim = |p| Some(Limit { used_pct: p, resets_at: 0 });
+        let mut b = Board::default();
+        b.apply(Msg { seq: Some(5), ..status(1, None, lim(20.0)) });
+        assert!(!b.apply(Msg { seq: Some(4), ..status(1, None, lim(10.0)) }), "older status dropped");
+        assert_eq!(b.five_hour.map(|l| l.used_pct), Some(20.0));
+        let mut b = Board::default();
+        b.apply(hook(1, "Stop", None));
+        b.apply(hook(1, "PostToolUse", None));
+        assert_eq!(b.get(1).state, State::Working, "native: arrival order");
     }
 
     /// One notification per change into NeedsYou/Done; the PermissionRequest's detail survives the generic
@@ -664,6 +878,7 @@ mod tests {
     fn status(tab: u32, ctx: Option<f32>, five: Option<Limit>) -> Msg {
         Msg {
             tab,
+            seq: None,
             kind: Kind::Status {
                 model: Some("Opus 5.5".into()),
                 context_pct: ctx,
@@ -839,8 +1054,11 @@ mod tests {
     #[test]
     fn session_ids_and_failed_resume() {
         let mut b = Board::default();
-        let argv =
-            |args: &[&str]| Msg { tab: 1, kind: Kind::Argv { args: args.iter().map(|s| s.to_string()).collect() } };
+        let argv = |args: &[&str]| Msg {
+            tab: 1,
+            seq: None,
+            kind: Kind::Argv { args: args.iter().map(|s| s.to_string()).collect() },
+        };
         // /clear: SessionEnd(old) then SessionStart(new) — as observed on claude 2.1.318.
         b.apply(argv(&["--model", "haiku"]));
         b.apply(hook_id(1, "SessionStart", None, "old"));
@@ -903,6 +1121,7 @@ mod tests {
             bin: "/run/x/bin".into(),
             zdotdir: "/run/x/zsh".into(),
             helper: "/opt/it's/dirigent-hook".into(),
+            wsl_tabs: Default::default(),
         };
         let v: serde_json::Value = serde_json::from_str(&hub.settings_json(4)).unwrap();
         assert_eq!(v["statusLine"]["command"], r#"'/opt/it'\''s/dirigent-hook' '/run/x/sock' 4 status"#);
@@ -1090,6 +1309,43 @@ mod tests {
         let _ = std::fs::remove_dir_all(&d);
     }
 
+    /// A WSL tab: Linux paths throughout, the Unix settings shape with the Linux helper, everything named in WSLENV.
+    #[test]
+    fn wsl_session_shape() {
+        let (env, settings) =
+            wsl_session("/mnt/c/T/dirigent-9", "/mnt/c/D/dirigent-hook.exe", "dirigent-hook-9", 4, true);
+        let get = |k: &str| env.iter().find(|(n, _)| n == k).map(|(_, v)| v.as_str());
+        assert_eq!(get("DIRIGENT_BIN"), Some("/mnt/c/T/dirigent-9/bin-wsl"));
+        assert_eq!(get("DIRIGENT_RELAY"), Some("/mnt/c/D/dirigent-hook.exe"));
+        assert_eq!(get("DIRIGENT_CLAUDE_SETTINGS"), Some("/mnt/c/T/dirigent-9/tab-4-wsl.json"));
+        let names: Vec<&str> = env.iter().map(|(n, _)| n.as_str()).filter(|n| *n != "WSLENV").collect();
+        assert_eq!(get("WSLENV"), Some(names.join(":").as_str()), "every value crosses into WSL");
+        assert!(!names.contains(&"PATH"), "Linux PATH is the distro's own; the start script puts the shim first");
+        let (name, json) = settings.unwrap();
+        assert_eq!(name, "tab-4-wsl.json");
+        let v: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(
+            v["statusLine"]["command"],
+            "'/mnt/c/T/dirigent-9/bin-wsl/dirigent-hook' 'dirigent-hook-9' 4 status"
+        );
+        assert_eq!(v["hooks"]["Stop"][0]["hooks"][0]["async"], true);
+        let (env, settings) = wsl_session("/mnt/c/T/d", "/r", "p", 4, false);
+        assert!(settings.is_none() && !env.iter().any(|(n, _)| n == "DIRIGENT_CLAUDE_SETTINGS"), "no Linux helper");
+    }
+
+    #[test]
+    fn hooks_from_wsl_name_paths_in_the_distro() {
+        let mut k = real(1, "hook_PostToolUse_Edit").kind;
+        if let Kind::Hook { cwd, path, .. } = &mut k {
+            *cwd = Some("/home/x/repo".into());
+            *path = Some("/mnt/c/w/a.rs".into());
+        }
+        in_distro(&mut k, "Ubuntu");
+        let Kind::Hook { cwd, path, .. } = k else { unreachable!() };
+        assert_eq!(cwd.as_deref(), Some(r"\\wsl.localhost\Ubuntu\home\x\repo"));
+        assert_eq!(path.as_deref(), Some(r"C:\w\a.rs"));
+    }
+
     #[test]
     #[cfg(windows)]
     fn settings_file_shape_windows() {
@@ -1101,6 +1357,8 @@ mod tests {
             bin: r"C:\T\dirigent-9\bin".into(),
             zdotdir: r"C:\T\dirigent-9\zsh".into(),
             helper: r"C:\Program Files\Dirigent\dirigent-hook.exe".into(),
+            wsl_tabs: Default::default(),
+            wsl: None,
         };
         let v: serde_json::Value = serde_json::from_str(&hub.settings_json(4)).unwrap();
         let stop = &v["hooks"]["Stop"][0]["hooks"][0];
@@ -1110,6 +1368,61 @@ mod tests {
         assert_eq!(v["hooks"].as_object().unwrap().len(), 9);
         let line = hook::shell::status_command("dirigent-hook-9", 4);
         assert_eq!(v["statusLine"]["command"], line.as_str());
+    }
+
+    /// WSL (`DIRIGENT_TEST_WSL` distro, `DIRIGENT_TEST_WSL_HOOK` the Linux helper): a session started the way the app
+    /// does (`wsl-start.sh` through the user's bash) has the shim first on PATH and reports its cwd at every prompt
+    /// (any host); the prompt callback runs. Skipped with a note without a distro.
+    #[test]
+    #[cfg(windows)]
+    fn wsl_session_has_the_shim_and_reports_its_cwd() {
+        let (Ok(distro), Ok(linux_hook)) =
+            (std::env::var("DIRIGENT_TEST_WSL"), std::env::var("DIRIGENT_TEST_WSL_HOOK"))
+        else {
+            eprintln!("DIRIGENT_TEST_WSL / DIRIGENT_TEST_WSL_HOOK unset: WSL session test skipped");
+            return;
+        };
+        // SAFETY: only this test reads the variable (Windows' environment calls are serialized).
+        unsafe { std::env::set_var("DIRIGENT_WSL_HOOK", &linux_hook) };
+        let d = std::env::temp_dir().join(format!("dirigent-wsl-session-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        let hub = Hub::start_in(crate::changes::Tracker::new().0, d.clone(), helper_bin()).unwrap();
+        let env = hub.wsl_env(5, &distro).unwrap();
+        let bin = env.iter().find(|(k, _)| k == "DIRIGENT_BIN").unwrap().1.clone();
+        let mut cmd = session::CommandBuilder::new("wsl.exe");
+        cmd.args(["-d", &distro, "--cd", "/tmp", "-e", "sh", &hub.wsl_start().unwrap()]);
+        for (k, v) in &env {
+            cmd.env(k, v);
+        }
+        let prompts = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let p2 = prompts.clone();
+        let opts = session::Opts {
+            any_host: true,
+            on_prompt: Some(Box::new(move || {
+                p2.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            })),
+        };
+        let size = session::Size { cols: 200, rows: 30, cell_width: 8, cell_height: 16 };
+        let s = session::Session::spawn_command_with(cmd, &d, size, opts).unwrap();
+        let dir = format!("/tmp/dirigent-wsl-cd-{}", std::process::id());
+        s.write(format!("mkdir -p {dir} && cd {dir} && command -v claude > which\r").as_bytes());
+        let want = PathBuf::from(dir.replace('/', "\\"));
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(90);
+        while s.take_cwd_change().as_ref() != Some(&want) {
+            assert!(std::time::Instant::now() < deadline, "no cwd report for {dir}");
+            std::thread::sleep(std::time::Duration::from_millis(100));
+        }
+        assert!(prompts.load(std::sync::atomic::Ordering::Relaxed) >= 2, "the prompt callback runs at every prompt");
+        let which = std::process::Command::new("wsl.exe")
+            .args(["-d", &distro, "-e", "cat", &format!("{dir}/which")])
+            .output()
+            .unwrap();
+        assert_eq!(String::from_utf8_lossy(&which.stdout).trim(), format!("{bin}/claude"), "the shim comes first");
+        let _ = std::process::Command::new("wsl.exe").args(["-d", &distro, "-e", "rm", "-rf", &dir]).status();
+        drop(s);
+        drop(hub);
+        let _ = std::fs::remove_dir_all(&d);
     }
 
     /// Windows: the lines a new session types, typed into real PowerShell 5.1 / 7 and cmd sessions (our shell setup,

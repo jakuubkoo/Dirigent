@@ -12,6 +12,8 @@ imara-diff = "=0.2.0"
 # Content search; both already in the dependency graph (via ignore).
 regex = "1"
 memchr = "2"
+# The per-distro git server for repos inside WSL (`wsl.rs`); std only.
+gitserve.workspace = true
 
 [target.'cfg(unix)'.dependencies]
 # setsid/kill for network commands (already in the graph).

@@ -82,6 +82,8 @@ struct Repo {
     status: Option<Arc<Status>>,
     received: Option<Arc<AtomicU64>>,
     settled: u64,
+    /// A repo without watches (inside WSL): its agents' hooks refresh it instead.
+    touch: Option<git::Toucher>,
 }
 
 #[derive(Default)]
@@ -119,6 +121,11 @@ impl Tracker {
     /// The watcher's event counter for `root` (when it starts).
     pub fn add_repo(&self, root: &Path, received: Arc<AtomicU64>) {
         self.inner.lock().unwrap().repos.entry(root.to_path_buf()).or_default().received = Some(received);
+    }
+
+    /// `root` has no watches (inside WSL): agent steps in it refresh its status and file trees.
+    pub fn set_toucher(&self, root: &Path, touch: git::Toucher) {
+        self.inner.lock().unwrap().repos.entry(root.to_path_buf()).or_default().touch = Some(touch);
     }
 
     pub fn remove_repo(&self, root: &Path) {
@@ -241,6 +248,14 @@ impl Tracker {
         }
         if changed {
             g.sets_dirty = true;
+        }
+        // An unwatched repo: what the agent did is in the status only after a refresh (a written file's dir also
+        // goes to file trees). After the Bash bookkeeping above, so a command's target is reached by this refresh.
+        let refresh = matches!(event.as_str(), "PostToolUse" | "UserPromptSubmit" | "Stop" | "StopFailure");
+        if let Some(touch) = g.tabs.get(&tab).and_then(|t| g.repos.get(t.repo.as_ref()?)?.touch.as_ref())
+            && refresh
+        {
+            touch.touch(path.iter().filter_map(|p| Path::new(p).parent().map(Path::to_path_buf)).collect());
         }
         // Every hook of the tab is a chance to settle its finished commands (no timers).
         changed |= resolve(g, now);

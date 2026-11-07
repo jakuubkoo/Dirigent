@@ -180,6 +180,56 @@ fn reports_the_flags_to_the_app() {
     let _ = std::fs::remove_dir_all(&d);
 }
 
+/// Inside WSL the report goes through the relay (`DIRIGENT_RELAY`, here a script that keeps what it got): it arrives
+/// with its `seq`, and the relay is never left a zombie child of claude (the shim's pid after the exec; a stand-in
+/// that never reaps children, as claude doesn't).
+#[test]
+#[cfg(target_os = "linux")]
+fn relayed_report_leaves_no_zombie() {
+    use std::os::unix::fs::PermissionsExt;
+    let d = tmpdir("relay");
+    let (me, _) = layout(&d);
+    let shim_dir = me.parent().unwrap();
+    let real = d.join("real-sh");
+    std::fs::create_dir_all(&real).unwrap();
+    let (relayed, settings) = (d.join("relayed"), d.join("s.json"));
+    let script = |p: &Path, body: String| {
+        std::fs::write(p, format!("#!/bin/sh\n{body}\n")).unwrap();
+        std::fs::set_permissions(p, std::fs::Permissions::from_mode(0o755)).unwrap();
+    };
+    script(&real.join("claude"), "exec sleep 5".into());
+    let relay = d.join("relay.sh");
+    script(&relay, format!("cat > '{}.tmp' && mv '{0}.tmp' '{0}'", relayed.display()));
+    std::fs::write(&settings, "{}").unwrap();
+    let mut child = Command::new(&me)
+        .args(["--model", "x"])
+        .env("PATH", path(&[shim_dir, &real, Path::new("/usr/bin"), Path::new("/bin")]))
+        .env("DIRIGENT_BIN", shim_dir)
+        .env("DIRIGENT_CLAUDE_SETTINGS", &settings)
+        .env("DIRIGENT_SOCKET", "dirigent-hook-1")
+        .env("DIRIGENT_TAB_ID", "3")
+        .env("DIRIGENT_RELAY", &relay)
+        .env_remove("DIRIGENT_PROMPT_FILE")
+        .env_remove("DIRIGENT_ARGS_FILE")
+        .spawn()
+        .unwrap();
+    let started = std::time::Instant::now();
+    while !relayed.is_file() {
+        assert!(started.elapsed() < std::time::Duration::from_secs(5), "the relay never ran");
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    std::thread::sleep(std::time::Duration::from_millis(300)); // the relay exits
+    let ps = Command::new("ps").args(["-o", "stat=", "--ppid", &child.id().to_string()]).output().unwrap();
+    let states = String::from_utf8_lossy(&ps.stdout).into_owned();
+    let _ = child.kill();
+    let _ = child.wait();
+    assert!(!states.lines().any(|s| s.trim_start().starts_with('Z')), "zombie child of claude: {states:?}");
+    let msg: hook::Msg = serde_json::from_slice(&std::fs::read(&relayed).unwrap()).unwrap();
+    assert_eq!(msg.kind, hook::Kind::Argv { args: vec!["--model".into(), "x".into()] });
+    assert!(msg.seq.is_some(), "relayed messages carry seq");
+    let _ = std::fs::remove_dir_all(&d);
+}
+
 #[cfg(unix)]
 fn app(d: &Path) -> (String, std::sync::mpsc::Receiver<Vec<u8>>) {
     let path = d.join("app.sock");

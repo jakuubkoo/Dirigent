@@ -151,6 +151,15 @@ pub struct Session {
     size: Arc<Mutex<Size>>,
 }
 
+/// Extras for `spawn_command_with`; the defaults are `spawn_command`'s behavior.
+#[derive(Default)]
+pub struct Opts {
+    /// Accept a cwd report (OSC 7) naming any host: the shell runs on this machine under another hostname (WSL).
+    pub any_host: bool,
+    /// Runs on the reader thread at every cwd report, i.e. every prompt, changed or not.
+    pub on_prompt: Option<Box<dyn Fn() + Send>>,
+}
+
 #[derive(Default)]
 struct Flags {
     visible: AtomicBool,
@@ -177,8 +186,12 @@ impl Session {
         Self::spawn_command(cmd, cwd, size)
     }
 
+    pub fn spawn_command(cmd: CommandBuilder, cwd: &Path, size: Size) -> std::io::Result<Self> {
+        Self::spawn_command_with(cmd, cwd, size, Opts::default())
+    }
+
     // ponytail: one reader thread per session; fine for tens of sessions, switch to one poll(2) thread for hundreds.
-    pub fn spawn_command(mut cmd: CommandBuilder, cwd: &Path, size: Size) -> std::io::Result<Self> {
+    pub fn spawn_command_with(mut cmd: CommandBuilder, cwd: &Path, size: Size, opts: Opts) -> std::io::Result<Self> {
         let pair = native_pty_system().openpty(size.pty()).map_err(io_err)?;
         cmd.env("TERM", "xterm-256color");
         cmd.env("COLORTERM", "truecolor");
@@ -200,6 +213,7 @@ impl Session {
             let mut parser: Processor = Processor::new();
             let mut buf = vec![0u8; 64 * 1024];
             let (mut scanner, host) = (osc7::Scanner::default(), osc7::hostname());
+            let Opts { any_host, on_prompt } = opts;
             loop {
                 let n = match reader.read(&mut buf) {
                     Ok(0) | Err(_) => break, // EOF / EIO when the shell exits
@@ -207,7 +221,13 @@ impl Session {
                 };
                 flags2.output.fetch_add(1, Ordering::Relaxed);
                 // The shell's prompt hook reports its cwd every prompt; only a real change wakes the UI, hidden or not.
-                let moved = scanner.scan(&buf[..n]).and_then(|p| osc7::parse(&p, &host)).is_some_and(|dir| {
+                let reported = scanner
+                    .scan(&buf[..n])
+                    .and_then(|p| if any_host { osc7::parse_any_host(&p) } else { osc7::parse(&p, &host) });
+                if let (Some(_), Some(f)) = (&reported, &on_prompt) {
+                    f();
+                }
+                let moved = reported.is_some_and(|dir| {
                     let mut cwd = flags2.cwd.lock().unwrap();
                     let changed = cwd.as_ref() != Some(&dir);
                     if changed {
@@ -467,10 +487,13 @@ mod tests {
     #[cfg(unix)]
     fn exit_is_reported_with_code() {
         let s = Session::spawn_command(sh("exit 3"), Path::new("/"), SIZE).unwrap();
-        let pid = s.pid().unwrap();
+        // None when the shell already exited and was reaped (the reader thread took the child): nothing to check.
+        let pid = s.pid();
         wait_until("exit", || s.is_exited() && s.wakeups.is_closed());
         assert_eq!(s.exit_code(), Some(3));
-        assert!(!Path::new(&format!("/proc/{pid}")).exists(), "exited shell must be reaped, not a zombie");
+        if let Some(pid) = pid {
+            assert!(!Path::new(&format!("/proc/{pid}")).exists(), "exited shell must be reaped, not a zombie");
+        }
     }
 
     #[test]

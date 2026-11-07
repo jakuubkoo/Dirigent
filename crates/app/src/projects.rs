@@ -433,13 +433,23 @@ pub fn match_project(query: &str, name: &str, path: &str) -> Option<(i32, Vec<us
     }
 }
 
-/// Path mode: the query starts like a path.
+/// Path mode: the query starts like a path (Windows also a WSL distro's: `\\wsl.localhost\…`, `wsl://…`).
 pub fn is_path_query(q: &str) -> bool {
-    q.starts_with('/') || q.starts_with('~') || q.starts_with('.')
+    q.starts_with('/') || q.starts_with('~') || q.starts_with('.') || wsl_query(q)
+}
+
+fn wsl_query(q: &str) -> bool {
+    cfg!(windows) && (q.starts_with(r"\\") || q.starts_with("//") || q.starts_with("wsl://"))
 }
 
 /// Splits a typed path into (directory to list, last segment to match): `~/Code/ag` → (`$HOME/Code`, `ag`).
 pub fn split_path_query(q: &str, home: &Path, cwd: &Path) -> (PathBuf, String) {
+    if wsl_query(q) {
+        let i = q.rfind(['/', '\\']).unwrap_or(0);
+        let dir = &q[..=i];
+        let dir = git::wsl::parse(dir).map_or_else(|| PathBuf::from(dir), |(d, l)| git::wsl::to_windows(&d, &l));
+        return (dir, q[i + 1..].to_string());
+    }
     let (dir, seg) = match q.rfind('/') {
         Some(i) => (&q[..=i], &q[i + 1..]),
         None if q == "~" => ("~/", ""),
@@ -701,5 +711,14 @@ mod tests {
         assert_eq!(common_prefix(&["code-old", "code-new"]), "code-");
         assert_eq!(common_prefix(&["Code", "code-old"]), "");
         assert_eq!(common_prefix(&[]), "");
+        if cfg!(windows) {
+            let ub = |p: &str| PathBuf::from(format!(r"\\wsl.localhost\Ubuntu{p}"));
+            for q in [r"\\wsl.localhost\Ubuntu\home\ag", r"\\wsl$\Ubuntu\home/ag", "wsl://Ubuntu/home/ag"] {
+                assert!(is_path_query(q));
+                assert_eq!(split_path_query(q, home, cwd), (ub(r"\home"), "ag".into()), "{q}");
+            }
+        } else {
+            assert!(!is_path_query("wsl://Ubuntu/home"), "Linux: a project name");
+        }
     }
 }

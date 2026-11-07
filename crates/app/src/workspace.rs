@@ -111,6 +111,14 @@ struct Tab {
     remember: bool,
     /// A linked worktree's main checkout (its sidebar group, its project); also the hint for unspawned tabs.
     main_root: Option<PathBuf>,
+    /// Windows: the WSL distro its shell runs in (a tab started in `\\wsl.localhost\<distro>\…`); its cwd reports
+    /// and hooks name Linux paths, mapped into the distro.
+    wsl: Option<String>,
+    /// Keeps `wsl`'s git server up while the tab is open.
+    _wsl_server: Option<git::wsl::Hold>,
+    /// Refreshes the tab's repo when it has no watches (inside WSL): the shell's prompt reports call it.
+    #[cfg_attr(not(windows), allow(dead_code))]
+    touch: Arc<std::sync::Mutex<Option<git::Toucher>>>,
 }
 
 /// Project defaults dialog: start claude, its flags, the setup command for new worktrees, where worktrees go.
@@ -703,6 +711,11 @@ impl Workspace {
                 };
                 let i = this.add_tab(custom, t.cwd, t.claude_session, t.claude_args, t.expanded);
                 this.tabs[i].auto = t.auto;
+                if let Some(d) = &t.wsl {
+                    this.tabs[i]._wsl_server = Some(git::wsl::Hold::new(d));
+                    this.tabs[i].wsl = t.wsl;
+                    this.tabs[i].dir_missing = false;
+                }
                 if let Some(c) = t.changes {
                     this.tracker.restore(this.tabs[i].id as u32, c);
                 }
@@ -1181,7 +1194,9 @@ impl Workspace {
     ) -> usize {
         let id = self.next_id;
         self.next_id += 1;
-        let dir_missing = !cwd.is_dir();
+        // Inside WSL: never probed here (a stopped distro takes seconds to start; the UI must not wait).
+        let wsl = git::wsl::of(&cwd).map(|(d, _)| d);
+        let dir_missing = wsl.is_none() && !cwd.is_dir();
         self.tabs.push(Tab {
             id,
             custom: name,
@@ -1202,6 +1217,9 @@ impl Workspace {
             remember: false,
             syntax: Default::default(),
             main_root: None,
+            _wsl_server: wsl.as_deref().map(git::wsl::Hold::new),
+            wsl,
+            touch: Default::default(),
         });
         self.tabs.len() - 1
     }
@@ -1224,6 +1242,14 @@ impl Workspace {
     }
 
     fn new_view(&mut self, id: usize, dir: &Path, _: &mut Window, cx: &mut Context<Self>) -> Entity<TerminalView> {
+        #[cfg(windows)]
+        if let Some(session) = self.spawn_wsl(id, dir) {
+            if self.settings.scrollback != Settings::default().scrollback {
+                session.set_scrollback(self.settings.scrollback);
+            }
+            let (metrics, ws) = (self.metrics.clone(), cx.entity().downgrade());
+            return cx.new(|cx| TerminalView::new(session, metrics, ws, cx));
+        }
         let env = match &self.agents {
             Some(hub) => hub.session_env(id as u32).unwrap_or_else(|e| {
                 eprintln!("dirigent: no Claude Code hooks for session {id}: {e}");
@@ -1263,6 +1289,42 @@ impl Workspace {
         }
         let (metrics, ws) = (self.metrics.clone(), cx.entity().downgrade());
         cx.new(|cx| TerminalView::new(session, metrics, ws, cx))
+    }
+
+    /// A WSL tab's shell: `wsl.exe -d <distro> --cd <dir> -e sh <start script>` (`agent::WSL_START`), started in
+    /// the runtime dir (a UNC cwd isn't one Windows starts processes in). None: not a WSL tab, or wsl.exe failed
+    /// (then the tab gets the Windows shell).
+    #[cfg(windows)]
+    fn spawn_wsl(&mut self, id: usize, dir: &Path) -> Option<Session> {
+        let t = self.tabs.iter_mut().find(|t| t.id == id)?;
+        let distro = t.wsl.clone()?;
+        let linux = git::wsl::to_linux(&dir.to_string_lossy()).unwrap_or_else(|| "~".into());
+        let mut cmd = session::CommandBuilder::new("wsl.exe");
+        cmd.args(["-d", &distro, "--cd", &linux]);
+        cmd.env_remove("WSL_UTF8");
+        match self.agents.as_ref().map(|hub| (hub.wsl_env(id as u32, &distro), hub.wsl_start())) {
+            Some((Ok(env), Some(start))) => {
+                cmd.args(["-e", "sh", &start]);
+                for (k, v) in &env {
+                    cmd.env(k, v);
+                }
+            }
+            Some((Err(e), _)) => eprintln!("dirigent: no Claude Code hooks for WSL session {id}: {e}"),
+            _ => eprintln!("dirigent: WSL session {id} starts without Dirigent's shell integration"),
+        }
+        t.syntax = crate::projects::Syntax::Posix;
+        let touch = t.touch.clone();
+        let opts = session::Opts {
+            any_host: true,
+            on_prompt: Some(Box::new(move || {
+                if let Some(t) = touch.lock().unwrap().as_ref() {
+                    t.touch(Vec::new());
+                }
+            })),
+        };
+        Session::spawn_command_with(cmd, &agent::runtime_dir(), self.applied, opts)
+            .map_err(|e| eprintln!("dirigent: couldn't start WSL ({distro}): {e}"))
+            .ok()
     }
 
     fn activate(&mut self, idx: usize, window: &mut Window, cx: &mut Context<Self>) {
@@ -2039,6 +2101,7 @@ impl Workspace {
                     claude_args: t.claude_args.clone(),
                     expanded: t.tree.expanded.iter().cloned().collect(),
                     changes: self.tracker.saved(t.id as u32),
+                    wsl: t.wsl.clone(),
                 })
                 .collect(),
             active: self.active.min(self.tabs.len().saturating_sub(1)),
@@ -2064,8 +2127,8 @@ impl Workspace {
 
     /// Startup: drop saved Claude sessions whose transcript is gone (checked off the UI thread, once).
     fn check_resumable(&mut self, cx: &mut Context<Self>) {
-        let ids: Vec<(usize, String)> =
-            self.tabs.iter().filter_map(|t| Some((t.id, t.claude_session.clone()?))).collect();
+        let ids: Vec<(usize, String, Option<String>)> =
+            self.tabs.iter().filter_map(|t| Some((t.id, t.claude_session.clone()?, t.wsl.clone()))).collect();
         if ids.is_empty() {
             return;
         }
@@ -2073,7 +2136,10 @@ impl Workspace {
             let gone: Vec<usize> = cx
                 .background_executor()
                 .spawn(async move {
-                    ids.into_iter().filter(|(_, s)| !persist::transcript_exists(s)).map(|(id, _)| id).collect()
+                    ids.into_iter()
+                        .filter(|(_, s, wsl)| !persist::transcript_exists(s, wsl.as_deref()))
+                        .map(|(id, _, _)| id)
+                        .collect()
                 })
                 .await;
             if gone.is_empty() {
@@ -2112,8 +2178,10 @@ impl Workspace {
         let (agent::State::Working, Some(sid)) = (a.state, a.session_id) else { return };
         tab.interrupt_gen += 1;
         let (id, generation, prompts, board) = (tab.id, tab.interrupt_gen, a.prompts, hub.board.clone());
+        let wsl = tab.wsl.clone();
         cx.spawn(async move |this, cx| {
-            let path = cx.background_executor().spawn(async move { persist::transcript_path(&sid) }).await;
+            let path =
+                cx.background_executor().spawn(async move { persist::transcript_path(&sid, wsl.as_deref()) }).await;
             let start = Instant::now();
             let (mut seq, mut quiet_since) = (session.output_seq(), start);
             while start.elapsed() < WATCH {
@@ -2168,11 +2236,11 @@ impl Workspace {
     }
 
     fn resume_tabs(&mut self, tabs: Vec<usize>, cx: &mut Context<Self>) {
-        let jobs: Vec<(usize, String, Typed)> = tabs
+        let jobs: Vec<(usize, String, Typed, Option<String>)> = tabs
             .into_iter()
             .filter_map(|i| {
                 let t = &self.tabs[i];
-                Some((t.id, t.claude_session.clone()?, resume_command(t)?))
+                Some((t.id, t.claude_session.clone()?, resume_command(t)?, t.wsl.clone()))
             })
             .collect();
         cx.spawn(async move |this, cx| {
@@ -2180,8 +2248,8 @@ impl Workspace {
                 .background_executor()
                 .spawn(async move {
                     jobs.into_iter()
-                        .map(|(id, s, a)| {
-                            let ok = persist::transcript_exists(&s);
+                        .map(|(id, s, a, wsl)| {
+                            let ok = persist::transcript_exists(&s, wsl.as_deref());
                             (id, s, a, ok)
                         })
                         .collect()
@@ -2295,6 +2363,7 @@ impl Workspace {
     fn repo_resolved(&mut self, id: usize, generation: u64, found: git::Discovery, cx: &mut Context<Self>) {
         // Tab closed meanwhile, or a newer resolve is running: nothing to do (nothing was acquired yet).
         let Some(t) = self.tabs.iter_mut().find(|t| t.id == id && t.repo_gen == generation) else { return };
+        let touch = t.touch.clone();
         let new = match &found {
             git::Discovery::Repo(r) => TabRepo::Repo(r.root.clone()),
             git::Discovery::NotRepo => TabRepo::NotRepo,
@@ -2337,7 +2406,11 @@ impl Workspace {
             self.mark_dirty(cx);
         }
         if let git::Discovery::Repo(r) = found {
+            let root = r.root.clone();
             self.repos.acquire(r);
+            *touch.lock().unwrap() = self.repos.toucher(&root);
+        } else {
+            *touch.lock().unwrap() = None;
         }
         self.sync_panel(cx);
         cx.notify();
@@ -2360,6 +2433,10 @@ impl Workspace {
 
     pub fn shell_cwd_changed(&mut self, view_id: EntityId, dir: PathBuf, cx: &mut Context<Self>) {
         if let Some(i) = self.tab_of_view(view_id) {
+            let dir = match &self.tabs[i].wsl {
+                Some(distro) => from_wsl_shell(distro, dir),
+                None => dir,
+            };
             self.set_cwd(i, dir, cx);
         }
     }
@@ -3540,6 +3617,13 @@ fn with_pinned(
     groups
 }
 
+/// A cwd a WSL shell reported (`\home\x`, a Linux path: `session` doesn't know the distro) as the app's path in
+/// `distro`; `/mnt/c/x` becomes `C:\x`.
+fn from_wsl_shell(distro: &str, dir: PathBuf) -> PathBuf {
+    let s = dir.to_string_lossy();
+    if s.starts_with('\\') && !s.starts_with(r"\\") { git::wsl::to_windows(distro, &s.replace('\\', "/")) } else { dir }
+}
+
 pub(crate) fn home() -> PathBuf {
     std::env::home_dir().unwrap_or_else(|| PathBuf::from("/"))
 }
@@ -3622,9 +3706,14 @@ fn claude_typed(
     args: &[String],
     prompt: Option<(PathBuf, String)>,
 ) -> Option<Typed> {
-    let args_file = (cfg!(windows) && claude && !args.is_empty()).then(|| agent::args_file(t.id));
-    let prompt_file = prompt.as_ref().map(|(p, _)| p.as_path());
-    let line = crate::projects::start_line(t.syntax, setup, claude, args, prompt_file, args_file.as_deref())?;
+    // A WSL shell gets the flags typed (bash quoting reaches Linux claude intact) and the prompt file's Linux path.
+    let args_file = (cfg!(windows) && t.wsl.is_none() && claude && !args.is_empty()).then(|| agent::args_file(t.id));
+    let prompt_file = prompt.as_ref().map(|(p, _)| match t.wsl {
+        Some(_) => agent::linux_path(p).map_or_else(|| p.clone(), PathBuf::from),
+        None => p.clone(),
+    });
+    let line =
+        crate::projects::start_line(t.syntax, setup, claude, args, prompt_file.as_deref(), args_file.as_deref())?;
     let mut files: Vec<(PathBuf, String)> = prompt.into_iter().collect();
     files.extend(args_file.map(|f| (f, serde_json::to_string(args).unwrap_or_default())));
     Some(Typed { line, files })
@@ -3663,8 +3752,18 @@ fn is_default_name(name: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{fmt_remaining, group_order, is_default_name, reorder, sh_word, with_pinned};
+    use super::{fmt_remaining, from_wsl_shell, group_order, is_default_name, reorder, sh_word, with_pinned};
     use std::path::PathBuf;
+
+    #[test]
+    fn wsl_shell_cwds_land_in_the_distro() {
+        assert_eq!(
+            from_wsl_shell("Ubuntu", r"\home\x\a b".into()),
+            PathBuf::from(r"\\wsl.localhost\Ubuntu\home\x\a b")
+        );
+        assert_eq!(from_wsl_shell("Ubuntu", r"\mnt\c\Code".into()), PathBuf::from(r"C:\Code"));
+        assert_eq!(from_wsl_shell("Ubuntu", r"C:\x".into()), PathBuf::from(r"C:\x"), "already a Windows path");
+    }
 
     #[test]
     fn old_default_names_become_automatic() {

@@ -1722,6 +1722,7 @@ checksum = "1033caf0b349c518623b5396bfb2cf0bddf44f0306d543a250e5743297aafd10"
 name = "git"
 version = "0.3.0"
 dependencies = [
+ "gitserve",
  "ignore",
  "imara-diff",
  "libc",
@@ -1729,6 +1730,13 @@ dependencies = [
  "notify",
  "regex",
  "windows-sys 0.61.2",
+]
+
+[[package]]
+name = "gitserve"
+version = "0.3.0"
+dependencies = [
+ "libc",
 ]
 
 [[package]]
@@ -2263,6 +2271,8 @@ dependencies = [
 name = "hook"
 version = "0.3.0"
 dependencies = [
+ "gitserve",
+ "libc",
  "serde",
  "serde_json",
  "session",

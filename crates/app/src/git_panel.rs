@@ -75,6 +75,9 @@ impl Repos {
         match git::Watcher::start(repo.clone(), on_update) {
             Ok(watcher) => {
                 self.tracker.add_repo(&repo.root, watcher.received());
+                if git::wsl::of(&repo.root).is_some() {
+                    self.tracker.set_toucher(&repo.root, watcher.toucher());
+                }
                 self.map.insert(repo.root.clone(), Entry { repo, watcher, tabs: 1, index });
             }
             Err(e) => eprintln!("dirigent: can't watch {}: {e}", repo.root.display()),
@@ -126,6 +129,11 @@ impl Repos {
 
     pub fn roots(&self) -> impl Iterator<Item = &PathBuf> {
         self.map.keys()
+    }
+
+    /// Refreshes `root` from other threads; only for repos without watches (inside WSL).
+    pub fn toucher(&self, root: &Path) -> Option<git::Toucher> {
+        self.map.get(root).filter(|_| git::wsl::of(root).is_some()).map(|e| e.watcher.toucher())
     }
 
     pub fn refresh(&self, root: &Path) {

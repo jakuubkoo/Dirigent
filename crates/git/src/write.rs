@@ -5,7 +5,6 @@
 //! Hunks are git's: the diff view shows HEAD→worktree hunks; its buttons act on the overlapping hunks of git's
 //! HEAD→index (`--cached`) and index→worktree diffs, recomputed when the action runs.
 
-use std::io::Write as _;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 
@@ -43,9 +42,8 @@ type Result<T> = std::result::Result<T, GitError>;
 /// git for writes: the user's config applies (author, signing, hooks); no `--no-optional-locks` (writes take
 /// locks anyway); output captured for errors.
 pub(crate) fn run(root: &Path, args: &[&str], stdin: Option<&[u8]>) -> Result<String> {
-    let mut c = crate::cmd("git");
+    let mut c = crate::native_or_wsl(root, "git");
     c.args(args)
-        .current_dir(root)
         .env("LC_ALL", "C")
         .env_remove("GIT_DIR")
         .env_remove("GIT_WORK_TREE")
@@ -53,11 +51,8 @@ pub(crate) fn run(root: &Path, args: &[&str], stdin: Option<&[u8]>) -> Result<St
         .stdin(if stdin.is_some() { Stdio::piped() } else { Stdio::null() })
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
-    let mut child = c.spawn().map_err(GitError::Io)?;
-    if let (Some(input), Some(mut pipe)) = (stdin, child.stdin.take()) {
-        pipe.write_all(input).map_err(GitError::Io)?;
-    }
-    let out = child.wait_with_output().map_err(GitError::Io)?;
+    // Never retried: a commit or apply may have happened before its server died.
+    let out = crate::exec::output(&mut c, stdin, crate::exec::WRITE_TIMEOUT, false).map_err(GitError::Io)?;
     let stdout = String::from_utf8_lossy(&out.stdout).into_owned();
     if out.status.success() {
         return Ok(stdout);
@@ -67,6 +62,14 @@ pub(crate) fn run(root: &Path, args: &[&str], stdin: Option<&[u8]>) -> Result<St
         return Err(GitError::IndexLocked);
     }
     Err(GitError::Failed(format!("{stdout}{stderr}")))
+}
+
+/// A path as an argument to git run in `root`: its Linux form when git runs inside a WSL distro.
+fn arg_path(root: &Path, path: &Path) -> String {
+    match crate::wsl::of(root) {
+        Some(_) => crate::wsl::to_linux(&path.to_string_lossy()).unwrap_or_else(|| path.to_string_lossy().into()),
+        None => path.to_string_lossy().into(),
+    }
 }
 
 fn has_head(root: &Path) -> bool {
@@ -149,6 +152,9 @@ pub fn trash(path: &Path) -> Result<()> {
         return Err(GitError::Failed("trash must not run on the UI thread".into()));
     }
     let fail = |why: &str| GitError::Failed(format!("Couldn't move {} to the Recycle Bin: {why}", path.display()));
+    if crate::wsl::of(path).is_some() {
+        return Err(fail("files inside WSL have no Recycle Bin. Nothing was deleted"));
+    }
     let abs = crate::plain_path(std::path::absolute(path).map_err(GitError::Io)?);
     let wide = |p: &Path| p.as_os_str().encode_wide().chain([0, 0]).collect::<Vec<u16>>();
     let root = abs.ancestors().last().unwrap_or(&abs).to_path_buf();
@@ -555,7 +561,7 @@ pub fn valid_branch(root: &Path, name: &str) -> bool {
 /// `git worktree add -b <branch> <path> <base>`: a new branch from `base` checked out in a new directory. On failure
 /// (branch or path exists, bad base) git leaves nothing behind.
 pub fn worktree_add(root: &Path, branch: &str, path: &Path, base: &str) -> Result<()> {
-    let path = path.to_string_lossy();
+    let path = arg_path(root, path);
     run(root, &["worktree", "add", "-b", branch, &path, base], None).map(drop)
 }
 
@@ -575,17 +581,17 @@ pub struct Worktree {
 /// Every worktree of the repo (also ones made outside the app), main checkout first.
 pub fn worktree_list(root: &Path) -> Result<Vec<Worktree>> {
     let out = run(root, &["worktree", "list", "--porcelain"], None)?;
-    Ok(parse_worktrees(&out))
+    Ok(parse_worktrees(root, &out))
 }
 
-fn parse_worktrees(out: &str) -> Vec<Worktree> {
+fn parse_worktrees(root: &Path, out: &str) -> Vec<Worktree> {
     let mut list: Vec<Worktree> = Vec::new();
     for block in out.split("\n\n").filter(|b| !b.trim().is_empty()) {
         let mut w = Worktree { main: list.is_empty(), ..Default::default() };
         for line in block.lines() {
             let (key, value) = line.split_once(' ').unwrap_or((line, ""));
             match key {
-                "worktree" => w.path = crate::root_key(value),
+                "worktree" => w.path = crate::root_key_in(root, value),
                 "HEAD" => w.head = value.to_string(),
                 "branch" => w.branch = Some(value.strip_prefix("refs/heads/").unwrap_or(value).to_string()),
                 "locked" => w.locked = true,
@@ -623,7 +629,7 @@ pub fn worktree_state(path: &Path, branch: Option<&str>) -> Result<WorktreeState
 /// `git worktree remove [--force] <path>`, run from the main checkout. Never deletes files any other way; without
 /// `force` git refuses a worktree with changes.
 pub fn worktree_remove(main_root: &Path, path: &Path, force: bool) -> Result<()> {
-    let path = path.to_string_lossy();
+    let path = arg_path(main_root, path);
     let mut args = vec!["worktree", "remove"];
     if force {
         args.push("--force");

@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["crates/session", "crates/app", "crates/hook", "crates/git", "crates/syntax"]
+members = ["crates/session", "crates/app", "crates/hook", "crates/git", "crates/syntax", "crates/gitserve"]
 
 [workspace.package]
 # The one version of everything (semver); see RELEASING.md.
@@ -22,6 +22,7 @@ session = { path = "crates/session" }
 hook = { path = "crates/hook" }
 git = { path = "crates/git" }
 syntax = { path = "crates/syntax" }
+gitserve = { path = "crates/gitserve" }
 
 # Cargo ignores a dependency's [patch]: these mirror Zed's root Cargo.toml at the pinned rev.
 [patch.crates-io]
