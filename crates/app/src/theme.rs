@@ -171,23 +171,23 @@ pub struct Theme {
 
 pub static DARK: Theme = Theme {
     bg: Bg {
-        base: hex(0x0c0c0e),
-        panel: hex(0x141417),
-        panel_translucent: hexa(0x141417b8),
-        elevated: hex(0x1b1b1f),
-        hover: hex(0x1f1f24),
-        selected: hex(0x26262c),
-        selected_focus: hex(0x24304d),
-        input: hex(0x0f0f12),
+        base: hex(0x0b0c10),
+        panel: hex(0x181a22),
+        panel_translucent: hexa(0x181a22b8),
+        elevated: hex(0x21242f),
+        hover: hex(0x22262f),
+        selected: hex(0x2f3548),
+        selected_focus: hex(0x29385c),
+        input: hex(0x0e1015),
         scrim: hexa(0x00000080),
     },
-    border: Border { subtle: hexa(0xffffff0f), strong: hexa(0xffffff1f) },
+    border: Border { subtle: hexa(0xc8d2ff14), strong: hexa(0xc8d2ff26) },
     text: Text {
-        primary: hex(0xececf1),
-        muted: hex(0xa1a1aa),
-        dim: hex(0x6b6b76),
-        faint: hex(0x45454d),
-        on_accent: hex(0xffffff),
+        primary: hex(0xeceef4),
+        muted: hex(0xb8bbc6),
+        dim: hex(0x9fa2ad),
+        faint: hex(0x7f828d),
+        on_accent: hex(0x0b0c10),
     },
     accent: hex(0x7c8aff),
     state: States {
@@ -213,19 +213,19 @@ pub static DARK: Theme = Theme {
         del_word_bg: hex(0x6b2a31),
         hunk: hex(0x5f6b8a),
         context: hex(0xc8c8ce),
-        filler: hex(0x101013),
+        filler: hex(0x0f1116),
         clean_del: hex(0xf87171),
         clean_add: hex(0x4ade80),
         clean_del_bg: hexa(0xf8717129),
         clean_add_bg: hexa(0x4ade8029),
         moved: hex(0x60a5fa),
         moved_bg: hexa(0x60a5fa29),
-        gutter: hex(0x45454d),
+        gutter: hex(0x6f7380),
     },
     scrollbar: Scrollbar { thumb: hexa(0xffffff1f), active: hexa(0xffffff47) },
     meter: Meter { track: hexa(0xffffff14), ok: hex(0x7c8aff), warn: hex(0xf5a524), crit: hex(0xf87171) },
     terminal: Terminal {
-        bg: hex(0x0c0c0e),
+        bg: hex(0x0b0c10),
         fg: hex(0xd6d6dc),
         cursor: hex(0xececf1),
         selection: hex(0x2b3b63),
@@ -252,7 +252,7 @@ pub static DARK: Theme = Theme {
         keyword: hex(0xc4a1ff),
         string: hex(0x9ece6a),
         number: hex(0xff9e64),
-        comment: hex(0x6b6b76),
+        comment: hex(0x8a8e9c),
         function: hex(0x7aa2f7),
         r#type: hex(0x5ccfe6),
         variable: hex(0xd6d6dc),
@@ -347,6 +347,108 @@ mod tests {
     fn hex_parsing() {
         assert_eq!(hex(0xff0080), Rgba { r: 1., g: 0., b: 128. / 255., a: 1. });
         assert_eq!(hexa(0xffffff0f).a, 15. / 255.);
+    }
+
+    /// WCAG 2 relative luminance contrast of `fg` (composited over `bg` when translucent) on an opaque `bg`.
+    fn ratio(fg: Rgba, bg: Rgba) -> f32 {
+        let mix = |f: f32, b: f32| f * fg.a + b * (1. - fg.a);
+        let lum = |r: f32, g: f32, b: f32| {
+            let c = |x: f32| if x <= 0.03928 { x / 12.92 } else { ((x + 0.055) / 1.055).powf(2.4) };
+            0.2126 * c(r) + 0.7152 * c(g) + 0.0722 * c(b)
+        };
+        let (a, b) = (lum(mix(fg.r, bg.r), mix(fg.g, bg.g), mix(fg.b, bg.b)), lum(bg.r, bg.g, bg.b));
+        (a.max(b) + 0.05) / (a.min(b) + 0.05)
+    }
+
+    /// Small text 4.5:1 (AA), `text.faint` (ignored files,
+    /// placeholders, disabled controls), line numbers and non-text marks 3:1.
+    #[test]
+    fn contrast() {
+        let mut fails = Vec::new();
+        for (id, t) in [("dark", &DARK)] {
+            let (bg, tx, d) = (&t.bg, &t.text, &t.diff);
+            let ui = [bg.base, bg.panel, bg.elevated, bg.hover, bg.selected, bg.selected_focus];
+            let mut rules: Vec<(String, Rgba, Rgba, f32)> = Vec::new();
+            for (name, c) in [("text.primary", tx.primary), ("text.muted", tx.muted), ("text.dim", tx.dim)] {
+                rules.extend(ui.iter().map(|&b| (name.into(), c, b, 4.5)));
+            }
+            rules.extend(ui.iter().chain([&bg.input]).map(|&b| ("text.faint".into(), tx.faint, b, 3.)));
+            rules.extend([bg.base, d.add_bg, d.del_bg].map(|b| ("diff.gutter".into(), d.gutter, b, 3.)));
+            rules.extend([
+                ("diff.context".into(), d.context, bg.base, 4.5),
+                ("diff.add_fg".into(), d.add_fg, d.add_bg, 4.5),
+                ("diff.del_fg".into(), d.del_fg, d.del_bg, 4.5),
+                ("diff.hunk".into(), d.hunk, bg.base, 3.),
+                ("diff.clean_add".into(), d.clean_add, bg.base, 4.5),
+                ("diff.clean_del".into(), d.clean_del, bg.base, 4.5),
+                ("diff.moved".into(), d.moved, bg.base, 3.),
+                ("text.on_accent".into(), tx.on_accent, t.accent, 4.5),
+                ("text.on_accent on state.error".into(), tx.on_accent, t.state.error, 4.5),
+                ("terminal.fg".into(), t.terminal.fg, t.terminal.bg, 4.5),
+                ("text.primary on search_match".into(), tx.primary, t.search_match, 4.5),
+                ("state.needs_you (text)".into(), t.state.needs_you, bg.panel, 4.5),
+            ]);
+            let sx = &t.syntax;
+            for (name, c) in [
+                ("keyword", sx.keyword),
+                ("string", sx.string),
+                ("number", sx.number),
+                ("comment", sx.comment),
+                ("function", sx.function),
+                ("type", sx.r#type),
+                ("variable", sx.variable),
+                ("constant", sx.constant),
+                ("property", sx.property),
+                ("punctuation", sx.punctuation),
+                ("operator", sx.operator),
+                ("tag", sx.tag),
+                ("attribute", sx.attribute),
+            ] {
+                rules.push((format!("syntax.{name}"), c, bg.base, 4.5));
+            }
+            let g = &t.git;
+            for (name, c) in [
+                ("added", g.added),
+                ("modified", g.modified),
+                ("deleted", g.deleted),
+                ("renamed", g.renamed),
+                ("conflict", g.conflict),
+            ] {
+                rules.extend([bg.panel, bg.hover].map(|b| (format!("git.{name}"), c, b, 4.5)));
+            }
+            let st = &t.state;
+            for (name, c) in [
+                ("working", st.working),
+                ("needs_you", st.needs_you),
+                ("done", st.done),
+                ("done_seen", st.done_seen),
+                ("error", st.error),
+            ] {
+                rules.push((format!("state.{name}"), c, bg.panel, 3.));
+            }
+            rules.extend([bg.panel, bg.selected].map(|b| ("accent".into(), t.accent, b, 3.)));
+            rules.push(("border.strong".into(), t.border.strong, bg.panel, 1.3));
+            // Same-luminance hues pass any ratio: colors that must read as different states also differ in hue.
+            let dist = |a: Rgba, b: Rgba| ((a.r - b.r).powi(2) + (a.g - b.g).powi(2) + (a.b - b.b).powi(2)).sqrt();
+            for (name, a, b) in [
+                ("accent vs state.needs_you", t.accent, st.needs_you),
+                ("accent vs state.error", t.accent, st.error),
+                ("state.needs_you vs state.error", st.needs_you, st.error),
+                ("meter.ok vs meter.warn", t.meter.ok, t.meter.warn),
+                ("meter.warn vs meter.crit", t.meter.warn, t.meter.crit),
+            ] {
+                if dist(a, b) < 0.3 {
+                    fails.push(format!("{id}: {name} too alike ({:.2} < 0.3)", dist(a, b)));
+                }
+            }
+            for (name, fg, b, min) in rules {
+                let r = ratio(fg, b);
+                if r < min {
+                    fails.push(format!("{id}: {name} {r:.2} < {min}"));
+                }
+            }
+        }
+        assert!(fails.is_empty(), "contrast below the thresholds:\n{}", fails.join("\n"));
     }
 
     /// Colors live only here: no other source file may contain a color literal (hex color or a gpui

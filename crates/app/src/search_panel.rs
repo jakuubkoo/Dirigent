@@ -320,7 +320,7 @@ impl Render for SearchPanel {
                                 };
                                 row.pl(z(space::XL))
                                     .font_family(MONO_FONT)
-                                    .child(div().flex_none().text_color(t.text.faint).child(h.line.to_string()))
+                                    .child(div().flex_none().text_color(t.text.dim).child(h.line.to_string()))
                                     .child(
                                         div().min_w_0().text_color(t.text.muted).child(
                                             StyledText::new(SharedString::from(h.text.trim_start().to_string()))

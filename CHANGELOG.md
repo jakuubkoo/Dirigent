@@ -18,6 +18,11 @@ All notable changes to Dirigent are recorded here. The format follows
 
 ### Changed
 
+- Clearer layers and more contrast: the sidebar, main area and right dock are told apart, headers and tab bars are
+  set off from their content, project groups have a stronger header with a divider, and the active session has a
+  bold accent bar on a stronger background, unlike a hovered one. All small text now reaches WCAG AA (4.5:1): hints,
+  line numbers, the Command Center and Settings labels included. Ignored files, placeholders and disabled controls
+  stay faint but readable (3:1). Filled buttons (Publish, Commit) have dark text on the accent color.
 - New session dialog: the first prompt is multi-line and wraps (3 to 10 lines, then it scrolls). Enter adds a line
   there, Ctrl+Enter creates the session. The prompt reaches claude as written (new lines and quotes intact, whatever
   your shell, also behind an alias that adds flags): it goes through a file in the runtime folder that the `claude`

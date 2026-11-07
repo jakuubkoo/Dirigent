@@ -916,7 +916,7 @@ impl SettingsView {
                     .child(label),
             )
             .child(div().text_size(z(text_size::XS)).text_color(t.text.dim).child(desc.to_string()))
-            .child(div().text_size(z(text_size::XS)).text_color(t.text.faint).child(default))
+            .child(div().text_size(z(text_size::XS)).text_color(t.text.dim).child(default))
             .children(error.map(|e| div().text_size(z(text_size::XS)).text_color(t.state.error).child(e.clone())))
     }
 
@@ -1106,7 +1106,7 @@ impl SettingsView {
             .child(
                 div()
                     .text_size(z(text_size::XS))
-                    .text_color(t.text.faint)
+                    .text_color(t.text.dim)
                     .child("Default: shell, no flags, no setup command, worktrees in <repo>-worktrees"),
             )
             .child(

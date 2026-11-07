@@ -484,7 +484,7 @@ pub fn overlay_header() -> Div {
         .px(z(crate::theme::space::LG))
         .bg(t.bg.elevated)
         .border_b_1()
-        .border_color(t.border.subtle)
+        .border_color(t.border.strong)
         .text_size(z(text_size::SM))
 }
 

@@ -41,9 +41,9 @@ impl Render for Workspace {
                 .items_center()
                 .justify_center()
                 .gap(z(space::MD))
-                .child(ui::icon(icon::TERMINAL, 28., t.text.faint))
+                .child(ui::icon(icon::TERMINAL, 28., t.text.dim))
                 .child(div().text_color(t.text.dim).child("No sessions"))
-                .child(div().text_size(z(text_size::SM)).text_color(t.text.faint).child("Ctrl+Shift+T to start one"))
+                .child(div().text_size(z(text_size::SM)).text_color(t.text.dim).child("Ctrl+Shift+T to start one"))
                 .into_any_element(),
         };
 
@@ -315,7 +315,7 @@ impl Workspace {
             .h(z(height::TITLE_BAR))
             .bg(t.bg.panel)
             .border_b_1()
-            .border_color(t.border.subtle)
+            .border_color(t.border.strong)
             .child(self.brand(cx))
             .child(div().flex_1())
             .when(csd, |d| d.child(window_chrome::window_controls(window)))
@@ -363,7 +363,7 @@ impl Workspace {
         let t = theme::get();
         let now = now_secs();
         let mut items: Vec<gpui::AnyElement> = Vec::new();
-        for (key, members) in self.groups() {
+        for (gi, (key, members)) in self.groups().into_iter().enumerate() {
             let collapsed = self.collapsed.contains(&group_id(&key));
             let needs = members.iter().filter(|&&i| self.agent(i).state == agent::State::NeedsYou).count();
             let project = key.as_ref().and_then(|r| self.projects.get(r));
@@ -405,11 +405,16 @@ impl Workspace {
                         .tooltip(tip(hint))
                 };
                 let (r1, r2, r3) = (root.clone(), root.clone(), root);
+                // Over the header's right end (no room reserved), on the header's hover background.
                 div()
-                    .ml_auto()
-                    .flex_none()
+                    .absolute()
+                    .top_0()
+                    .bottom_0()
+                    .right(z(space::XS))
+                    .pl(z(space::XS))
                     .flex()
                     .items_center()
+                    .bg(t.bg.hover)
                     .when(!menu_here, |d| d.opacity(0.).group_hover(gname.clone(), |s| s.opacity(1.)))
                     .child(b("g-plus", icon::PLUS, plus_hint).on_click(cx.listener(
                         move |w, ev: &ClickEvent, window, cx| {
@@ -430,24 +435,37 @@ impl Workspace {
                         },
                     )))
             });
+            // Groups are separated by a hairline.
+            if gi > 0 {
+                items.push(div().h(z(1.)).mx(z(space::MD)).mt(z(space::MD)).bg(t.border.strong).into_any_element());
+            }
             items.push(
                 div()
                     .id(SharedString::from(format!("group-{}", id.display())))
+                    .relative()
+                    .when(menu_here, |d| d.bg(t.bg.hover)) // its buttons stay shown on the hover background
                     .flex()
                     .items_center()
                     .gap(z(space::SM))
                     .h(z(height::GROUP_HEADER))
-                    .mt(z(space::SM))
+                    .mt(z(space::MD))
                     .px(z(space::MD))
                     .mx(z(space::SM))
                     .rounded(z(radius::MD))
                     .cursor_pointer()
                     .hover(|s| s.bg(t.bg.hover))
-                    .text_size(z(text_size::SM))
+                    .text_size(z(text_size::MD))
                     .child(ui::icon(if collapsed { icon::CHEVRON_RIGHT } else { icon::CHEVRON_DOWN }, 12., t.text.dim))
                     .group(gname.clone())
                     .child(
-                        div().min_w_0().truncate().font_weight(FontWeight::MEDIUM).text_color(t.text.muted).child(name),
+                        // The name keeps its room (up to 60 %); "N need you" gives way first.
+                        div()
+                            .flex_shrink_0()
+                            .max_w(gpui::relative(0.6))
+                            .truncate()
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .text_color(t.text.primary)
+                            .child(name),
                     )
                     .when(pinned, |d| d.child(div().flex_none().child(ui::icon(icon::PIN, 10., t.text.dim))))
                     .child(
@@ -460,8 +478,9 @@ impl Workspace {
                     .when(needs > 0, |d| {
                         d.child(
                             div()
-                                .when(buttons.is_none(), |d| d.ml_auto())
-                                .flex_none()
+                                .ml_auto()
+                                .min_w_0()
+                                .truncate()
                                 .text_size(z(text_size::XS))
                                 .text_color(t.state.needs_you)
                                 .child(format!("{needs} need{} you", if needs == 1 { "s" } else { "" })),
@@ -723,7 +742,8 @@ impl Workspace {
             .cursor_pointer()
             .when(active, |d| d.bg(t.bg.selected))
             .when(!active, |d| d.hover(|s| s.bg(t.bg.hover)))
-            .children(bar.map(|c| div().absolute().left_0().top(z(10.)).bottom(z(10.)).w(z(2.)).rounded_full().bg(c)))
+            .when(!active && crate::perf::forced_hover() == Some(i), |d| d.bg(t.bg.hover))
+            .children(bar.map(|c| div().absolute().left_0().top(z(6.)).bottom(z(6.)).w(z(3.)).rounded_full().bg(c)))
             // Shift+F10 opens the active row's menu just below it: its bottom-left, as painted.
             .when(active, |d| {
                 d.child(
@@ -887,8 +907,9 @@ impl Workspace {
             .gap(z(space::XS))
             .h(z(height::TAB_BAR))
             .px(z(space::MD))
+            .bg(t.bg.elevated)
             .border_b_1()
-            .border_color(t.border.subtle)
+            .border_color(t.border.strong)
             .children(tabs)
             .when(changes > 0, |d| {
                 d.child(div().text_size(z(text_size::XS)).text_color(t.text.dim).child(changes.to_string()))
@@ -944,7 +965,7 @@ impl Workspace {
             .px(z(space::LG))
             .bg(t.bg.panel)
             .border_t_1()
-            .border_color(t.border.subtle)
+            .border_color(t.border.strong)
             .text_size(z(text_size::XS))
             .children(limit("5h", five))
             .children(limit("Week", seven))

@@ -508,7 +508,7 @@ impl Render for FileView {
                                     .pr(z(space::LG))
                                     .flex()
                                     .justify_end()
-                                    .text_color(t.text.faint)
+                                    .text_color(t.diff.gutter)
                                     .child((ix + 1).to_string()),
                             )
                             .child(div().pr(z(14.)).text_color(t.diff.context).child({
