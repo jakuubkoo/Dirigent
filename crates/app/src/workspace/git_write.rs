@@ -648,6 +648,7 @@ impl Workspace {
                     self.restart_tab(i, window, cx);
                 }
             }
+            Then::Resume { dir, id, project } => self.resume_new(dir, id, project, window, cx),
         }
     }
 }

@@ -15,6 +15,12 @@ All notable changes to Dirigent are recorded here. The format follows
   type, then `claude -p` on Haiku (off the UI thread, no tools, no saved session) when you leave the prompt or press
   Create. One call at a time; closing the dialog stops it. A name you type stays; a `Branch: x` line in the prompt
   gives the branch as written.
+- History: a project's past Claude Code sessions (project menu ⋯ → History…, or "Claude: Session history" in the
+  Command Center), newest first, with Claude's title or your name for it, the first prompt, branch, message count
+  and last activity; type to search titles and prompts. Enter resumes the session in a new tab where it was
+  started, or switches to the tab that already has it. Read from Claude's own transcripts, never changed. A session
+  written in the last 2 minutes that no tab here holds is marked "maybe running elsewhere" and asks before resuming,
+  so two claude processes don't write one transcript. With no session open, the command asks for the project first.
 
 ### Changed
 

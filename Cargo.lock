@@ -1096,6 +1096,7 @@ dependencies = [
  "gpui_platform",
  "hook",
  "image",
+ "memchr",
  "notify",
  "raw-window-handle",
  "serde",

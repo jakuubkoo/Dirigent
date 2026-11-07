@@ -21,6 +21,8 @@ pub(super) struct Picker {
     /// Path mode: the listed directory and its subdirectory names (read off-thread, once per directory).
     listing: Option<(PathBuf, Vec<String>)>,
     pub error: Option<String>,
+    /// Picking a project for History (the Command Center with no session open), not a new session.
+    for_history: bool,
 }
 
 pub(super) enum PickRow {
@@ -89,6 +91,11 @@ const PAGE: usize = 10;
 impl Workspace {
     /// Ctrl+Shift+T / the title-bar `+`: the picker, listing projects at once (no IO: all in memory).
     pub(super) fn open_new_session(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.open_picker(false, window, cx);
+    }
+
+    /// The picker; `for_history`: Enter opens the chosen project's History instead of a session.
+    pub(super) fn open_picker(&mut self, for_history: bool, window: &mut Window, cx: &mut Context<Self>) {
         self.menu = None;
         let picker = Picker {
             edit: LineEdit::new(""),
@@ -98,6 +105,7 @@ impl Workspace {
             scroll: UniformListScrollHandle::new(),
             listing: None,
             error: None,
+            for_history,
         };
         self.modal = Some(Modal::Picker(Box::new(picker)));
         self.refilter(cx);
@@ -251,6 +259,7 @@ impl Workspace {
         let cwd = self.picker_cwd();
         let Some(Modal::Picker(p)) = &mut self.modal else { return };
         let claude = (p.claude || shift).then_some(true);
+        let for_history = p.for_history;
         let dir = match p.rows.get(ix.unwrap_or(p.sel)) {
             Some(PickRow::Project { root, .. }) => root.clone(),
             Some(PickRow::Dir { path, .. }) => path.clone(),
@@ -264,7 +273,9 @@ impl Workspace {
                     });
                     let ok = ok.await;
                     let _ = this.update_in(cx, |w, window, cx| {
-                        if ok && !direct {
+                        if ok && for_history {
+                            w.open_history(typed, window, cx);
+                        } else if ok && !direct {
                             w.open_setup(typed, window, cx);
                         } else if ok {
                             w.modal = None;
@@ -280,6 +291,9 @@ impl Workspace {
             }
             None => return,
         };
+        if for_history {
+            return self.open_history(dir, window, cx);
+        }
         if !direct {
             return self.open_setup(dir, window, cx);
         }
@@ -346,6 +360,7 @@ impl Workspace {
                     ("rename", "Rename…".into(), "The name shown in the sidebar and the picker"),
                     ("defaults", "Defaults…".into(), "Start claude, its flags, worktree setup command and location"),
                     ("worktrees", "Worktrees…".into(), "List, open or clean up this repo's git worktrees"),
+                    ("history", "History…".into(), "Past Claude sessions started here: search, resume"),
                 ];
                 if self.projects.get(&menu.root).is_some() {
                     v.push((
@@ -470,6 +485,7 @@ impl Workspace {
         match action {
             "setup" => self.open_setup(root, window, cx),
             "worktrees" => self.open_worktrees(root, window, cx),
+            "history" => self.open_history(root, window, cx),
             "new" => {
                 self.new_session(root, Some(false), window, cx);
             }
@@ -661,9 +677,27 @@ impl Workspace {
             .border_1()
             .border_color(t.accent)
             .text_size(z(text_size::MD))
-            .child(ui::icon(if path_mode { icon::FOLDER } else { icon::PLUS }, 14., t.text.dim))
-            .child(ui::line_text(&p.edit, true, "Search projects, or type a path (/ ~ .)"))
-            .child(toggle);
+            .child(ui::icon(
+                if path_mode {
+                    icon::FOLDER
+                } else if p.for_history {
+                    icon::SEARCH
+                } else {
+                    icon::PLUS
+                },
+                14.,
+                t.text.dim,
+            ))
+            .child(ui::line_text(
+                &p.edit,
+                true,
+                if p.for_history {
+                    "Whose Claude sessions? Search projects, or type a path (/ ~ .)"
+                } else {
+                    "Search projects, or type a path (/ ~ .)"
+                },
+            ))
+            .when(!p.for_history, |d| d.child(toggle));
         let n = p.rows.len();
         let list = uniform_list(
             "picker-rows",
@@ -704,9 +738,11 @@ impl Workspace {
             .child(search)
             .child(div().flex_1().min_h_0().flex().flex_col().child(list).children(empty))
             .children(p.error.clone().map(|e| div().text_size(z(text_size::SM)).text_color(t.state.error).child(e)))
-            .child(div().text_size(z(text_size::XS)).text_color(t.text.dim).child(
-                "↑↓ select · Enter set up… · Ctrl+Enter open now · Shift+Enter now with claude · Tab complete · Esc",
-            ))
+            .child(div().text_size(z(text_size::XS)).text_color(t.text.dim).child(if p.for_history {
+                "↑↓ select · Enter show its session history · Tab complete · Esc"
+            } else {
+                "↑↓ select · Enter set up… · Ctrl+Enter open now · Shift+Enter now with claude · Tab complete · Esc"
+            }))
             .into_any_element()
     }
 }
