@@ -278,7 +278,7 @@ impl Workspace {
             .child(canvas(move |b, _, _| anchor.set(Some(b)), |_, _, _, _| {}).absolute().size_full())
             .child(ui::icon(icon::SEARCH, 12., t.text.dim))
             .child(div().flex_1().min_w_0().truncate().child(project.unwrap_or_else(|| "Search".into())))
-            .child(div().flex_none().text_size(z(text_size::XS)).text_color(t.text.faint).child("Ctrl+P"))
+            .child(div().flex_none().text_size(z(text_size::XS)).text_color(t.text.dim).child("Ctrl+P"))
             // Not a window drag / maximize.
             .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| cx.stop_propagation())
             .on_click(cx.listener(|w, _: &ClickEvent, window, cx| w.open_cc("", window, cx)))
@@ -350,7 +350,7 @@ impl Workspace {
                 .border_t_1()
                 .border_color(t.border.subtle)
                 .text_size(z(text_size::XS))
-                .text_color(t.text.faint)
+                .text_color(t.text.dim)
                 .child("Enter open · Ctrl+Enter diff · name:42 line")
                 .child(div().flex_1())
                 .when(cc.capped, |d| {

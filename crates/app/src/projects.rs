@@ -40,7 +40,13 @@ pub struct Project {
     /// Files last opened through the Command Center (relative paths, newest first; quick open lists them first).
     #[serde(default)]
     pub recent: Vec<String>,
+    /// Index into the theme's project palette (group header dot, branch icons); picked when first remembered.
+    #[serde(default)]
+    pub color: Option<u8>,
 }
+
+/// Colors in a theme's project palette (`Theme::project`).
+pub const COLORS: u8 = 8;
 
 /// Project defaults as typed in the dialog or on the Settings page.
 pub struct Typed<'a> {
@@ -88,7 +94,8 @@ impl Projects {
         match self.get_mut(root) {
             Some(p) => p.last_used = p.last_used.max(now),
             None => {
-                self.0.push(Project { root: root.to_path_buf(), last_used: now, ..Default::default() });
+                let color = Some(self.next_color());
+                self.0.push(Project { root: root.to_path_buf(), last_used: now, color, ..Default::default() });
                 if self.0.len() > MAX_PROJECTS
                     && let Some(oldest) = self
                         .0
@@ -100,6 +107,20 @@ impl Projects {
                 {
                     self.0.remove(oldest);
                 }
+            }
+        }
+    }
+
+    /// The palette index fewest projects use (the lowest on a tie): two projects share a color only past 8.
+    pub fn next_color(&self) -> u8 {
+        (0..COLORS).min_by_key(|&c| self.0.iter().filter(|p| p.color == Some(c)).count()).unwrap_or(0)
+    }
+
+    /// Projects from older state files get a color, in list order.
+    pub fn fill_colors(&mut self) {
+        for i in 0..self.0.len() {
+            if self.0[i].color.is_none() {
+                self.0[i].color = Some(self.next_color());
             }
         }
     }
@@ -403,6 +424,22 @@ mod tests {
         p.apply_defaults(&Typed { auto: false, flags: "", setup: "pnpm i", wt_dir: "../trees" }, Path::new("/home/u"));
         assert_eq!((p.claude_args.len(), p.setup_cmd.as_deref()), (0, Some("pnpm i")));
         assert_eq!(p.worktrees_dir, Some(PathBuf::from("/r/app/../trees")));
+    }
+
+    #[test]
+    fn colors_spread_over_the_palette() {
+        let mut ps = Projects::default();
+        for i in 0..9 {
+            ps.touch(Path::new(&format!("/r/{i}")), i);
+        }
+        let colors: Vec<u8> = ps.0.iter().map(|p| p.color.unwrap()).collect();
+        assert_eq!(colors, [0, 1, 2, 3, 4, 5, 6, 7, 0]);
+        ps.0[1].color = Some(0); // picked by hand: 1 is free again
+        ps.touch(Path::new("/r/new"), 10);
+        assert_eq!(ps.0.last().unwrap().color, Some(1));
+        let mut old = Projects(vec![p("/a", 0, false), p("/b", 0, false)]);
+        old.fill_colors();
+        assert_eq!((old.0[0].color, old.0[1].color), (Some(0), Some(1)));
     }
 
     fn p(root: &str, last_used: i64, pinned: bool) -> Project {

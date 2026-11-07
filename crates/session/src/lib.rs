@@ -82,7 +82,7 @@ impl EventListener for Listener {
             }
             // OSC 11 (background) and OSC 10 (foreground) queries; other indices get the foreground too.
             Event::ColorRequest(idx, f) => {
-                let (fg, bg) = *REPORTED.get().unwrap_or(&DEFAULT_COLORS);
+                let (fg, bg) = *REPORTED.lock().unwrap();
                 f(if idx == 257 { bg } else { fg })
             }
             Event::Title(t) => {
@@ -100,8 +100,8 @@ impl EventListener for Listener {
     }
 }
 
-const DEFAULT_COLORS: (Rgb, Rgb) = (Rgb { r: 0xd8, g: 0xd8, b: 0xd8 }, Rgb { r: 0x1e, g: 0x1e, b: 0x24 });
-static REPORTED: std::sync::OnceLock<(Rgb, Rgb)> = std::sync::OnceLock::new();
+static REPORTED: std::sync::Mutex<(Rgb, Rgb)> =
+    std::sync::Mutex::new((Rgb { r: 0xd8, g: 0xd8, b: 0xd8 }, Rgb { r: 0x1e, g: 0x1e, b: 0x24 }));
 
 /// Reader thread: feeds the pending `answer_once`; on a match the reply goes out from a short-lived thread (the
 /// pauses must not stall reading).
@@ -127,11 +127,12 @@ fn answer(flags: &Flags, writer: &Writer, chunk: &[u8]) {
     }
 }
 
-/// The foreground/background the terminal reports to apps that ask (OSC 10/11): set once at startup to the
-/// UI theme's terminal colors, so e.g. Claude Code picks its light/dark styling to match.
+/// The foreground/background the terminal reports to apps that ask (OSC 10/11): the UI theme's terminal colors,
+/// set at startup and on every theme switch, so e.g. Claude Code picks its light/dark styling to match (an app that
+/// already asked keeps its answer).
 pub fn set_reported_colors(fg: [u8; 3], bg: [u8; 3]) {
     let rgb = |c: [u8; 3]| Rgb { r: c[0], g: c[1], b: c[2] };
-    let _ = REPORTED.set((rgb(fg), rgb(bg)));
+    *REPORTED.lock().unwrap() = (rgb(fg), rgb(bg));
 }
 
 pub struct Session {

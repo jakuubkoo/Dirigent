@@ -40,9 +40,19 @@ All notable changes to Dirigent are recorded here. The format follows
   marked "maybe running elsewhere" and asks before resuming, so two claude processes don't write one transcript. When
   a claude outside Dirigent works in the project (Linux), the list says so in its header. With no session open, the
   command asks for the project first.
+- Themes: Slate (the new default), Neutral, Recessed, Ember, High contrast and Paper (light), picked in Settings →
+  Appearance from cards with a small preview and applied at once. Your own themes are JSON files in `themes/` next
+  to settings.json; any token left out or invalid comes from Slate, with a note saying which.
+- Project colors: each project gets its own color, shown as a dot by its name and on its sessions' branch icons.
+  Change it with ⋯ → Color… on the group header.
 
 ### Changed
 
+- Clearer layers and more contrast: the sidebar, main area and right dock are told apart, headers and tab bars are
+  set off from their content, project groups have a stronger header with a divider, and the active session has a
+  bold accent bar on a stronger background, unlike a hovered one. All small text now reaches WCAG AA (4.5:1): hints,
+  line numbers, the Command Center and Settings labels included. Ignored files, placeholders and disabled controls
+  stay faint but readable (3:1). Filled buttons (Publish, Commit) have dark text on the accent color.
 - New session dialog: the first prompt is multi-line and wraps (3 to 10 lines, then it scrolls). Enter adds a line
   there, Ctrl+Enter creates the session. The prompt reaches claude as written (new lines and quotes intact, whatever
   your shell, also behind an alias that adds flags): it goes through a file in the runtime folder that the `claude`

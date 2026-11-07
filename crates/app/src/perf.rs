@@ -10,6 +10,14 @@ static ENABLED: LazyLock<bool> = LazyLock::new(|| std::env::var_os("DIRIGENT_PER
 static VERBOSE: LazyLock<bool> = LazyLock::new(|| std::env::var("DIRIGENT_PERF").is_ok_and(|v| v == "2"));
 static START: LazyLock<Instant> = LazyLock::new(Instant::now);
 
+/// `DIRIGENT_PERF_HOVER=<tab index>`: that sidebar row is drawn hovered (screenshots: GNOME Wayland has no input
+/// injection, so hover states can't be produced otherwise).
+pub fn forced_hover() -> Option<usize> {
+    static H: LazyLock<Option<usize>> =
+        LazyLock::new(|| std::env::var("DIRIGENT_PERF_HOVER").ok().and_then(|v| v.parse().ok()));
+    *H
+}
+
 fn verbose(what: &str) {
     if *VERBOSE {
         eprintln!("[perf] {:8.1} ms {what}", START.elapsed().as_secs_f64() * 1e3);

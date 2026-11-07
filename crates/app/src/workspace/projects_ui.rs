@@ -57,8 +57,10 @@ pub(super) struct Menu {
 pub(super) enum MenuKind {
     /// ▾: New session / with claude.
     New,
-    /// ⋯: pin, rename, defaults, remove.
+    /// ⋯: pin, rename, color, defaults, remove.
     Project,
+    /// ⋯ → Color…: the theme's project palette.
+    ProjectColor,
     /// Right click / Shift+F10 on a session row: the tab id.
     Session(usize),
     /// Right click in a session's terminal: the tab id.
@@ -68,6 +70,18 @@ pub(super) enum MenuKind {
     /// The Changes panel's ⋯ and Commit ▾ (root = the repo).
     Git(GitMenu),
 }
+
+/// Project palette entries (`Theme::project` order; every theme keeps these hues): (menu action, name).
+const COLORS: [(&str, &str); crate::projects::COLORS as usize] = [
+    ("color0", "Green"),
+    ("color1", "Amber"),
+    ("color2", "Rose"),
+    ("color3", "Teal"),
+    ("color4", "Violet"),
+    ("color5", "Orange"),
+    ("color6", "Pink"),
+    ("color7", "Blue"),
+];
 
 /// (action, label, one-line explanation)
 /// (action, label, one-line explanation); the label can be built ("Switch to main and pull").
@@ -358,6 +372,7 @@ impl Workspace {
                         ("pin", "Pin to sidebar".into(), "Keep this group in the sidebar even with no sessions")
                     },
                     ("rename", "Rename…".into(), "The name shown in the sidebar and the picker"),
+                    ("color", "Color…".into(), "The dot by its name and its sessions' branch icons"),
                     ("defaults", "Defaults…".into(), "Start claude, its flags, worktree setup command and location"),
                     ("worktrees", "Worktrees…".into(), "List, open or clean up this repo's git worktrees"),
                     ("history", "History…".into(), "Past Claude sessions started here: search, resume"),
@@ -370,6 +385,14 @@ impl Workspace {
                     ));
                 }
                 v
+            }
+            MenuKind::ProjectColor => {
+                let cur = self.projects.get(&menu.root).and_then(|p| p.color);
+                COLORS
+                    .iter()
+                    .enumerate()
+                    .map(|(i, &(a, name))| (a, name.into(), if cur == Some(i as u8) { "current" } else { "" }))
+                    .collect()
             }
             MenuKind::Terminal(id) => {
                 let view = self.tab_idx(id).and_then(|i| self.tabs[i].view.as_ref());
@@ -476,6 +499,18 @@ impl Workspace {
             }
             return cx.notify();
         }
+        if let MenuKind::ProjectColor = menu.kind {
+            if let Some(ix) = COLORS.iter().position(|(a, _)| *a == action) {
+                if self.projects.get(&root).is_none() {
+                    self.projects.touch(&root, now_secs());
+                }
+                if let Some(p) = self.projects.get_mut(&root) {
+                    p.color = Some(ix as u8);
+                }
+                self.mark_dirty(cx);
+            }
+            return cx.notify();
+        }
         if let MenuKind::Session(id) = menu.kind {
             if let Some(i) = self.tab_idx(id) {
                 self.session_action(i, action, root, window, cx);
@@ -483,6 +518,8 @@ impl Workspace {
             return cx.notify();
         }
         match action {
+            // The palette opens where the menu was.
+            "color" => self.menu = Some(Menu { root, kind: MenuKind::ProjectColor, at: menu.at, sel: None }),
             "setup" => self.open_setup(root, window, cx),
             "worktrees" => self.open_worktrees(root, window, cx),
             "history" => self.open_history(root, window, cx),
@@ -582,6 +619,10 @@ impl Workspace {
         let menu = self.menu.as_ref()?;
         let t = theme::get();
         let (items, sel) = (self.menu_items(menu, cx), menu.sel);
+        let swatch = |action: &str| {
+            let ix = COLORS.iter().position(|(a, _)| *a == action).filter(|_| menu.kind == MenuKind::ProjectColor)?;
+            Some(div().flex_none().size(z(10.)).rounded_full().bg(theme::project_color(ix)))
+        };
         let card = div()
             .occlude()
             .min_w(z(200.))
@@ -601,8 +642,18 @@ impl Workspace {
                     .cursor_pointer()
                     .text_color(if action == "remove" { t.state.error } else { t.text.primary })
                     .hover(|s| s.bg(t.bg.hover))
-                    .child(label)
-                    .when(!hint.is_empty(), |d| {
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap(z(space::SM))
+                            .children(swatch(action))
+                            .child(label)
+                            .when(menu.kind == MenuKind::ProjectColor && !hint.is_empty(), |d| {
+                                d.child(ui::icon(ui::icon::CHECK, 12., t.accent))
+                            }),
+                    )
+                    .when(!hint.is_empty() && menu.kind != MenuKind::ProjectColor, |d| {
                         d.child(div().text_size(z(text_size::XS)).text_color(t.text.dim).child(hint))
                     })
                     .on_click(cx.listener(move |w, _: &ClickEvent, window, cx| w.menu_action(action, window, cx)))

@@ -150,9 +150,8 @@ fn main() {
         }
     }
     let translucent = blur::decide(std::env::var("DIRIGENT_BLUR").ok().as_deref(), blur::wayland_globals);
-    let t = theme::get();
-    let rgb8 = |c: gpui::Rgba| [(c.r * 255.).round() as u8, (c.g * 255.).round() as u8, (c.b * 255.).round() as u8];
-    session::set_reported_colors(rgb8(t.terminal.fg), rgb8(t.terminal.bg));
+    theme::set(theme::resolve(&loaded.parsed.settings.theme, &loaded.themes).0);
+    loaded.parsed.notes.extend(theme::notes(&loaded.themes, &loaded.parsed.settings.theme));
     gpui_platform::application().with_assets(assets::Assets).run(move |cx: &mut App| {
         if let Err(e) = cx.text_system().add_fonts(assets::fonts()) {
             eprintln!("dirigent: bundled fonts failed to load: {e}");
