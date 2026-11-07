@@ -132,3 +132,42 @@ fn repos_inside_wsl_refresh_when_touched() {
     drop(w);
     wsh(&d, &format!("rm -rf {linux}"));
 }
+
+/// One full refresh of the git panel with a diff open, exactly the git calls the app makes (keep in step with
+/// `Repos::acquire`'s `on_update` and `Workspace::load_overlay`): the watcher's `status` (status + numstat), the
+/// open diff (`diff`: HEAD check + diff), its hunk states (staged + unstaged diff), and beside them the old side's
+/// text for syntax colors (`head_text`). Prints the time; over ~0.5 s one long-lived git per distro would pay off.
+/// The spawn count is process-wide: CI runs this binary with `--test-threads=1`.
+#[test]
+fn wsl_refresh_cost() {
+    let Some(d) = distro() else { return };
+    let (linux, win) = repo(&d, "cost");
+    wsh(&d, &format!("cd {linux} && printf 'one\\ntwo\\n' > f.txt"));
+    let r = found(&win);
+    let _ = git::status(&r); // the distro is warm from here on, as in a running session
+    let mut runs = Vec::new();
+    for _ in 0..5 {
+        let before = wsl::spawns();
+        let t = Instant::now();
+        let st = git::status(&r).unwrap();
+        let f = st.files.iter().find(|f| f.path == "f.txt").unwrap().clone();
+        git::diff(&r, &f, || false).unwrap();
+        write::hunk_state(&r, &f, &[]);
+        let serial = t.elapsed();
+        let t = Instant::now();
+        git::head_text(&r, "f.txt", 1 << 20).unwrap();
+        let side = t.elapsed();
+        assert_eq!(wsl::spawns() - before, 7, "this test's list of a refresh's git calls is out of date");
+        runs.push((serial, side));
+    }
+    runs.sort();
+    let (serial, side) = runs[runs.len() / 2];
+    eprintln!(
+        "[wsl refresh cost] 7 wsl.exe calls; status → diff → hunk states: median {} ms (max {} ms); head_text \
+         beside: {} ms",
+        serial.as_millis(),
+        runs.last().unwrap().0.as_millis(),
+        side.as_millis()
+    );
+    wsh(&d, &format!("rm -rf {linux}"));
+}

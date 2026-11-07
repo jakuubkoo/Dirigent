@@ -1,7 +1,6 @@
 # Checks every PR and every push to main. `fmt`, `clippy-test` and `deny` are the ruleset's required status checks:
-# keep their names. `windows` and `musl-hook` (the Windows preview) are not required yet. `advisories` (RustSec) is
-# informational: it
-# also runs weekly, so new advisories show up without blocking merges.
+# keep their names. `windows`, `musl-hook` and `windows-wsl` (the Windows preview) are not required yet. `advisories`
+# (RustSec) is informational: it also runs weekly, so new advisories show up without blocking merges.
 name: CI
 
 on:
@@ -84,6 +83,37 @@ jobs:
           name: dirigent-hook-linux-musl
           path: target/x86_64-unknown-linux-musl/release/dirigent-hook
           if-no-files-found: error
+
+  # WSL sessions against a real distro (Ubuntu on WSL 2): git through wsl.exe, the helper relaying to the app's
+  # pipe, a session's shim and cwd reports, and what one panel refresh costs. Not required yet.
+  windows-wsl:
+    if: github.event_name != 'schedule'
+    needs: musl-hook
+    runs-on: windows-latest
+    env:
+      DIRIGENT_TEST_WSL: Ubuntu-24.04
+      DIRIGENT_TEST_WSL_HOOK: ${{ github.workspace }}\wsl-hook\dirigent-hook
+    steps:
+      - run: git config --global core.autocrlf false
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: dirigent-hook-linux-musl
+          path: wsl-hook
+      - uses: Vampire/setup-wsl@4c48163d9f981914dd8caa0fc335fe19cca5bff4 # v7.2.0
+        with:
+          distribution: Ubuntu-24.04
+          wsl-version: 2
+          additional-packages: git
+      - run: rustup toolchain install
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+      # The spawn count in wsl_refresh_cost is process-wide: one test at a time.
+      - run: cargo test --locked -p git --test wsl -- --test-threads=1 --nocapture
+      - run: cargo test --locked -p hook --test bin wsl_ -- --nocapture
+      # The app's session test runs the helper binary the hook crate builds.
+      - run: cargo build --locked -p hook && cargo test --locked -p dirigent wsl_ -- --nocapture
 
   deny:
     if: github.event_name != 'schedule'
