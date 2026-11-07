@@ -9,6 +9,7 @@ pub mod search;
 pub mod text;
 mod watch;
 pub mod write;
+pub mod wsl;
 
 use std::io::Read;
 use std::path::{Path, PathBuf};
@@ -77,9 +78,16 @@ pub fn native_path(s: &str) -> PathBuf {
 }
 
 /// A `canonicalize` result without Windows' `\\?\` prefix (git can't use it) when the rest is a drive path; UNC
-/// paths are kept. Drive letter uppercase. Unix: as is.
+/// paths are kept, except a WSL distro's (`\\?\UNC\wsl$\D\x`), which becomes the app's `\\wsl.localhost\D\x`.
+/// Drive letter uppercase. Unix: as is.
 pub fn plain_path(p: PathBuf) -> PathBuf {
-    if cfg!(windows) { strip_verbatim(p) } else { p }
+    if !cfg!(windows) {
+        return p;
+    }
+    match wsl::of(&p) {
+        Some((distro, linux)) => wsl::to_windows(&distro, &linux),
+        None => strip_verbatim(p),
+    }
 }
 
 fn strip_verbatim(p: PathBuf) -> PathBuf {
@@ -107,6 +115,19 @@ pub fn root_key(s: &str) -> PathBuf {
     if cfg!(windows) { p.canonicalize().map(|c| same_drive_or(p.clone(), c)).unwrap_or(p) } else { p }
 }
 
+/// `root_key` for a path git printed while running in `dir`: inside a WSL distro git prints Linux paths, which
+/// become the app's `\\wsl.localhost\D\x` with the distro named as WSL lists it (never canonicalized: 9P is slow
+/// and Linux is case-sensitive), or a drive path for `/mnt/c/x`, which then gets the drive rules.
+pub fn root_key_in(dir: &Path, printed: &str) -> PathBuf {
+    match wsl::of(dir) {
+        Some((distro, _)) => {
+            let p = wsl::to_windows(&wsl::listed(&distro), printed);
+            if wsl::of(&p).is_some() { p } else { root_key(&p.to_string_lossy()) }
+        }
+        None => root_key(printed),
+    }
+}
+
 /// `canon` without `\\?\` when it is on `printed`'s drive, else `printed`.
 fn same_drive_or(printed: PathBuf, canon: PathBuf) -> PathBuf {
     let drive = |p: &Path| {
@@ -117,10 +138,16 @@ fn same_drive_or(printed: PathBuf, canon: PathBuf) -> PathBuf {
 }
 
 /// `path` is `root` or inside it. Windows compares components ignoring ASCII case (a shell's cwd keeps the case
-/// it was typed in, `cd c:\users`); Unix is `Path::starts_with`.
+/// it was typed in, `cd c:\users`), except inside a WSL distro: the distro name ignores case, the Linux path
+/// doesn't. Unix is `Path::starts_with`.
 pub fn path_under(path: &Path, root: &Path) -> bool {
     if !cfg!(windows) {
         return path.starts_with(root);
+    }
+    match (wsl::of(path), wsl::of(root)) {
+        (Some((pd, p)), Some((rd, r))) => return pd.eq_ignore_ascii_case(&rd) && wsl::under(&p, &r),
+        (None, None) => {}
+        _ => return false,
     }
     let mut p = path.components();
     root.components().all(|r| p.next().is_some_and(|c| c.as_os_str().eq_ignore_ascii_case(r.as_os_str())))
@@ -490,6 +517,10 @@ mod tests {
             ("/home/a/b", "/home/a", true, true),
             ("/home/A/b", "/home/a", true, false),
             ("/home/ab", "/home/a", false, false),
+            (r"\\wsl.localhost\Ubuntu\home\a\b", r"\\wsl$\ubuntu\home\a", true, false),
+            (r"\\wsl.localhost\Ubuntu\home\A", r"\\wsl.localhost\Ubuntu\home\a", false, false),
+            (r"\\wsl.localhost\Ubuntu\home\a", r"\\wsl.localhost\Debian\home\a", false, false),
+            (r"\\wsl.localhost\Ubuntu\home", r"C:\", false, false),
         ];
         for (path, root, win, unix) in cases {
             let want = if cfg!(windows) { win } else { unix };
@@ -510,6 +541,18 @@ mod tests {
             assert_eq!(native_path("/a/b\\c"), Path::new("/a/b\\c"));
             assert_eq!(plain_path("/a/b".into()), Path::new("/a/b"));
             assert_eq!(root_key("/no/such/dir"), Path::new("/no/such/dir"), "Unix: as git printed it");
+        }
+    }
+
+    #[test]
+    fn wsl_roots() {
+        let dir = Path::new(r"\\wsl$\Ubuntu\home\x\src");
+        if cfg!(windows) {
+            assert_eq!(root_key_in(dir, "/home/x"), Path::new(r"\\wsl.localhost\Ubuntu\home\x"));
+            assert_eq!(plain_path(r"\\?\UNC\wsl$\Ubuntu\home\x".into()), Path::new(r"\\wsl.localhost\Ubuntu\home\x"));
+            assert_eq!(plain_path(r"\\?\UNC\srv\share".into()), Path::new(r"\\?\UNC\srv\share"), "other UNC kept");
+        } else {
+            assert_eq!(root_key_in(dir, "/home/x"), Path::new("/home/x"), "Unix: as printed");
         }
     }
 
