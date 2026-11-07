@@ -137,15 +137,20 @@ static DISTROS: Mutex<Option<HashMap<String, Distro>>> = Mutex::new(None);
 static STARTED: Condvar = Condvar::new();
 
 /// The Linux helper (its path inside every distro, `/mnt/c/…/dirigent-hook`) that serves git; None: per call.
-/// Setting it again lets distros whose server was given up try once more (and forgets past deaths).
+/// A new path stops running servers. Setting it again lets distros whose server was given up try once more (and forgets past
+/// deaths).
 pub fn set_server_helper(path: Option<String>) {
-    *HELPER.lock().unwrap() = path;
+    let changed = std::mem::replace(&mut *HELPER.lock().unwrap(), path.clone()) != path;
+    let mut running = Vec::new();
     for d in DISTROS.lock().unwrap().get_or_insert_default().values_mut() {
         d.deaths.clear();
-        if matches!(d.server, Server::Off) {
-            d.server = Server::Idle;
+        match std::mem::take(&mut d.server) {
+            Server::Up(c) if changed => running.push(c), // the next call starts the new helper
+            Server::Off | Server::Idle => {}
+            s => d.server = s,
         }
     }
+    drop(running); // outside the lock: each waits for its server to exit
 }
 
 /// How long a distro's server outlives its last tab or repo (30 s; tests shorten it).
