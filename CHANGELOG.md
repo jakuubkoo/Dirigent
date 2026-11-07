@@ -19,6 +19,14 @@ All notable changes to Dirigent are recorded here. The format follows
   written. The prompt's first words (skipping headings and plan mode lines) name it only when claude can't.
 - Settings → General → "Name new sessions with Claude" (on by default): off, the New session dialog makes no
   `claude -p` call; a branch written in the prompt and its first words still name the session.
+- History: a project's past Claude Code sessions (project menu ⋯ → History…, or "Claude: Session history" in the
+  Command Center), newest first, with Claude's title or your name for it, the first prompt, branch, message count
+  and last activity; type to search titles and prompts. Enter resumes the session in a new tab where it was
+  started, or switches to the tab that already has it. Read from Claude's own transcripts, never changed. A session
+  that a claude outside Dirigent runs (Linux: its command line names it) or that was written in the last 2 minutes is
+  marked "maybe running elsewhere" and asks before resuming, so two claude processes don't write one transcript. When
+  a claude outside Dirigent works in the project (Linux), the list says so in its header. With no session open, the
+  command asks for the project first.
 
 ### Changed
 

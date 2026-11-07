@@ -223,11 +223,15 @@ fn opens_with_plan_mode(line: &str) -> bool {
 
 /// Default directory for a new worktree: `<worktrees_dir or <parent>/<repo>-worktrees>/<branch with / → ->`.
 pub fn worktree_path(repo_root: &Path, worktrees_dir: Option<&Path>, branch: &str) -> PathBuf {
-    let base = worktrees_dir.map(Path::to_path_buf).unwrap_or_else(|| {
+    worktrees_base(repo_root, worktrees_dir).join(branch.replace('/', "-"))
+}
+
+/// Where a project's new worktrees go: its `worktrees_dir`, else `<repo>-worktrees` next to the repo.
+pub fn worktrees_base(repo_root: &Path, worktrees_dir: Option<&Path>) -> PathBuf {
+    worktrees_dir.map(Path::to_path_buf).unwrap_or_else(|| {
         let name = repo_root.file_name().map_or_else(|| "repo".into(), |n| n.to_string_lossy().into_owned());
         repo_root.parent().unwrap_or(repo_root).join(format!("{name}-worktrees"))
-    });
-    base.join(branch.replace('/', "-"))
+    })
 }
 
 /// A worktree location inside the repo itself would be watched and walked as part of the main checkout.

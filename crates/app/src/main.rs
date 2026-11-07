@@ -9,6 +9,7 @@ mod file_tree;
 mod files_panel;
 mod git_ops;
 mod git_panel;
+mod history;
 mod keys;
 mod layout;
 mod line_edit;
