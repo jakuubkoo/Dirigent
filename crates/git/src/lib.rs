@@ -71,6 +71,66 @@ pub fn cmd(program: impl AsRef<std::ffi::OsStr>) -> Command {
     c
 }
 
+/// A path git printed (`C:/x` on Windows) in the native form: `C:\x`, drive letter uppercase. Unix: as is.
+pub fn native_path(s: &str) -> PathBuf {
+    if cfg!(windows) { upper_drive(s.replace('/', "\\")).into() } else { s.into() }
+}
+
+/// A `canonicalize` result without Windows' `\\?\` prefix (git can't use it) when the rest is a drive path; UNC
+/// paths are kept. Drive letter uppercase. Unix: as is.
+pub fn plain_path(p: PathBuf) -> PathBuf {
+    if cfg!(windows) { strip_verbatim(p) } else { p }
+}
+
+fn strip_verbatim(p: PathBuf) -> PathBuf {
+    let Some(s) = p.to_str() else { return p };
+    let s = s.strip_prefix(r"\\?\").unwrap_or(s);
+    if s.as_bytes().get(1) != Some(&b':') {
+        return p; // UNC (`\\?\UNC\…`, `\\server\…`) or relative
+    }
+    upper_drive(s.to_string()).into()
+}
+
+fn upper_drive(mut s: String) -> String {
+    if s.as_bytes().get(1) == Some(&b':') {
+        s[..1].make_ascii_uppercase();
+    }
+    s
+}
+
+/// A repo path git printed as the identity key for projects, history and the watcher. Windows: the real on-disk
+/// path (case as stored, long names instead of 8.3, `\`, no `\\?\`), so `c:\USERS\x` and `C:\Users\X` are one
+/// project. A `subst` or mapped network drive keeps git's form: its canonical path is another drive or UNC, and
+/// the panels must keep matching the shell's cwd on that drive. Unix: as printed.
+pub fn root_key(s: &str) -> PathBuf {
+    let p = native_path(s);
+    if cfg!(windows) { p.canonicalize().map(|c| same_drive_or(p.clone(), c)).unwrap_or(p) } else { p }
+}
+
+/// `canon` without `\\?\` when it is on `printed`'s drive, else `printed`.
+fn same_drive_or(printed: PathBuf, canon: PathBuf) -> PathBuf {
+    let drive = |p: &Path| {
+        p.to_str().filter(|s| s.as_bytes().get(1) == Some(&b':')).map(|s| s.as_bytes()[0].to_ascii_uppercase())
+    };
+    let canon = strip_verbatim(canon);
+    if drive(&printed).is_some() && drive(&printed) == drive(&canon) { canon } else { printed }
+}
+
+/// `path` is `root` or inside it. Windows compares components ignoring ASCII case (a shell's cwd keeps the case
+/// it was typed in, `cd c:\users`); Unix is `Path::starts_with`.
+pub fn path_under(path: &Path, root: &Path) -> bool {
+    if !cfg!(windows) {
+        return path.starts_with(root);
+    }
+    let mut p = path.components();
+    root.components().all(|r| p.next().is_some_and(|c| c.as_os_str().eq_ignore_ascii_case(r.as_os_str())))
+}
+
+/// Same directory (`path_under` both ways).
+pub fn same_path(a: &Path, b: &Path) -> bool {
+    path_under(a, b) && path_under(b, a)
+}
+
 /// `git` with the options every call needs. `--no-optional-locks`: a plain `git status` refreshes and rewrites
 /// `.git/index`, which our own watcher would see as a change (a refresh loop).
 fn git(dir: &Path) -> Command {
@@ -107,9 +167,9 @@ pub fn discover(dir: &Path) -> Discovery {
             let mut lines = text.lines();
             match (lines.next(), lines.next(), lines.next()) {
                 (Some(root), Some(git_dir), common) => Discovery::Repo(Repo {
-                    root: root.into(),
-                    git_dir: git_dir.into(),
-                    common_dir: common.unwrap_or(git_dir).into(),
+                    root: root_key(root),
+                    git_dir: root_key(git_dir),
+                    common_dir: root_key(common.unwrap_or(git_dir)),
                 }),
                 _ => Discovery::NotRepo, // bare repo or inside .git: no working tree
             }
@@ -418,6 +478,83 @@ pub fn parse_diff(raw: &[u8]) -> Diff {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn paths_under_roots() {
+        let p = Path::new;
+        // (path, root, under on Windows, under on Unix)
+        let cases = [
+            (r"c:\Users\x\src", "C:/users/X", true, false),
+            ("C:/x/y", r"C:\x", true, false),
+            (r"C:\xy", r"C:\x", false, false),
+            ("/home/a/b", "/home/a", true, true),
+            ("/home/A/b", "/home/a", true, false),
+            ("/home/ab", "/home/a", false, false),
+        ];
+        for (path, root, win, unix) in cases {
+            let want = if cfg!(windows) { win } else { unix };
+            assert_eq!(path_under(p(path), p(root)), want, "{path} under {root}");
+        }
+        assert!(same_path(p("/home/a/"), p("/home/a")));
+        assert!(!same_path(p("/home/a/b"), p("/home/a")));
+    }
+
+    #[test]
+    fn native_and_plain_paths() {
+        if cfg!(windows) {
+            assert_eq!(native_path("c:/Users/x"), Path::new(r"C:\Users\x"));
+            assert_eq!(plain_path(r"\\?\d:\a\b".into()), Path::new(r"D:\a\b"));
+            assert_eq!(plain_path(r"\\?\UNC\srv\share".into()), Path::new(r"\\?\UNC\srv\share"));
+            assert_eq!(plain_path(r"c:\a".into()), Path::new(r"C:\a"));
+        } else {
+            assert_eq!(native_path("/a/b\\c"), Path::new("/a/b\\c"));
+            assert_eq!(plain_path("/a/b".into()), Path::new("/a/b"));
+            assert_eq!(root_key("/no/such/dir"), Path::new("/no/such/dir"), "Unix: as git printed it");
+        }
+    }
+
+    #[test]
+    fn root_key_keeps_the_drive() {
+        let key = |printed: &str, canon: &str| same_drive_or(printed.into(), canon.into());
+        assert_eq!(key(r"C:\users\x", r"\\?\C:\Users\X"), Path::new(r"C:\Users\X"), "same drive: on-disk form");
+        assert_eq!(key(r"S:\repo", r"\\?\C:\work\repo"), Path::new(r"S:\repo"), "subst drive");
+        assert_eq!(key(r"Z:\repo", r"\\?\UNC\srv\share\repo"), Path::new(r"Z:\repo"), "mapped network drive");
+        assert_eq!(key(r"\\srv\share\repo", r"\\?\UNC\srv\share\repo"), Path::new(r"\\srv\share\repo"), "UNC");
+    }
+
+    /// Typed case, other separators and the 8.3 short name of one directory are one project key, in its on-disk case.
+    #[test]
+    #[cfg(windows)]
+    fn root_key_is_one_per_directory() {
+        use std::os::windows::ffi::{OsStrExt, OsStringExt};
+        let base = plain_path(std::env::temp_dir().canonicalize().unwrap());
+        let dir = base.join(format!("Dirigent-Key-Test-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let s = dir.to_str().unwrap();
+        let key = root_key(s);
+        assert_eq!(key, dir, "on-disk case");
+        let mut forms = vec![s.to_uppercase(), s.to_lowercase().replace('\\', "/")];
+        let wide: Vec<u16> = dir.as_os_str().encode_wide().chain([0]).collect();
+        let mut buf = vec![0u16; 1024];
+        // SAFETY: NUL-terminated input, a buffer of the length we pass.
+        let n = unsafe {
+            windows_sys::Win32::Storage::FileSystem::GetShortPathNameW(
+                wide.as_ptr(),
+                buf.as_mut_ptr(),
+                buf.len() as u32,
+            )
+        } as usize;
+        let short = std::ffi::OsString::from_wide(&buf[..n]).into_string().unwrap();
+        if n == 0 || short.eq_ignore_ascii_case(s) {
+            eprintln!("8.3 names are off on this volume: short form not tested");
+        } else {
+            forms.push(short);
+        }
+        for f in &forms {
+            assert_eq!(root_key(f), key, "{f}");
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     #[test]
     fn porcelain_v2() {

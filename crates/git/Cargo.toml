@@ -16,3 +16,7 @@ memchr = "2"
 [target.'cfg(unix)'.dependencies]
 # setsid/kill for network commands (already in the graph).
 libc = "0.2"
+
+[target.'cfg(windows)'.dependencies]
+# 8.3 short names in tests; already in the graph.
+windows-sys = { version = "0.61", features = ["Win32_Storage_FileSystem"] }

@@ -2827,10 +2827,10 @@ impl Workspace {
         }
         let tab = self.tabs.get(self.active);
         let repo = match tab.map(|t| &t.repo) {
-            Some(TabRepo::Repo(root)) if path.starts_with(root) => Some(root.clone()),
+            Some(TabRepo::Repo(root)) if git::path_under(&path, root) => Some(root.clone()),
             _ => None,
         };
-        let base = tab.and_then(Self::tree_root).filter(|r| path.starts_with(r));
+        let base = tab.and_then(Self::tree_root).filter(|r| git::path_under(&path, r));
         let ws = cx.entity().downgrade();
         let m = self.metrics.clone();
         let view = cx.new(|cx| FileView::new(path, repo, base, &m, ws, cx));

@@ -42,11 +42,11 @@ fn setup(name: &str) -> (PathBuf, PathBuf) {
     sh(&main, &["commit", "-q", "-m", "one"]);
     std::fs::write(main.join("a.txt"), "one\ntwo\n").unwrap();
     sh(&main, &["commit", "-qam", "two"]);
-    (main.canonicalize().unwrap(), base.canonicalize().unwrap().join("wt"))
+    // `plain_path`: Windows' canonicalize gives `\\?\` paths, which git can't create directories under.
+    (git::plain_path(main.canonicalize().unwrap()), git::plain_path(base.canonicalize().unwrap()).join("wt"))
 }
 
 #[test]
-#[cfg_attr(windows, ignore = "Windows git step: canonicalize() gives \\\\?\\ paths git can't create")]
 fn add_discover_list_and_errors() {
     let (main, wt) = setup("add");
     let (current, branches) = write::branches(&main).unwrap();
@@ -97,7 +97,6 @@ fn add_discover_list_and_errors() {
 }
 
 #[test]
-#[cfg_attr(windows, ignore = "Windows git step: canonicalize() gives \\\\?\\ paths git can't create")]
 fn remove_never_loses_work_without_force() {
     let (main, wt) = setup("remove");
     let feat = wt.join("feat");
@@ -134,7 +133,6 @@ fn remove_never_loses_work_without_force() {
 }
 
 #[test]
-#[cfg_attr(windows, ignore = "Windows git step: canonicalize() gives \\\\?\\ paths git can't create")]
 fn worktree_watcher_sees_branch_moves_in_the_shared_git_dir() {
     let (main, wt) = setup("watch");
     let feat = wt.join("feat");

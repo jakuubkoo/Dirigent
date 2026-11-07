@@ -73,16 +73,16 @@ pub fn request(cmd: &Cmd, cwd: &Path, token: Option<String>) -> Result<Request, 
     let Some(p) = &cmd.path else {
         if cmd.claude || cmd.new {
             // A session needs a directory: the current one.
-            req.dir = Some(cwd.canonicalize().map_err(|e| format!("{}: {e}", cwd.display()))?);
+            req.dir = Some(git::plain_path(cwd.canonicalize().map_err(|e| format!("{}: {e}", cwd.display()))?));
             req.alt_dir = Some(cwd.to_path_buf());
         }
         return Ok(req);
     };
     let typed = cwd.join(p);
-    let real = typed.canonicalize().map_err(|e| match e.kind() {
+    let real = git::plain_path(typed.canonicalize().map_err(|e| match e.kind() {
         ErrorKind::NotFound => format!("no such file or directory: {p}"),
         _ => format!("{p}: {e}"),
-    })?;
+    })?);
     if real.is_dir() {
         req.dir = Some(real);
         req.alt_dir = Some(normalize(&typed));
@@ -311,7 +311,8 @@ pub fn pick(req: &Request, tabs: &[(&Path, bool)], active: usize, order: &[usize
     let dir = req.dir.as_deref()?;
     let fits = |&i: &usize| {
         tabs.get(i).is_some_and(|(cwd, agent)| {
-            (*cwd == dir || Some(*cwd) == req.alt_dir.as_deref()) && (!req.claude || *agent)
+            (git::same_path(cwd, dir) || req.alt_dir.as_deref().is_some_and(|a| git::same_path(cwd, a)))
+                && (!req.claude || *agent)
         })
     };
     std::iter::once(active).chain(order.iter().copied()).find(fits)
@@ -390,7 +391,7 @@ mod tests {
         std::fs::write(d.join("real/sub/f.rs"), "fn main() {}\n").unwrap();
         #[cfg(unix)]
         std::os::unix::fs::symlink(d.join("real"), d.join("link")).unwrap();
-        d.canonicalize().unwrap()
+        git::plain_path(d.canonicalize().unwrap())
     }
 
     #[test]

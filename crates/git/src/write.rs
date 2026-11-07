@@ -527,7 +527,7 @@ fn parse_worktrees(out: &str) -> Vec<Worktree> {
         for line in block.lines() {
             let (key, value) = line.split_once(' ').unwrap_or((line, ""));
             match key {
-                "worktree" => w.path = PathBuf::from(value),
+                "worktree" => w.path = crate::root_key(value),
                 "HEAD" => w.head = value.to_string(),
                 "branch" => w.branch = Some(value.strip_prefix("refs/heads/").unwrap_or(value).to_string()),
                 "locked" => w.locked = true,
