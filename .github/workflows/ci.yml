@@ -1,6 +1,6 @@
 # Checks every PR and every push to main. `fmt`, `clippy-test` and `deny` are the ruleset's required status checks:
-# keep their names. `advisories` (RustSec) is informational: it also runs weekly, so new advisories show up without
-# blocking merges.
+# keep their names. `windows` (the Windows preview) is not required yet. `advisories` (RustSec) is informational: it
+# also runs weekly, so new advisories show up without blocking merges.
 name: CI
 
 on:
@@ -47,6 +47,23 @@ jobs:
       - run: cargo clippy --all-targets --locked -- -D warnings
       # Tests that open a window are #[ignore]d.
       - run: cargo test --locked
+
+  windows:
+    if: github.event_name != 'schedule'
+    runs-on: windows-latest
+    steps:
+      # Byte-exact fixtures and LF-only test expectations: no CRLF conversion in the checkout.
+      - run: git config --global core.autocrlf false
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - run: rustup toolchain install
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+      - run: cargo clippy --all-targets --locked -- -D warnings
+      # ConPTY sessions, PowerShell/cmd cwd reports, named pipes; window tests are #[ignore]d.
+      - run: cargo test --locked
+      # Release builds compile gpui's shaders with fxc.exe (Windows SDK): checked here, not first at a release.
+      - run: cargo build --release --locked
 
   deny:
     if: github.event_name != 'schedule'
