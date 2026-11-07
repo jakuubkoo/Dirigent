@@ -1,0 +1,6 @@
+# Windows: compile the tree-sitter grammars' C with clang-cl (Visual Studio's "C++ Clang tools" or LLVM):
+# tree-sitter-scss's build script passes the GCC-style `-Wno-unused-parameter`, which MSVC's cl.exe refuses.
+# Only read for the MSVC target; an explicitly set variable still wins.
+[env]
+CC_x86_64_pc_windows_msvc = "clang-cl"
+CXX_x86_64_pc_windows_msvc = "clang-cl"

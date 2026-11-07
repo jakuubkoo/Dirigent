@@ -50,12 +50,8 @@ jobs:
 
   windows:
     if: github.event_name != 'schedule'
+    # C is compiled with clang-cl (.cargo/config.toml); LLVM is on the runner.
     runs-on: windows-latest
-    env:
-      # tree-sitter-scss's build script passes `-Wno-unused-parameter`, which MSVC's cl.exe refuses; clang-cl (LLVM is
-      # on the runner) takes both styles.
-      CC_x86_64_pc_windows_msvc: clang-cl
-      CXX_x86_64_pc_windows_msvc: clang-cl
     steps:
       # Byte-exact fixtures and LF-only test expectations: no CRLF conversion in the checkout.
       - run: git config --global core.autocrlf false
