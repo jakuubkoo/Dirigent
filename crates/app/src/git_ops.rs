@@ -333,7 +333,7 @@ impl Stop {
 /// `claude -p` on Haiku with no tools, no saved session, none of your settings or hooks (your login): `system`
 /// as the system prompt, `ask` as the prompt, `input` on stdin. Blocking.
 fn claude_p(system: &str, ask: &str, input: &str, stop: &Stop) -> Result<String, String> {
-    let mut cmd = Command::new("claude");
+    let mut cmd = git::cmd("claude");
     cmd.args(["-p", "--setting-sources", "", "--model", "haiku", "--tools", "", "--no-session-persistence"])
         .args(["--system-prompt", system, ask])
         .current_dir(std::env::temp_dir());

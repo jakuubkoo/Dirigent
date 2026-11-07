@@ -14,7 +14,14 @@ pub fn decide(env: Option<&str>, globals: impl FnOnce() -> Vec<String>) -> bool 
     }
 }
 
+/// No Wayland: opaque unless `DIRIGENT_BLUR=force`.
+#[cfg(not(target_os = "linux"))]
+pub fn wayland_globals() -> Vec<String> {
+    Vec::new()
+}
+
 /// Interfaces the Wayland compositor advertises (empty on X11 or on error). One registry round trip (~1 ms).
+#[cfg(target_os = "linux")]
 pub fn wayland_globals() -> Vec<String> {
     use wayland_client::globals::{GlobalListContents, registry_queue_init};
     use wayland_client::protocol::wl_registry::{self, WlRegistry};

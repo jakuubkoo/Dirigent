@@ -1,3 +1,6 @@
+// Windows: a GUI app (no console window); `win::attach_console` lends it the caller's console for CLI messages.
+#![cfg_attr(windows, windows_subsystem = "windows")]
+
 mod agent;
 mod assets;
 mod blur;
@@ -22,6 +25,8 @@ mod scrollbar;
 mod search_panel;
 mod settings;
 mod settings_view;
+#[cfg(windows)]
+mod shell;
 mod terminal_element;
 mod terminal_view;
 mod text_area;
@@ -36,21 +41,24 @@ use gpui::{
 };
 use workspace::*;
 
-use std::io::IsTerminal as _;
 use std::path::PathBuf;
 
 fn main() {
+    #[cfg(windows)]
+    win::attach_console();
     let args: Vec<String> = std::env::args().skip(1).collect();
     if matches!(args.first().map(String::as_str), Some("--version" | "-V")) {
         // `DIRIGENT_BUILD` ("<hash> <date>") is set by scripts/install.sh.
         println!("Dirigent {} ({})", env!("CARGO_PKG_VERSION"), option_env!("DIRIGENT_BUILD").unwrap_or("dev build"));
         return;
     }
+    #[cfg(target_os = "linux")]
     if let (Some("--desktop-entry"), Some(exec)) = (args.first().map(String::as_str), args.get(1)) {
         // For packaging (scripts/build-deb.sh): the launcher entry for the app at `exec`.
         print!("{}", desktop_text(exec));
         return;
     }
+    #[cfg(target_os = "linux")]
     if let Some(flag @ ("--install-desktop" | "--uninstall-desktop")) = args.first().map(String::as_str) {
         if let Err(e) = desktop_entry(flag == "--install-desktop") {
             eprintln!("dirigent: {e}");
@@ -99,10 +107,14 @@ fn main() {
             eprintln!("{hint}");
         }
     }
-    if std::io::stdin().is_terminal() {
+    #[cfg(unix)]
+    if std::io::IsTerminal::is_terminal(&std::io::stdin()) {
         // Started from a terminal: the app runs on its own (own process group, output to a log), the shell returns.
         detach(&state_path);
     }
+    // A GUI app returns to the terminal at once anyway; its output (incl. DIRIGENT_PERF) goes to the log.
+    #[cfg(windows)]
+    win::log_to(&state_path);
     let listener = match cli::bind(&sock) {
         Ok(l) => Some(l),
         Err(e) if e.kind() == std::io::ErrorKind::AddrInUse => {
@@ -194,16 +206,10 @@ fn main() {
 
 /// Re-runs this binary detached (own process group: Ctrl+C or closing the terminal don't reach it), stdout/stderr
 /// appended to `dirigent.log` next to the state file (moved to `.log.old` past 1 MB), then exits.
+#[cfg(unix)]
 fn detach(state_path: &std::path::Path) -> ! {
     use std::os::unix::process::CommandExt;
-    let dir = state_path.parent().unwrap_or(std::path::Path::new("."));
-    let log = dir.join("dirigent.log");
-    if std::fs::metadata(&log).is_ok_and(|m| m.len() > 1 << 20) {
-        let _ = std::fs::rename(&log, dir.join("dirigent.log.old"));
-    }
-    let out =
-        std::fs::create_dir_all(dir).and_then(|_| std::fs::OpenOptions::new().create(true).append(true).open(&log));
-    let started = out.and_then(|out| {
+    let started = open_log(state_path).and_then(|out| {
         std::process::Command::new(std::env::current_exe()?)
             .args(std::env::args_os().skip(1))
             .stdin(std::process::Stdio::null())
@@ -221,7 +227,48 @@ fn detach(state_path: &std::path::Path) -> ! {
     }
 }
 
+/// `dirigent.log` next to the state file, appended to (moved to `.log.old` past 1 MB).
+fn open_log(state_path: &std::path::Path) -> std::io::Result<std::fs::File> {
+    let dir = state_path.parent().unwrap_or(std::path::Path::new("."));
+    let log = dir.join("dirigent.log");
+    if std::fs::metadata(&log).is_ok_and(|m| m.len() > 1 << 20) {
+        let _ = std::fs::rename(&log, dir.join("dirigent.log.old"));
+    }
+    std::fs::create_dir_all(dir)?;
+    std::fs::OpenOptions::new().create(true).append(true).open(&log)
+}
+
+#[cfg(windows)]
+mod win {
+    use std::os::windows::io::IntoRawHandle;
+    use windows_sys::Win32::System::Console::{
+        ATTACH_PARENT_PROCESS, AttachConsole, STD_ERROR_HANDLE, STD_OUTPUT_HANDLE, SetStdHandle,
+    };
+
+    /// Started from a console (`dirigent <dir>` in a terminal): our messages (usage, errors) go there.
+    pub fn attach_console() {
+        // SAFETY: no arguments to get wrong; fails harmlessly when there is no parent console.
+        unsafe { AttachConsole(ATTACH_PARENT_PROCESS) };
+    }
+
+    /// From now on stdout/stderr go to `dirigent.log` (std looks the handles up on every write).
+    pub fn log_to(state_path: &std::path::Path) {
+        match super::open_log(state_path) {
+            Ok(f) => {
+                let h = f.into_raw_handle(); // kept open for the process's lifetime
+                // SAFETY: a valid file handle we own and never close.
+                unsafe {
+                    SetStdHandle(STD_OUTPUT_HANDLE, h);
+                    SetStdHandle(STD_ERROR_HANDLE, h);
+                }
+            }
+            Err(e) => eprintln!("dirigent: no log file: {e}"),
+        }
+    }
+}
+
 /// The launcher entry starting the app at `exec` (`--install-desktop`, and the .deb via `--desktop-entry`).
+#[cfg(target_os = "linux")]
 fn desktop_text(exec: &str) -> String {
     format!(
         "[Desktop Entry]\nType=Application\nName=Dirigent\nComment=Many Claude Code sessions in one window\n\
@@ -232,6 +279,7 @@ fn desktop_text(exec: &str) -> String {
 /// `--install-desktop`: `~/.local/share/applications/dirigent.desktop` (launching this binary) and the icon, so
 /// GNOME names notifications and shows the dock icon; `--uninstall-desktop` removes both. Nothing else ever writes
 /// to your home directory.
+#[cfg(target_os = "linux")]
 fn desktop_entry(install: bool) -> std::io::Result<()> {
     let data = std::env::var_os("XDG_DATA_HOME")
         .filter(|d| !d.is_empty())

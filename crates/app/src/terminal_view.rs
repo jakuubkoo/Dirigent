@@ -350,6 +350,8 @@ impl TerminalView {
         if let Some(text) = cx.read_from_primary().and_then(|c| c.text()) {
             self.paste(&text, cx);
         }
+        #[cfg(not(any(target_os = "linux", target_os = "freebsd")))]
+        let _ = cx; // no primary selection
     }
 
     fn paste(&mut self, text: &str, cx: &mut Context<Self>) {
@@ -543,6 +545,8 @@ impl TerminalView {
                 if let Some(text) = text {
                     cx.write_to_primary(ClipboardItem::new_string(text));
                 }
+                #[cfg(not(any(target_os = "linux", target_os = "freebsd")))]
+                let _ = text; // no primary selection
             }
         }
         cx.notify();

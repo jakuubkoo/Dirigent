@@ -17,6 +17,10 @@ serde = { version = "1", features = ["derive"] }
 async-channel = "2.5"
 # Watches settings.json for hand edits (the workspace's pinned fork, already built for the git crate).
 notify.workspace = true
+# The X11 window icon (gpui takes an RgbaImage); already in gpui's graph.
+image = { version = "0.25.10", default-features = false, features = ["png"] }
+
+[target.'cfg(target_os = "linux")'.dependencies]
 # Same version gpui uses; only to see whether the compositor offers blur (blur.rs).
 wayland-client = "0.31.15"
 # Desktop notifications (notify.rs). All already in gpui's graph (same versions/features): nothing new is built.
@@ -24,5 +28,7 @@ zbus = { version = "5.19", default-features = false, features = ["async-io", "bl
 wayland-backend = { version = "0.3.17", features = ["client_system"] }
 wayland-protocols = { version = "0.32.13", features = ["client", "staging"] }
 raw-window-handle = "0.6"
-# The X11 window icon (gpui takes an RgbaImage); already in gpui's graph.
-image = { version = "0.25.10", default-features = false, features = ["png"] }
+
+[target.'cfg(windows)'.dependencies]
+# Process liveness for the stale runtime-dir sweep, console attach and the log handles; already in the graph.
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_System_Threading", "Win32_System_Console"] }

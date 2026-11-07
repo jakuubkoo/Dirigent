@@ -1166,7 +1166,24 @@ impl Workspace {
             }),
             None => Vec::new(),
         };
+        #[cfg(unix)]
         let session = Session::spawn(dir, self.applied, &env).expect("spawn shell");
+        #[cfg(windows)]
+        let session = {
+            let spawn = |shell| {
+                let mut cmd = crate::shell::command(shell);
+                for (k, v) in &env {
+                    cmd.env(k, v);
+                }
+                Session::spawn_command(cmd, dir, self.applied)
+            };
+            spawn(self.settings.shell)
+                .or_else(|e| {
+                    eprintln!("dirigent: couldn't start {:?} ({e}), using Windows PowerShell", self.settings.shell);
+                    spawn(crate::settings::Shell::Powershell)
+                })
+                .expect("spawn shell")
+        };
         if self.settings.scrollback != Settings::default().scrollback {
             session.set_scrollback(self.settings.scrollback);
         }
@@ -3343,13 +3360,13 @@ fn with_pinned(
 }
 
 pub(crate) fn home() -> PathBuf {
-    std::env::var_os("HOME").map(PathBuf::from).unwrap_or_else(|| PathBuf::from("/"))
+    std::env::home_dir().unwrap_or_else(|| PathBuf::from("/"))
 }
 
 pub(crate) fn tilde(p: &Path) -> String {
     match p.strip_prefix(home()) {
         Ok(rest) if rest.as_os_str().is_empty() => "~".into(),
-        Ok(rest) => format!("~/{}", rest.display()),
+        Ok(rest) => format!("~{}{}", std::path::MAIN_SEPARATOR, rest.display()),
         Err(_) => p.display().to_string(),
     }
 }
