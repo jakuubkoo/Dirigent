@@ -24,6 +24,12 @@ All notable changes to Dirigent are recorded here. The format follows
   `dirigent C:\some\dir`, and a folder typed in another case (`cd c:\users\…`) is still the same project. "Needs
   you" and "done" show as Windows notifications (always silent, so the Sound setting is hidden); clicking one opens
   its session. The exe has the Dirigent icon.
+- Windows (preview, fourth step): WSL sessions. The New session picker lists your WSL distros; a session started in
+  one (or at a `\\wsl.localhost\…` path) runs your login shell there, and the panels follow `cd` in bash and zsh.
+  `claude` inside WSL shows working / needs you / done and the limits with your own Linux statusLine, and resume and
+  session history find its sessions. The git panel runs git inside the distro (your Linux config, ssh and
+  credentials); it refreshes after the agent's steps and at every prompt, or on a click, since Windows can't watch
+  files inside WSL. A `cd /mnt/c/…` there is the same folder as `C:\…`, with Windows git.
 - **Edit files in the preview**: type, select with the mouse or Shift+keys, copy/cut/paste, undo/redo, auto-indent
   on Enter, Tab / Shift+Tab (also over selected lines), Ctrl+S saves. A dot next to the name marks unsaved edits;
   Esc, switching or closing the session, opening another file and closing the window ask before dropping them.
