@@ -115,3 +115,42 @@ pub fn event_with(f: impl FnOnce() -> String) {
         verbose(&f());
     }
 }
+
+thread_local! {
+    static KEY: Cell<Option<Instant>> = const { Cell::new(None) };
+    static KEY_MS: std::cell::RefCell<Vec<f64>> = const { std::cell::RefCell::new(Vec::new()) };
+    static EDITOR_RENDERS: Cell<u64> = const { Cell::new(0) };
+}
+
+/// The editor handled a key (stamped for `key_painted`).
+pub fn key_pressed() {
+    if *ENABLED {
+        KEY.set(Some(Instant::now()));
+    }
+}
+
+/// The editor painted its caret: closes the key → paint measurement, if one is open.
+pub fn key_painted() {
+    if let Some(t) = KEY.take() {
+        let ms = t.elapsed().as_secs_f64() * 1e3;
+        verbose(&format!("key → paint {ms:.2} ms"));
+        KEY_MS.with_borrow_mut(|v| v.push(ms));
+    }
+}
+
+/// Key → paint latencies since the last call (typing harness).
+pub fn take_key_latencies() -> Vec<f64> {
+    KEY_MS.with_borrow_mut(std::mem::take)
+}
+
+pub fn editor_render() {
+    if *ENABLED {
+        EDITOR_RENDERS.set(EDITOR_RENDERS.get() + 1);
+        verbose("file view render");
+    }
+}
+
+/// File view renders so far (typing harness).
+pub fn editor_renders() -> u64 {
+    EDITOR_RENDERS.get()
+}

@@ -19,7 +19,8 @@ stay at zero lag and 0 % CPU when idle. Linux (Wayland and X11) for now.
   safely.
 - **Git:** changes and diffs (word-level, split, syntax-highlighted, structural with moved code), per-agent change
   tracking, staging per file or hunk, commits with an optional generated message.
-- **Files:** a file tree and a file preview.
+- **Files:** a file tree and an editor in the file preview (syntax colors, Ctrl+S saves; a file an agent changes
+  reloads, or asks when you have unsaved edits).
 - **Layout:** two docks around the terminal; Sessions, Files, Changes and Search go in either one (drag a tab to the
   other dock, or right click it). Settings → Layout sets docks and widths, and resets them.
 - **Settings:** a searchable page (Ctrl+,) over `settings.json`; hand edits of the file apply live.
@@ -160,7 +161,8 @@ group.
 | Ctrl+Shift+G / Ctrl+Shift+E | Show Changes / Files |
 | Ctrl+Shift+D | Unified / split diff |
 | Ctrl+Enter | Commit (in the commit box) |
-| Esc | Close a diff, preview, Settings, menu or dialog |
+| Ctrl+S | Save the file open in the editor |
+| Esc | Close a diff, preview, Settings, menu or dialog (asks first with unsaved edits) |
 
 ## State
 

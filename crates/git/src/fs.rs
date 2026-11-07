@@ -193,6 +193,46 @@ impl Drop for DirWatcher {
     }
 }
 
+/// Watches one file's content: by its directory, since a write by rename (most editors, agents' tools) replaces
+/// the file's inode. One notify instance per open editor; dropping it stops the thread.
+pub struct FileWatcher {
+    _watcher: notify::RecommendedWatcher,
+}
+
+/// Quiet time after the last event before `on_change` runs (a write is often several events).
+const FILE_QUIET: std::time::Duration = std::time::Duration::from_millis(100);
+
+impl FileWatcher {
+    /// `on_change()`: something touched `path` (written, replaced, removed, created), debounced. Compare the content
+    /// to tell a real change from a touch or our own save.
+    pub fn start(path: &Path, on_change: impl Fn() + Send + 'static) -> std::io::Result<Self> {
+        let dir = path.parent().filter(|d| !d.as_os_str().is_empty()).unwrap_or(Path::new(".")).to_path_buf();
+        let (tx, rx) = mpsc::channel::<()>();
+        let target = path.to_path_buf();
+        let handler = move |res: notify::Result<Event>| {
+            if res.is_ok_and(|ev| ev.paths.iter().any(|p| p == &target)) {
+                let _ = tx.send(());
+            }
+        };
+        let config = Config::default().with_event_kinds(EventKindMask::CORE);
+        let mut w = notify::RecommendedWatcher::new(handler, config).map_err(std::io::Error::other)?;
+        w.watch(&dir, RecursiveMode::NonRecursive).map_err(std::io::Error::other)?;
+        std::thread::Builder::new().name("file-watch".into()).spawn(move || {
+            while rx.recv().is_ok() {
+                loop {
+                    match rx.recv_timeout(FILE_QUIET) {
+                        Ok(()) => {}
+                        Err(RecvTimeoutError::Timeout) => break,
+                        Err(RecvTimeoutError::Disconnected) => return,
+                    }
+                }
+                on_change();
+            }
+        })?;
+        Ok(Self { _watcher: w })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::natural_cmp;
