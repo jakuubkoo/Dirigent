@@ -159,7 +159,6 @@ fn branches_and_switching() {
 }
 
 #[test]
-#[cfg_attr(windows, ignore = "Windows git step: the hung ssh child needs a Job Object to die")]
 fn cancel_kills_a_hung_fetch() {
     let s = setup("hung");
     // The "ssh" never answers; git runs core.sshCommand through the shell with its args after `:`.
