@@ -1,0 +1,110 @@
+{
+  "name": "High contrast",
+  "bg": {
+    "base": "#000000",
+    "panel": "#0e0e10",
+    "panel_translucent": "#0e0e10b8",
+    "elevated": "#1a1a1e",
+    "hover": "#232329",
+    "selected": "#30303a",
+    "selected_focus": "#203670",
+    "input": "#000000",
+    "scrim": "#00000080"
+  },
+  "border": {
+    "subtle": "#ffffff38",
+    "strong": "#ffffff6b"
+  },
+  "text": {
+    "primary": "#ffffff",
+    "muted": "#dcdce4",
+    "dim": "#c4c4ce",
+    "faint": "#9d9da8",
+    "on_accent": "#000000"
+  },
+  "accent": "#97a3ff",
+  "state": {
+    "working": "#60a5fa",
+    "needs_you": "#f5a524",
+    "done": "#4ade80",
+    "done_seen": "#c4c4ce",
+    "error": "#f87171"
+  },
+  "git": {
+    "added": "#73c991",
+    "modified": "#e2c08d",
+    "deleted": "#f07178",
+    "renamed": "#7aa2f7",
+    "conflict": "#f5a524"
+  },
+  "diff": {
+    "add_bg": "#0f2e1b",
+    "add_fg": "#b5e3c0",
+    "del_bg": "#3a1418",
+    "del_fg": "#f2b8bd",
+    "add_word_bg": "#1f5132",
+    "del_word_bg": "#6b2a31",
+    "hunk": "#9aa6c8",
+    "context": "#f0f0f4",
+    "filler": "#0a0a0c",
+    "clean_del": "#f87171",
+    "clean_add": "#4ade80",
+    "clean_del_bg": "#f8717129",
+    "clean_add_bg": "#4ade8029",
+    "moved": "#60a5fa",
+    "moved_bg": "#60a5fa29",
+    "gutter": "#a0a0aa"
+  },
+  "scrollbar": {
+    "thumb": "#ffffff40",
+    "active": "#ffffff80"
+  },
+  "meter": {
+    "track": "#ffffff14",
+    "ok": "#97a3ff",
+    "warn": "#f5a524",
+    "crit": "#f87171"
+  },
+  "terminal": {
+    "bg": "#000000",
+    "fg": "#f0f0f4",
+    "cursor": "#ffffff",
+    "selection": "#2f4a8a",
+    "ansi": [
+      "#24242a",
+      "#f0707a",
+      "#8fd18a",
+      "#e9c46a",
+      "#6aa8f7",
+      "#c792ea",
+      "#5ccfe6",
+      "#c8c8ce",
+      "#5a5a66",
+      "#ff8a93",
+      "#a8e6a3",
+      "#f5d58a",
+      "#8bbcff",
+      "#d7aaf5",
+      "#7fdcf0",
+      "#f4f4f6"
+    ]
+  },
+  "syntax": {
+    "keyword": "#c4a1ff",
+    "string": "#9ece6a",
+    "number": "#ff9e64",
+    "comment": "#a6a6b2",
+    "function": "#7aa2f7",
+    "type": "#5ccfe6",
+    "variable": "#f0f0f4",
+    "constant": "#f5a97f",
+    "property": "#a9b8f5",
+    "punctuation": "#b4b4c0",
+    "operator": "#89ddff",
+    "tag": "#f7768e",
+    "attribute": "#e0af68"
+  },
+  "danger_hover": "#c4314b",
+  "search_match": "#5c4a14",
+  "search_current": "#96700f"
+}

@@ -343,6 +343,8 @@ pub struct Workspace {
     /// Preferences (settings.json), and what's wrong with the file (shown on the Settings page and the status bar).
     pub(crate) settings: Settings,
     pub(crate) settings_notes: Vec<String>,
+    /// `<settings dir>/themes/*.json`, read at startup and with every settings.json reload.
+    pub(crate) user_themes: Vec<crate::theme::User>,
     /// The file isn't valid JSON: the next UI change keeps it as `.bad-<time>` before writing.
     settings_broken: bool,
     pub(crate) settings_path: PathBuf,
@@ -497,6 +499,7 @@ impl Workspace {
             pr_poll: None,
             settings: loaded.parsed.settings,
             settings_notes: loaded.parsed.notes,
+            user_themes: loaded.themes,
             settings_broken: loaded.parsed.broken,
             settings_path,
             settings_text: loaded.text,
@@ -2493,6 +2496,12 @@ impl Workspace {
     /// Makes `new` the live settings, touching only what changed.
     fn apply_settings(&mut self, new: Settings, cx: &mut Context<Self>) {
         let old = std::mem::replace(&mut self.settings, new.clone());
+        // Also after a reload of the theme files (new theme, same name).
+        let (theme, _) = crate::theme::resolve(&new.theme, &self.user_themes);
+        if !std::ptr::eq(theme, crate::theme::get()) {
+            crate::theme::set(theme);
+            self.repaint_all(cx);
+        }
         if old.font_size != new.font_size || old.ui_zoom != new.ui_zoom {
             self.metrics_stale = true; // rebuilt in render (needs the window)
         }
@@ -2535,6 +2544,10 @@ impl Workspace {
         }
     }
 
+    fn theme_notes(&self) -> Vec<String> {
+        crate::theme::notes(&self.user_themes, &self.settings.theme)
+    }
+
     /// Writes settings.json shortly after a change (the latest values; one write at a time), off the UI thread.
     fn save_settings(&mut self, cx: &mut Context<Self>) {
         // What we write is the whole truth now: the old file's problems are gone with it.
@@ -2543,6 +2556,7 @@ impl Workspace {
         } else {
             Vec::new()
         };
+        self.settings_notes.extend(self.theme_notes()); // the theme files' problems are still there
         if self.settings_save_pending {
             return;
         }
@@ -2580,7 +2594,13 @@ impl Workspace {
         self._settings_task = Some(cx.spawn_in(window, async move |this, cx| {
             while pings.recv().await.is_ok() {
                 let p = path.clone();
-                let text = cx.background_executor().spawn(async move { std::fs::read_to_string(p) }).await;
+                let (text, themes) = cx
+                    .background_executor()
+                    .spawn(async move {
+                        let themes = crate::theme::load_user(&settings::themes_dir(&p));
+                        (std::fs::read_to_string(p), themes)
+                    })
+                    .await;
                 let applied = this.update(cx, |w, cx| {
                     let text = match text {
                         Ok(t) => Some(t),
@@ -2599,7 +2619,9 @@ impl Workspace {
                     };
                     crate::perf::event("settings reloaded");
                     w.settings_text = text;
+                    w.user_themes = themes;
                     w.settings_notes = parsed.notes;
+                    w.settings_notes.extend(crate::theme::notes(&w.user_themes, &parsed.settings.theme));
                     w.settings_broken = parsed.broken;
                     w.apply_settings(parsed.settings, cx);
                 });
@@ -2669,6 +2691,26 @@ impl Workspace {
         for b in self.commit_boxes.values() {
             b.update(cx, |_, cx| cx.notify());
         }
+    }
+
+    /// A theme switch: every cached view (they replay their last frame until notified) renders once more.
+    fn repaint_all(&mut self, cx: &mut Context<Self>) {
+        for view in self.tabs.iter().filter_map(|t| t.view.clone()) {
+            view.update(cx, |_, cx| cx.notify());
+        }
+        match &self.overlay {
+            Some(Overlay::Diff(v)) => v.update(cx, |_, cx| cx.notify()),
+            Some(Overlay::File(v)) => v.update(cx, |_, cx| cx.notify()),
+            Some(Overlay::Settings(v)) => v.update(cx, |_, cx| cx.notify()),
+            None => {}
+        }
+        self.git_panel.update(cx, |_, cx| cx.notify());
+        self.files_panel.update(cx, |_, cx| cx.notify());
+        self.search_panel.update(cx, |_, cx| cx.notify());
+        for b in self.commit_boxes.values() {
+            b.update(cx, |_, cx| cx.notify());
+        }
+        cx.notify();
     }
 
     /// Hands the mode, split style, engine and the (settled) main-area width to the open diff; it re-renders only if

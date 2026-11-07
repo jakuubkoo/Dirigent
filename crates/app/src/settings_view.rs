@@ -26,6 +26,7 @@ use crate::workspace::{Workspace, home, sh_word, tilde};
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum Cat {
     General,
+    Appearance,
     Terminal,
     Layout,
     Notifications,
@@ -35,8 +36,9 @@ enum Cat {
     Keyboard,
 }
 
-const CATS: [(Cat, &str); 8] = [
+const CATS: [(Cat, &str); 9] = [
     (Cat::General, "General"),
+    (Cat::Appearance, "Appearance"),
     (Cat::Terminal, "Terminal"),
     (Cat::Layout, "Layout"),
     (Cat::Notifications, "Notifications"),
@@ -329,11 +331,14 @@ enum Field {
     Item(Key),
     /// A project's 0 auto claude, 1 flags, 2 setup command, 3 worktree dir.
     Proj(PathBuf, u8),
+    /// The theme picker (←/→ switch).
+    Theme,
 }
 
 /// A change to hand to the workspace once this view's update is over.
 enum Apply {
     Settings(Key, Val),
+    Theme(String),
     Project(PathBuf, Defaults),
     ResetLayout,
     Close,
@@ -373,6 +378,8 @@ pub struct SettingsView {
     search: LineEdit,
     cat: Cat,
     form: Form,
+    /// Built-in then user themes (id, theme), refreshed every render.
+    themes: Vec<(String, &'static theme::Theme)>,
 }
 
 /// Which row has keyboard focus and the value being typed there (no gpui: unit-tested).
@@ -399,6 +406,7 @@ impl SettingsView {
             search: LineEdit::new(""),
             cat: Cat::General,
             form: Form::default(),
+            themes: Vec::new(),
         }
     }
 
@@ -453,6 +461,10 @@ impl SettingsView {
         match c {
             Cat::Projects => !self.projects_of(projects, q).is_empty(),
             Cat::Keyboard => !Self::keys_of(q).is_empty(),
+            Cat::Appearance => {
+                Self::hit(q, &["appearance theme themes colors dark light contrast"])
+                    || self.themes.iter().any(|(_, t)| Self::hit(q, &[&t.name]))
+            }
             c => !self.items_of(c, q).is_empty(),
         }
     }
@@ -469,6 +481,7 @@ impl SettingsView {
                     }
                 }
                 Cat::Keyboard => {}
+                Cat::Appearance => v.push(Field::Theme),
                 c => v.extend(self.items_of(c, &q).iter().map(|i| Field::Item(i.key))),
             }
         }
@@ -538,6 +551,12 @@ impl SettingsView {
                 let p = projects.iter().find(|p| p.root == root)?;
                 Some(Apply::Project(root, Defaults { auto: !p.auto_claude, ..Defaults::of(p) }))
             }
+            Field::Theme if matches!(key, "left" | "right") => {
+                let n = self.themes.len();
+                let at = self.themes.iter().position(|(id, _)| *id == s.theme).unwrap_or(0);
+                let next = if key == "left" { (at + n - 1) % n } else { (at + 1) % n };
+                Some(Apply::Theme(self.themes.get(next)?.0.clone()))
+            }
             _ => None,
         }
     }
@@ -584,7 +603,7 @@ impl Form {
                 *d.field(i) = edit.text.clone();
                 (d.field(i) != old.clone().field(i)).then_some(Apply::Project(root, d))
             }
-            Field::Search => None,
+            Field::Search | Field::Theme => None,
         }
     }
 
@@ -633,6 +652,7 @@ fn act(
         None => {}
         Some(Apply::Close) => w.update(cx, |w, cx| w.close_overlay(window, cx)),
         Some(Apply::Settings(k, v)) => w.update(cx, |w, cx| w.change_settings(|s| set(s, k, v), cx)),
+        Some(Apply::Theme(id)) => w.update(cx, |w, cx| w.change_settings(|s| s.theme = id, cx)),
         Some(Apply::ResetLayout) => w.update(cx, |w, cx| w.change_settings(|s| s.layout = Layout::default(), cx)),
         Some(Apply::Project(root, d)) => w.update(cx, |w, cx| {
             let typed = Typed { auto: d.auto, flags: &d.flags, setup: &d.setup, wt_dir: &d.wt_dir };
@@ -647,6 +667,11 @@ impl Render for SettingsView {
         let Some(w) = self.workspace.upgrade() else { return div().into_any_element() };
         let (s, notes, file, projects) = {
             let w = w.read(cx);
+            self.themes = theme::builtins()
+                .iter()
+                .map(|&(id, t)| (id.to_string(), t))
+                .chain(w.user_themes.iter().map(|u| (u.id.clone(), u.theme)))
+                .collect();
             (w.settings.clone(), w.settings_notes.clone(), w.settings_path.clone(), w.projects.0.clone())
         };
         let (view, ws) = (cx.entity().downgrade(), self.workspace.clone());
@@ -767,6 +792,37 @@ impl Render for SettingsView {
                     for p in list {
                         rows.push(self.project_card(&p, &view, &ws));
                     }
+                }
+                Cat::Appearance => {
+                    rows.push(
+                        div()
+                            .pb(z(space::SM))
+                            .text_size(z(text_size::XS))
+                            .text_color(t.text.dim)
+                            .child(format!(
+                                "Applies at once (←/→ when focused). Own themes: JSON files in {}, any token left out comes from Slate.",
+                                tilde(&crate::settings::themes_dir(&file))
+                            ))
+                            .into_any_element(),
+                    );
+                    let focused = self.form.field == Field::Theme;
+                    rows.push(
+                        div()
+                            .flex()
+                            .flex_wrap()
+                            .gap(z(space::LG))
+                            .p(z(space::XS))
+                            .rounded(z(radius::LG))
+                            .border_1()
+                            .border_color(if focused { t.accent } else { gpui::transparent_black().into() })
+                            .children(
+                                self.themes
+                                    .iter()
+                                    .filter(|(_, c)| Self::hit(&q, &[&c.name, "appearance theme"]))
+                                    .map(|(id, c)| theme_card(id, c, *id == s.theme, &view, &ws)),
+                            )
+                            .into_any_element(),
+                    );
                 }
                 Cat::Keyboard => {
                     rows.push(
@@ -1148,6 +1204,128 @@ impl SettingsView {
             .child(input(3, &d.wt_dir, "~/worktrees/project"))
             .into_any_element()
     }
+}
+
+/// A theme to pick: a small preview drawn with that theme's own tokens (sidebar with a selected row, a header, code),
+/// its name; the live one has an accent border and a check.
+fn theme_card(
+    id: &str,
+    c: &'static theme::Theme,
+    live: bool,
+    view: &WeakEntity<SettingsView>,
+    ws: &WeakEntity<Workspace>,
+) -> gpui::AnyElement {
+    let t = theme::get();
+    let bar = |w: f32, color| div().h(z(4.)).w(z(w)).rounded_full().bg(color);
+    let row = |w: f32, color| div().h(z(12.)).px(z(space::XS)).flex().items_center().child(bar(w, color));
+    let sidebar = div()
+        .w(z(64.))
+        .h_full()
+        .flex_none()
+        .flex()
+        .flex_col()
+        .gap(z(space::XXS))
+        .py(z(space::XS))
+        .bg(c.bg.panel)
+        .border_r_1()
+        .border_color(c.border.strong)
+        .child(
+            div()
+                .h(z(12.))
+                .px(z(space::XS))
+                .flex()
+                .items_center()
+                .gap(z(space::XXS))
+                .child(div().size(z(5.)).rounded_full().bg(c.state.done))
+                .child(bar(26., c.text.primary)),
+        )
+        .child(
+            div()
+                .relative()
+                .mx(z(space::XXS))
+                .rounded(z(radius::SM))
+                .bg(c.bg.selected)
+                .child(div().absolute().left_0().top(z(2.)).bottom(z(2.)).w(z(2.)).rounded_full().bg(c.accent))
+                .child(row(34., c.text.primary)),
+        )
+        .child(div().mx(z(space::XXS)).rounded(z(radius::SM)).bg(c.bg.hover).child(row(30., c.text.muted)))
+        .child(row(22., c.text.dim))
+        .child(row(28., c.text.muted));
+    let code = |parts: &[(f32, gpui::Rgba)]| {
+        div().h(z(9.)).flex().items_center().gap(z(3.)).children(parts.iter().map(|&(w, col)| bar(w, col)))
+    };
+    let s = &c.syntax;
+    let main = div()
+        .flex_1()
+        .h_full()
+        .flex()
+        .flex_col()
+        .bg(c.bg.base)
+        .child(
+            div()
+                .h(z(12.))
+                .flex_none()
+                .px(z(space::XS))
+                .flex()
+                .items_center()
+                .bg(c.bg.elevated)
+                .border_b_1()
+                .border_color(c.border.strong)
+                .child(bar(30., c.text.primary)),
+        )
+        .child(
+            div()
+                .flex()
+                .flex_col()
+                .py(z(space::XXS))
+                .child(div().px(z(space::XS)).child(code(&[(12., s.keyword), (22., s.function), (8., s.punctuation)])))
+                .child(div().px(z(space::XS)).bg(c.diff.add_bg).child(code(&[(16., s.r#type), (26., s.string)])))
+                .child(div().px(z(space::XS)).child(code(&[(8., s.keyword), (14., s.variable), (10., s.number)])))
+                .child(div().px(z(space::XS)).child(code(&[(40., s.comment)]))),
+        );
+    let (view, ws, id) = (view.clone(), ws.clone(), id.to_string());
+    div()
+        .id(gpui::ElementId::Name(format!("theme-{id}").into()))
+        .w(z(196.))
+        .flex()
+        .flex_col()
+        .gap(z(space::SM))
+        .p(z(space::SM))
+        .rounded(z(radius::LG))
+        .border_2()
+        .border_color(if live { t.accent } else { t.border.subtle })
+        .cursor_pointer()
+        .when(!live, |d| d.hover(|s| s.border_color(t.border.strong)))
+        .child(
+            div()
+                .h(z(76.))
+                .flex()
+                .overflow_hidden()
+                .rounded(z(radius::MD))
+                .border_1()
+                .border_color(c.border.strong)
+                .child(sidebar)
+                .child(main),
+        )
+        .child(
+            div()
+                .flex()
+                .items_center()
+                .gap(z(space::XS))
+                .text_size(z(text_size::SM))
+                .child(div().flex_1().min_w_0().truncate().child(c.name.clone()))
+                .when(id == theme::DEFAULT, |d| {
+                    d.child(div().text_size(z(text_size::XS)).text_color(t.text.dim).child("default"))
+                })
+                .when(live, |d| d.child(ui::icon(icon::CHECK, 13., t.accent))),
+        )
+        .on_click(move |_: &ClickEvent, window, cx| {
+            let id = id.clone();
+            // Focus first (commits a value being typed elsewhere), then the theme.
+            act(&view, &ws, window, cx, |v, s, p, _| v.focus_field(Field::Theme, s, p));
+            act(&view, &ws, window, cx, move |_, _, _, _| Some(Apply::Theme(id)));
+        })
+        .into_any_element()
 }
 
 #[cfg(test)]

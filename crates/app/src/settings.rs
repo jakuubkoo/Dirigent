@@ -102,6 +102,8 @@ pub struct Settings {
     pub fetch_minutes: u32,
     /// `git.hosts`: remote hosts whose forge / web UI the name doesn't give away (sorted by host). Hand-edited.
     pub hosts: Vec<git::remote::HostRule>,
+    /// `appearance.theme`: a built-in theme id or a file name (without `.json`) in `themes/` next to settings.json.
+    pub theme: String,
     /// Sections and keys this build doesn't know (an older or newer build's): written back as they are.
     pub extra: serde_json::Map<String, Value>,
 }
@@ -144,6 +146,7 @@ impl Default for Settings {
             layout: Layout::default(),
             fetch_minutes: 0,
             hosts: Vec::new(),
+            theme: crate::theme::DEFAULT.into(),
             extra: serde_json::Map::new(),
         }
     }
@@ -157,6 +160,7 @@ const KEYS: &[(&str, &[&str])] = &[
     ("diff", &["mode", "split_style", "engine"]),
     ("layout", &["sessions", "files", "changes", "search", "left_width", "right_width"]),
     ("git", &["fetch_minutes", "hosts"]),
+    ("appearance", &["theme"]),
 ];
 
 impl Settings {
@@ -182,6 +186,7 @@ impl Settings {
                     "right_width": s.layout.right_width,
                 },
                 "git": { "fetch_minutes": s.fetch_minutes, "hosts": hosts_json(&s.hosts) },
+                "appearance": { "theme": s.theme },
             })
         };
         let (mine, defaults) = (all(self), all(&Settings::default()));
@@ -279,6 +284,8 @@ pub fn parse(text: &str, fallback: &Settings) -> Parsed {
             Layout { sessions, files, changes, search, left_width, right_width }
         },
         hosts: parse_hosts(&v["git"]["hosts"], g.notes),
+        // Whether the theme exists is checked when it's applied (user themes are files).
+        theme: g.get("appearance", "theme", d.theme.clone(), "a theme name", |t: &String| !t.trim().is_empty()),
         extra: serde_json::Map::new(),
         fetch_minutes: g.get(
             "git",
@@ -409,6 +416,11 @@ impl Get<'_> {
     }
 }
 
+/// User themes: `themes/` next to settings.json (so test runs never read the real ones).
+pub fn themes_dir(settings_path: &Path) -> PathBuf {
+    settings_path.parent().unwrap_or(Path::new(".")).join("themes")
+}
+
 /// `DIRIGENT_SETTINGS`; with `DIRIGENT_STATE` (test runs) `settings.json` next to that state file, so a test never
 /// touches the real config; else `$XDG_CONFIG_HOME/dirigent/settings.json`, else `~/.config/…`. Never a file in a
 /// Dirigent runtime dir: those hold the app's own files (claude's per-tab hook settings). Older builds exported that
@@ -448,13 +460,16 @@ fn in_runtime_dir(p: &Path, runtime: &Path) -> bool {
 pub struct Loaded {
     pub parsed: Parsed,
     pub text: Option<String>,
+    /// `themes_dir`'s files (read here: before the window, like the rest).
+    pub themes: Vec<crate::theme::User>,
 }
 
 /// Startup. No settings file yet → the preferences an older state file still holds (diff mode/style/engine,
 /// notifications) are taken over and the file is written. Blocking IO: before the window opens, like the state.
 pub fn load(path: &Path, state_path: &Path) -> Loaded {
-    match std::fs::read_to_string(path) {
-        Ok(text) => Loaded { parsed: parse(&text, &Settings::default()), text: Some(text) },
+    let themes = crate::theme::load_user(&themes_dir(path));
+    let (parsed, text) = match std::fs::read_to_string(path) {
+        Ok(text) => (parse(&text, &Settings::default()), Some(text)),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
             let (parsed, migrated) = from_state(state_path);
             let text = parsed.settings.to_json();
@@ -465,10 +480,11 @@ pub fn load(path: &Path, state_path: &Path) -> Loaded {
                 Ok(()) => {}
                 Err(e) => eprintln!("dirigent: couldn't write {}: {e}", path.display()),
             }
-            Loaded { parsed, text: Some(text) }
+            (parsed, Some(text))
         }
-        Err(e) => Loaded { parsed: broken(&Settings::default(), format!("settings.json: {e}")), text: None },
-    }
+        Err(e) => (broken(&Settings::default(), format!("settings.json: {e}")), None),
+    };
+    Loaded { parsed, text, themes }
 }
 
 /// Dock widths used to live in the state file (`sidebar.width`, `git_panel.width`): a settings file without a
@@ -590,10 +606,14 @@ mod tests {
                 forge: git::remote::Forge::GitLab,
                 web: Some("https://gitlab.jakuubkoo.me".into()),
             }],
+            theme: "paper".into(),
             extra: serde_json::Map::new(),
         };
         let p = parse(&s.to_json(), &Settings::default());
         assert!(s.to_json().contains("\"fetch_minutes\": 15"));
+        assert!(s.to_json().contains("\"theme\": \"paper\""));
+        let blank = parse(r#"{"appearance": {"theme": " "}}"#, &Settings::default());
+        assert_eq!((blank.settings.theme.as_str(), blank.notes.len()), (crate::theme::DEFAULT, 1));
         let bad = parse(r#"{"git": {"fetch_minutes": 500}}"#, &Settings::default());
         assert_eq!((bad.settings.fetch_minutes, bad.notes.len()), (0, 1), "out of range: off, with a note");
         let hosts = parse(

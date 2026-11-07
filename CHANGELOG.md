@@ -15,6 +15,9 @@ All notable changes to Dirigent are recorded here. The format follows
   type, then `claude -p` on Haiku (off the UI thread, no tools, no saved session) when you leave the prompt or press
   Create. One call at a time; closing the dialog stops it. A name you type stays; a `Branch: x` line in the prompt
   gives the branch as written.
+- Themes: Slate (the new default), Neutral, Recessed, Ember, High contrast and Paper (light), picked in Settings →
+  Appearance from cards with a small preview and applied at once. Your own themes are JSON files in `themes/` next
+  to settings.json; any token left out or invalid comes from Slate, with a note saying which.
 
 ### Changed
 
