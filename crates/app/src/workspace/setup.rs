@@ -534,8 +534,14 @@ impl Workspace {
         let prompt = Some(s.prompt.text.trim().to_string()).filter(|p| s.claude && !p.is_empty());
         let project = s.project.clone();
         if !s.worktree {
-            let opts =
-                SessionOpts { name, claude: Some(s.claude), prompt, setup: false, project: Some(project.clone()) };
+            let opts = SessionOpts {
+                name,
+                claude: Some(s.claude),
+                prompt,
+                setup: false,
+                project: Some(project.clone()),
+                resume: None,
+            };
             self.modal = None;
             self.new_session_with(project, opts, window, cx);
             return;
@@ -576,7 +582,14 @@ impl Workspace {
             let _ = this.update_in(cx, |w, window, cx| match result {
                 Ok(()) => {
                     w.modal = None;
-                    let opts = SessionOpts { name, claude: Some(claude), prompt, setup: true, project: Some(project) };
+                    let opts = SessionOpts {
+                        name,
+                        claude: Some(claude),
+                        prompt,
+                        setup: true,
+                        project: Some(project),
+                        resume: None,
+                    };
                     w.new_session_with(path, opts, window, cx);
                 }
                 Err(e) => {

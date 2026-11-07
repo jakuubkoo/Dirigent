@@ -76,7 +76,15 @@ pub fn window_controls(window: &Window) -> impl IntoElement {
             let glyph = if window.is_maximized() { icon::RESTORE } else { icon::MAXIMIZE };
             d.child(button("maximize", glyph, t.bg.hover).on_click(|_, window, _| window.zoom_window()))
         })
-        .child(button("close", icon::CLOSE, t.danger_hover).on_click(|_, window, _| window.remove_window()))
+        .child(button("close", icon::CLOSE, t.danger_hover).on_click(|_, window, cx| {
+            // `remove_window` skips the should-close hook: ask about unsaved editor edits here.
+            if let Some(Some(ws)) = window.root::<crate::workspace::Workspace>()
+                && ws.update(cx, |w, cx| w.ask_before_quit(window, cx))
+            {
+                return;
+            }
+            window.remove_window();
+        }))
 }
 
 /// Invisible strips along the window edges that start a compositor-driven resize. Hidden on tiled edges.

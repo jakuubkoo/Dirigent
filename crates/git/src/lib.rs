@@ -14,7 +14,7 @@ use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
-pub use fs::{DirWatcher, Entry, Listing, list_dir};
+pub use fs::{DirWatcher, Entry, FileWatcher, Listing, list_dir};
 pub use watch::{Update, Watcher};
 
 /// Files listed per repo; the rest are counted in `Status::more`.

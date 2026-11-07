@@ -43,11 +43,21 @@ pub enum FileText {
 
 /// Reads a file for the preview. Blocking: run off the UI thread.
 pub fn read_file(path: &Path) -> std::io::Result<FileText> {
+    Ok(file_text(read_capped(path)?))
+}
+
+/// The first `MAX_FILE_BYTES` + 1 bytes of a file (one more than shown tells it was cut). Blocking.
+pub fn read_capped(path: &Path) -> std::io::Result<Vec<u8>> {
     let f = std::fs::File::open(path)?;
     let mut buf = Vec::new();
     f.take(MAX_FILE_BYTES as u64 + 1).read_to_end(&mut buf)?;
+    Ok(buf)
+}
+
+/// Display lines of bytes read by `read_capped`.
+pub fn file_text(mut buf: Vec<u8>) -> FileText {
     if buf[..buf.len().min(8192)].contains(&0) {
-        return Ok(FileText::Binary);
+        return FileText::Binary;
     }
     let cut = buf.len() > MAX_FILE_BYTES;
     buf.truncate(MAX_FILE_BYTES);
@@ -64,7 +74,7 @@ pub fn read_file(path: &Path) -> std::io::Result<FileText> {
     if cut {
         lines.pop(); // the last one is cut mid-line
     }
-    Ok(FileText::Lines { lines, truncated, raw: text })
+    FileText::Lines { lines, truncated, raw: text }
 }
 
 /// Maps byte spans of a raw line onto `display_line(line, 0)`: a tab's span covers its spaces, anything past the
@@ -95,6 +105,31 @@ pub fn display_spans<C: Copy>(line: &str, spans: &[(Range<u32>, C)]) -> Vec<(Ran
             (b > a).then_some((a..b, *c))
         })
         .collect()
+}
+
+/// A unified line diff of two texts with 3 lines of context: (`' '` / `'-'` / `'+'`, line), hunks separated by a
+/// `('⋯', "")` row. For comparing an editor's unsaved text with the file on disk (no git involved).
+pub fn line_diff(old: &str, new: &str) -> Vec<(char, String)> {
+    use imara_diff::{Algorithm, InternedInput};
+    const CONTEXT: u32 = 3;
+    let input = InternedInput::new(old, new);
+    let diff = imara_diff::Diff::compute(Algorithm::Histogram, &input);
+    let text = |t: imara_diff::Token| input.interner[t].trim_end_matches(['\n', '\r']).to_string();
+    let mut out = Vec::new();
+    let mut shown = 0u32; // old-side lines already emitted
+    for h in diff.hunks() {
+        let from = h.before.start.saturating_sub(CONTEXT).max(shown);
+        if from > shown {
+            out.push(('⋯', String::new()));
+        }
+        out.extend((from..h.before.start).map(|i| (' ', text(input.before[i as usize]))));
+        out.extend(h.before.clone().map(|i| ('-', text(input.before[i as usize]))));
+        out.extend(h.after.clone().map(|i| ('+', text(input.after[i as usize]))));
+        let to = (h.before.end + CONTEXT).min(input.before.len() as u32);
+        out.extend((h.before.end..to).map(|i| (' ', text(input.before[i as usize]))));
+        shown = to;
+    }
+    out
 }
 
 #[cfg(test)]
@@ -143,5 +178,15 @@ mod tests {
         let FileText::Lines { truncated, .. } = w("d", big.as_bytes()) else { panic!() };
         assert!(truncated);
         let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn line_diff_hunks_with_context() {
+        let old = "1\n2\n3\n4\n5\n6\n7\n8\n9\n10\n";
+        let new = "1\n2\nthree\n4\n5\n6\n7\n8\n9\n10\n11\n";
+        let d = super::line_diff(old, new);
+        let rows: Vec<String> = d.iter().map(|(k, l)| format!("{k}{l}")).collect();
+        assert_eq!(rows, [" 1", " 2", "-3", "+three", " 4", " 5", " 6", "⋯", " 8", " 9", " 10", "+11"]);
+        assert!(super::line_diff("same\n", "same\n").is_empty());
     }
 }

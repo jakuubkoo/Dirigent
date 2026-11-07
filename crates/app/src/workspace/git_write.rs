@@ -638,6 +638,7 @@ impl Workspace {
         self.close_modal(window, cx);
         match then {
             Then::Git(root, job) => self.run_git(root, job, cx),
+            Then::Leave(leave) => self.leave(leave, window, cx),
             Then::Close(id) => {
                 if let Some(i) = self.tab_idx(id) {
                     self.close_now(i, window, cx);
@@ -648,6 +649,7 @@ impl Workspace {
                     self.restart_tab(i, window, cx);
                 }
             }
+            Then::Resume { dir, id, project } => self.resume_new(dir, id, project, window, cx),
         }
     }
 }

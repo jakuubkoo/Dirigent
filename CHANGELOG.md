@@ -14,6 +14,13 @@ All notable changes to Dirigent are recorded here. The format follows
   Prompt (your profile and prompt stay as they are). `dirigent <folder>` from a terminal reuses the running window.
   Settings live in `%APPDATA%\dirigent`, sessions and the log in `%LOCALAPPDATA%\dirigent`. Claude Code hooks, git
   writes, notifications and WSL come in the next steps.
+- **Edit files in the preview**: type, select with the mouse or Shift+keys, copy/cut/paste, undo/redo, auto-indent
+  on Enter, Tab / Shift+Tab (also over selected lines), Ctrl+S saves. A dot next to the name marks unsaved edits;
+  Esc, switching or closing the session, opening another file and closing the window ask before dropping them.
+  When an agent changes the open file, it reloads (cursor kept, a short "Reloaded" notice) if you have no unsaved
+  edits; otherwise a banner offers Reload (lose mine), Keep mine or Show diff. Ctrl+Z never goes back past a
+  reload. Saving over a change made on disk asks first. Binary, non-UTF-8 and large files (over 2 MB / 50k lines,
+  or lines over 2000 characters) stay read-only.
 - New session dialog: a branch prefix dropdown (`feat/`, `fix/`, `chore/`, `docs/`, none) next to the branch field,
   `feat/` by default and remembered per project. The slug made from the session name never takes a `/` from it
   (`esc-ctrl-c`, not `esc/ctrl-c`).
@@ -25,6 +32,14 @@ All notable changes to Dirigent are recorded here. The format follows
   written. The prompt's first words (skipping headings and plan mode lines) name it only when claude can't.
 - Settings → General → "Name new sessions with Claude" (on by default): off, the New session dialog makes no
   `claude -p` call; a branch written in the prompt and its first words still name the session.
+- History: a project's past Claude Code sessions (project menu ⋯ → History…, or "Claude: Session history" in the
+  Command Center), newest first, with Claude's title or your name for it, the first prompt, branch, message count
+  and last activity; type to search titles and prompts. Enter resumes the session in a new tab where it was
+  started, or switches to the tab that already has it. Read from Claude's own transcripts, never changed. A session
+  that a claude outside Dirigent runs (Linux: its command line names it) or that was written in the last 2 minutes is
+  marked "maybe running elsewhere" and asks before resuming, so two claude processes don't write one transcript. When
+  a claude outside Dirigent works in the project (Linux), the list says so in its header. With no session open, the
+  command asks for the project first.
 
 ### Changed
 

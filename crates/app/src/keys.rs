@@ -71,6 +71,7 @@ fn command_only() -> Vec<(&'static str, &'static str, Box<dyn gpui::Action>)> {
         ("", "Git: Fetch", Box::new(GitFetch)),
         ("", "Git: Pull (fast-forward only)", Box::new(GitPull)),
         ("", "Git: Push (publish a new branch)", Box::new(GitPush)),
+        ("", "Claude: Session history of this project…", Box::new(SessionHistory)),
     ]
 }
 
@@ -96,6 +97,11 @@ pub const EXTRA: &[(&str, &str)] = &[
     ("Enter", "Picker: open the setup dialog · exited session: restart it"),
     ("Ctrl+Enter / Shift+Enter", "Picker: open a session at once (Shift: the other claude choice)"),
     ("Tab", "Picker: complete a path"),
+    ("Ctrl+S", "Editor: save the file (asks before overwriting a change made on disk)"),
+    ("Ctrl+Z / Ctrl+Y, Ctrl+Shift+Z", "Editor: undo / redo"),
+    ("Tab / Shift+Tab", "Editor: indent / outdent (every selected line)"),
+    ("Home", "Editor: first non-blank character, again: line start"),
+    ("Double / triple click", "Editor: select a word / a line"),
 ];
 
 /// `ctrl-shift-t` → `Ctrl+Shift+T`.
