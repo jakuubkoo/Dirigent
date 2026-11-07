@@ -16,7 +16,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
 pub use fs::{DirWatcher, Entry, FileWatcher, Listing, list_dir};
-pub use watch::{Update, Watcher};
+pub use watch::{Toucher, Update, Watcher};
 
 /// Files listed per repo; the rest are counted in `Status::more`.
 pub const MAX_FILES: usize = 2000;
@@ -161,9 +161,8 @@ pub fn same_path(a: &Path, b: &Path) -> bool {
 /// `git` with the options every call needs. `--no-optional-locks`: a plain `git status` refreshes and rewrites
 /// `.git/index`, which our own watcher would see as a change (a refresh loop).
 fn git(dir: &Path) -> Command {
-    let mut c = cmd("git");
+    let mut c = native_or_wsl(dir, "git");
     c.arg("--no-optional-locks")
-        .current_dir(dir)
         .env("GIT_OPTIONAL_LOCKS", "0")
         .env("LC_ALL", "C")
         .env_remove("GIT_DIR")
@@ -172,6 +171,15 @@ fn git(dir: &Path) -> Command {
         .stdin(Stdio::null())
         .stderr(Stdio::null());
     c
+}
+
+/// `program` in `dir`: natively, or inside the distro for a WSL path (`wsl::command`).
+pub(crate) fn native_or_wsl(dir: &Path, program: &str) -> Command {
+    wsl::command(dir, program).unwrap_or_else(|| {
+        let mut c = cmd(program);
+        c.current_dir(dir);
+        c
+    })
 }
 
 fn output(mut c: Command) -> std::io::Result<Vec<u8>> {
@@ -194,9 +202,9 @@ pub fn discover(dir: &Path) -> Discovery {
             let mut lines = text.lines();
             match (lines.next(), lines.next(), lines.next()) {
                 (Some(root), Some(git_dir), common) => Discovery::Repo(Repo {
-                    root: root_key(root),
-                    git_dir: root_key(git_dir),
-                    common_dir: root_key(common.unwrap_or(git_dir)),
+                    root: root_key_in(dir, root),
+                    git_dir: root_key_in(dir, git_dir),
+                    common_dir: root_key_in(dir, common.unwrap_or(git_dir)),
                 }),
                 _ => Discovery::NotRepo, // bare repo or inside .git: no working tree
             }

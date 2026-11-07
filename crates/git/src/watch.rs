@@ -44,8 +44,14 @@ struct Change {
 enum Ev {
     Paths(Vec<(PathBuf, Change)>),
     Refresh,
+    /// Something changed in these directories (reported from outside: a repo inside WSL has no watches).
+    Touched(Vec<PathBuf>),
     Stop,
 }
+
+/// A repo inside a WSL distro gets no watches: Windows change notifications over WSL's 9P share miss what Linux
+/// processes write. It refreshes on `refresh`/`touched` (agent steps, shell prompts, the user's click).
+const UNWATCHED: &str = "Inside WSL: refreshes after agent steps and prompts. Click to refresh.";
 
 /// What one debounced batch of events produced.
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -119,37 +125,41 @@ impl Watcher {
             // CORE = no access events: our own `git status` reading files must not look like a change.
             let config = Config::default().with_event_kinds(EventKindMask::CORE);
             let Ok(mut w) = notify::RecommendedWatcher::new(handler, config) else { return };
-            let mut watch_error = None;
-            let _ = w.watch(&repo.git_dir, RecursiveMode::NonRecursive);
-            // All of refs/ (heads, and remotes for ahead/behind after fetch/push; remotes/ may not exist yet).
-            let refs = repo.git_dir.join("refs");
-            if refs.is_dir() {
-                let _ = w.watch(&refs, RecursiveMode::Recursive);
-            }
-            // A linked worktree: branches live in the shared `.git` (a commit made in another checkout moves them).
-            if let Some(common) = shared(&repo) {
-                let _ = w.watch(&common, RecursiveMode::NonRecursive);
-                let refs = common.join("refs");
+            let in_git = |p: &Path| p.starts_with(&repo.git_dir) || shared(&repo).is_some_and(|c| p.starts_with(c));
+            let unwatched = crate::wsl::of(&repo.root).is_some();
+            let mut watch_error = unwatched.then(|| UNWATCHED.to_string());
+            let mut watched = Watched::default();
+            if !unwatched {
+                let _ = w.watch(&repo.git_dir, RecursiveMode::NonRecursive);
+                // All of refs/ (heads, and remotes for ahead/behind after fetch/push; remotes/ may not exist yet).
+                let refs = repo.git_dir.join("refs");
                 if refs.is_dir() {
                     let _ = w.watch(&refs, RecursiveMode::Recursive);
                 }
-            }
-            let in_git = |p: &Path| p.starts_with(&repo.git_dir) || shared(&repo).is_some_and(|c| p.starts_with(c));
-            // Every directory we watch (Windows only; see `Change::content`). Paths in events are built from the
-            // watched paths, so an exact lookup matches: no syscall per event.
-            let mut watched = Watched::default();
-            #[cfg(windows)]
-            for g in [Some(repo.git_dir.clone()), shared(&repo)].into_iter().flatten() {
-                for d in ["", "refs", "refs/heads", "refs/remotes"] {
-                    watched.0.insert(g.join(d).components().collect());
+                // A linked worktree: branches live in the shared `.git` (a commit made in another checkout moves them).
+                if let Some(common) = shared(&repo) {
+                    let _ = w.watch(&common, RecursiveMode::NonRecursive);
+                    let refs = common.join("refs");
+                    if refs.is_dir() {
+                        let _ = w.watch(&refs, RecursiveMode::Recursive);
+                    }
                 }
+                // Every directory we watch (Windows only; see `Change::content`). Paths in events are built from the
+                // watched paths, so an exact lookup matches: no syscall per event.
+                #[cfg(windows)]
+                for g in [Some(repo.git_dir.clone()), shared(&repo)].into_iter().flatten() {
+                    for d in ["", "refs", "refs/heads", "refs/remotes"] {
+                        watched.0.insert(g.join(d).components().collect());
+                    }
+                }
+                let started = Instant::now();
+                let n = watch_tree(&mut w, &repo.root, &mut watch_error, &mut watched);
+                crate::perf(|| format!("git watch {}: {n} dirs in {:.1} ms", repo.root.display(), ms(started)));
             }
-            let started = Instant::now();
-            let n = watch_tree(&mut w, &repo.root, &mut watch_error, &mut watched);
-            crate::perf(|| format!("git watch {}: {n} dirs in {:.1} ms", repo.root.display(), ms(started)));
 
             let mut last: Option<Arc<Status>> = None;
             let (mut pending, mut force, mut first) = (Vec::new(), true, true);
+            let mut touched: Vec<PathBuf> = Vec::new();
             // Event batches taken off the channel (the channel is FIFO, so this trails `received` exactly).
             let mut consumed = 0u64;
             loop {
@@ -160,6 +170,11 @@ impl Watcher {
                             pending.extend(p)
                         }
                         Ok(Ev::Refresh) => force = true,
+                        Ok(Ev::Touched(d)) => {
+                            consumed += 1;
+                            force = true;
+                            touched.extend(d)
+                        }
                         Ok(Ev::Stop) | Err(_) => return,
                     }
                 }
@@ -172,6 +187,11 @@ impl Watcher {
                                 pending.extend(p)
                             }
                             Ok(Ev::Refresh) => force = true,
+                            Ok(Ev::Touched(d)) => {
+                                consumed += 1;
+                                force = true;
+                                touched.extend(d)
+                            }
                             Ok(Ev::Stop) | Err(RecvTimeoutError::Disconnected) => return,
                             Err(RecvTimeoutError::Timeout) => break,
                         }
@@ -199,6 +219,7 @@ impl Watcher {
                     .iter()
                     .filter(|(_, c)| c.listing)
                     .filter_map(|(p, _)| p.parent().map(Path::to_path_buf))
+                    .chain(std::mem::take(&mut touched))
                     .collect::<HashSet<_>>()
                     .into_iter()
                     .collect();
@@ -256,6 +277,17 @@ impl Watcher {
         let _ = self.tx.send(Ev::Refresh);
     }
 
+    /// Something changed in `dirs` (empty: somewhere): re-runs `git status` and reports the dirs to file trees.
+    /// For repos without watches (inside WSL); counts as an event batch for `received`/`settled`.
+    pub fn touched(&self, dirs: Vec<PathBuf>) {
+        self.toucher().touch(dirs);
+    }
+
+    /// A handle for `touched` from other threads (the agent listener, a session's prompt reports).
+    pub fn toucher(&self) -> Toucher {
+        Toucher { tx: self.tx.clone(), received: self.received.clone() }
+    }
+
     /// Event batches seen so far (a counter shared with the event handler). Read it, then wait for an update
     /// whose `settled` is at least that value to be sure every change before the read is in the status.
     pub fn received(&self) -> Arc<AtomicU64> {
@@ -265,6 +297,26 @@ impl Watcher {
     /// How many times `git status` ran (perf/tests).
     pub fn refreshes(&self) -> u64 {
         self.refreshes.load(Ordering::Relaxed)
+    }
+}
+
+/// `Watcher::touched` from anywhere; does nothing once the watcher is gone.
+#[derive(Clone)]
+pub struct Toucher {
+    tx: Sender<Ev>,
+    received: Arc<AtomicU64>,
+}
+
+impl Toucher {
+    pub fn touch(&self, dirs: Vec<PathBuf>) {
+        self.received.fetch_add(1, Ordering::Relaxed);
+        let _ = self.tx.send(Ev::Touched(dirs));
+    }
+}
+
+impl std::fmt::Debug for Toucher {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("Toucher")
     }
 }
 
