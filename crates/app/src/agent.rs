@@ -88,6 +88,35 @@ pub struct Board {
     /// Account-wide; last known value is kept when a statusline omits it.
     pub five_hour: Option<Limit>,
     pub seven_day: Option<Limit>,
+    /// Hooks arriving while our statusLine never ran mean its command didn't work in Claude's shell: said once.
+    status_check: StatusCheck,
+}
+
+#[derive(Default, Debug)]
+struct StatusCheck {
+    seen: bool,
+    first_hook: Option<std::time::Instant>,
+    warned: bool,
+}
+
+impl StatusCheck {
+    /// Claude runs the statusLine at start and after every message, well within this.
+    const WITHIN: std::time::Duration = std::time::Duration::from_secs(20);
+
+    fn hook(&mut self) {
+        if self.seen || self.warned {
+            return;
+        }
+        let first = *self.first_hook.get_or_insert_with(std::time::Instant::now);
+        if first.elapsed() > Self::WITHIN {
+            self.warned = true;
+            eprintln!(
+                "dirigent: Claude Code's hooks arrive but its statusLine never ran dirigent-hook (in {} s): no model or \
+                 limits. The statusLine's shell (Git Bash or PowerShell) didn't find it on PATH or failed to run it.",
+                Self::WITHIN.as_secs()
+            );
+        }
+    }
 }
 
 impl Board {
@@ -102,6 +131,7 @@ impl Board {
                 agent.started = false;
             }
             Kind::Hook { event, notification_type, session_id, cwd, message, title, .. } => {
+                self.status_check.hook();
                 agent.last_activity = Some(now_secs());
                 if let Some(text) = title {
                     let new = Auto { text, source: Source::Prompt, session: session_id.clone() };
@@ -168,6 +198,7 @@ impl Board {
                 }
             }
             Kind::Status { model, context_pct, five_hour, seven_day, session_name, session_id } => {
+                self.status_check.seen = true;
                 if let Some(text) = session_name {
                     let session = session_id.or_else(|| agent.session_id.clone());
                     let new = Auto { text, source: Source::Claude, session };
@@ -396,33 +427,48 @@ impl Hub {
         Ok(env)
     }
 
+    #[cfg(unix)]
     fn settings_json(&self, tab: u32) -> String {
         let cmd = |mode: &str| format!("{} {} {tab} {mode}", sh_quote(&self.helper), sh_quote(&self.sock));
         let handler = serde_json::json!([{ "hooks": [{ "type": "command", "command": cmd("hook"), "async": true }] }]);
-        let events = [
-            "SessionStart",
-            "UserPromptSubmit",
-            "PreToolUse",
-            "PostToolUse",
-            "PermissionRequest",
-            "Notification",
-            "Stop",
-            "StopFailure",
-            "SessionEnd",
-        ];
-        let hooks: serde_json::Map<String, serde_json::Value> =
-            events.iter().map(|e| (e.to_string(), handler.clone())).collect();
-        serde_json::json!({
-            "hooks": hooks,
-            "statusLine": { "type": "command", "command": cmd("status") },
-        })
-        .to_string()
+        let status = serde_json::json!({ "type": "command", "command": cmd("status") });
+        hooks_json(handler, status)
+    }
+
+    /// Windows: hooks in exec form (the helper's path and arguments, no shell, nothing to quote); the statusLine has
+    /// no exec form, so it is a bare command line for the shell Claude Code will pick (`hook::shell`).
+    #[cfg(windows)]
+    fn settings_json(&self, tab: u32) -> String {
+        let (helper, pipe) = (self.helper.to_string_lossy().replace('\\', "/"), self.sock.to_string_lossy());
+        let handler = serde_json::json!([{ "hooks": [{
+            "type": "command", "command": helper, "args": [pipe, tab.to_string(), "hook"], "async": true,
+        }] }]);
+        let line = hook::shell::status_command(&hook::shell::claude_shell(), &pipe, tab);
+        hooks_json(handler, serde_json::json!({ "type": "command", "command": line }))
     }
 
     pub fn remove_tab(&self, tab: u32) {
         self.board.lock().unwrap().tabs.remove(&tab);
         let _ = std::fs::remove_file(self.dir.join(format!("tab-{tab}.json")));
     }
+}
+
+/// The settings file: `handler` for every hook event we follow, `status` as the statusLine.
+fn hooks_json(handler: serde_json::Value, status: serde_json::Value) -> String {
+    let events = [
+        "SessionStart",
+        "UserPromptSubmit",
+        "PreToolUse",
+        "PostToolUse",
+        "PermissionRequest",
+        "Notification",
+        "Stop",
+        "StopFailure",
+        "SessionEnd",
+    ];
+    let hooks: serde_json::Map<String, serde_json::Value> =
+        events.iter().map(|e| (e.to_string(), handler.clone())).collect();
+    serde_json::json!({ "hooks": hooks, "statusLine": status }).to_string()
 }
 
 const PATH_SEP: char = if cfg!(windows) { ';' } else { ':' };
@@ -476,6 +522,7 @@ fn alive(pid: u32) -> bool {
     }
 }
 
+#[cfg(unix)]
 fn sh_quote(p: &Path) -> String {
     format!("'{}'", p.display().to_string().replace('\'', r"'\''"))
 }

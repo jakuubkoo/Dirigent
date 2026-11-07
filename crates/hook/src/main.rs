@@ -7,7 +7,7 @@
 //! broken.
 
 use std::io::{Read, Write};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
 use hook::{Kind, Msg, parse, send};
@@ -52,12 +52,7 @@ fn main() {
 fn statusline(input: &str) {
     if std::env::var_os(NESTED).is_none()
         && let Some(cmd) = user_statusline()
-        && let Ok(mut child) = Command::new("sh")
-            .args(["-c", &cmd])
-            .env(NESTED, "1")
-            .stdin(Stdio::piped())
-            .stdout(Stdio::inherit())
-            .spawn()
+        && let Ok(mut child) = user_shell(&cmd).env(NESTED, "1").stdin(Stdio::piped()).stdout(Stdio::inherit()).spawn()
     {
         if let Some(mut stdin) = child.stdin.take() {
             let _ = stdin.write_all(input.as_bytes());
@@ -77,9 +72,36 @@ fn statusline(input: &str) {
     }
 }
 
+/// The shell Claude Code itself would run that statusLine with.
+#[cfg(unix)]
+fn user_shell(cmd: &str) -> Command {
+    let mut c = Command::new("sh");
+    c.args(["-c", cmd]);
+    c
+}
+
+#[cfg(windows)]
+fn user_shell(cmd: &str) -> Command {
+    match hook::shell::claude_shell() {
+        hook::shell::ClaudeShell::GitBash(bash) => {
+            let mut c = Command::new(bash);
+            c.args(["-c", cmd]);
+            c
+        }
+        hook::shell::ClaudeShell::PowerShell => {
+            let mut c = Command::new("powershell.exe");
+            c.args(["-NoProfile", "-Command", cmd]);
+            c
+        }
+    }
+}
+
+/// `statusLine.command` from `$CLAUDE_CONFIG_DIR/settings.json` (Claude's own override), else
+/// `~/.claude/settings.json`.
 fn user_statusline() -> Option<String> {
-    let home = std::env::home_dir()?;
-    let text = std::fs::read_to_string(home.join(".claude").join("settings.json")).ok()?;
+    let dir = std::env::var_os("CLAUDE_CONFIG_DIR").filter(|d| !d.is_empty()).map(PathBuf::from);
+    let dir = dir.or_else(|| std::env::home_dir().map(|h| h.join(".claude")))?;
+    let text = std::fs::read_to_string(dir.join("settings.json")).ok()?;
     let v: serde_json::Value = serde_json::from_str(&text).ok()?;
     v["statusLine"]["command"].as_str().map(str::to_owned)
 }
