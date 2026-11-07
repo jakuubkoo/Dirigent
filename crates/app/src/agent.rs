@@ -2,8 +2,6 @@
 //! a listener thread receiving `dirigent-hook` datagrams, and the per-tab agent state they drive.
 
 use std::collections::HashMap;
-use std::os::unix::fs::PermissionsExt;
-use std::os::unix::net::UnixDatagram;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
@@ -295,29 +293,63 @@ impl Hub {
         let (bin, zdotdir) = (dir.join("bin"), dir.join("zsh"));
         std::fs::create_dir_all(&bin)?;
         std::fs::create_dir_all(&zdotdir)?;
-        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700))?;
-        write_exec(&bin.join("claude"), SHIM)?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700))?;
+            write_exec(&bin.join("claude"), SHIM)?;
+        }
         for (name, body) in ZSH_WRAPPERS {
             std::fs::write(zdotdir.join(name), body)?;
         }
         let helper = std::env::current_exe()?.with_file_name("dirigent-hook");
 
-        let sock = dir.join("sock");
-        let socket = UnixDatagram::bind(&sock)?;
         let board = Arc::new(Mutex::new(Board::default()));
         let (tx, changes) = async_channel::bounded(1);
-        let board2 = board.clone();
-        std::thread::Builder::new().name("agent-listener".into()).spawn(move || {
-            let mut buf = vec![0u8; 64 * 1024];
-            while let Ok(n) = socket.recv(&mut buf) {
-                let Ok(msg) = serde_json::from_slice::<Msg>(&buf[..n]) else { continue };
+        let handle = {
+            let board = board.clone();
+            // False once the UI is gone.
+            move |bytes: &[u8]| {
+                let Ok(msg) = serde_json::from_slice::<Msg>(bytes) else { return true };
                 crate::perf::event_with(|| format!("agent msg {msg:?}"));
                 tracker.hook(msg.tab, &msg.kind);
-                if board2.lock().unwrap().apply(msg) && tx.try_send(()).is_err() && tx.is_closed() {
-                    return;
-                }
+                !(board.lock().unwrap().apply(msg) && tx.try_send(()).is_err() && tx.is_closed())
             }
-        })?;
+        };
+        #[cfg(unix)]
+        let sock = {
+            let sock = dir.join("sock");
+            let socket = std::os::unix::net::UnixDatagram::bind(&sock)?;
+            std::thread::Builder::new().name("agent-listener".into()).spawn(move || {
+                let mut buf = vec![0u8; 64 * 1024];
+                while let Ok(n) = socket.recv(&mut buf) {
+                    if !handle(&buf[..n]) {
+                        return;
+                    }
+                }
+            })?;
+            sock
+        };
+        // One message per connection, read to EOF. Four instances (one thread each, blocked while idle) so hooks
+        // of many sessions firing together rarely find the pipe busy; the name stays registered while we run.
+        #[cfg(windows)]
+        let sock = {
+            let name = format!("dirigent-hook-{}", std::process::id());
+            let handle = Arc::new(Mutex::new(handle));
+            for i in 0..4 {
+                let (server, handle) = (hook::pipe::Server::bind(&name, i == 0)?, handle.clone());
+                std::thread::Builder::new().name("agent-listener".into()).spawn(move || {
+                    use std::io::Read as _;
+                    while let Ok(conn) = server.accept() {
+                        let mut buf = Vec::new();
+                        if conn.file().take(64 * 1024).read_to_end(&mut buf).is_ok() && !handle.lock().unwrap()(&buf) {
+                            return;
+                        }
+                    }
+                })?;
+            }
+            PathBuf::from(name)
+        };
         Ok(Self { board, changes, dir, sock, bin, zdotdir, helper })
     }
 
@@ -332,7 +364,7 @@ impl Hub {
             ("DIRIGENT_CLAUDE_SETTINGS".into(), settings.display().to_string()),
             ("DIRIGENT_BIN".into(), self.bin.display().to_string()),
             ("DIRIGENT_HOOK".into(), self.helper.display().to_string()),
-            ("PATH".into(), format!("{}:{path}", self.bin.display())),
+            ("PATH".into(), format!("{}{PATH_SEP}{path}", self.bin.display())),
         ];
         // zsh rc files usually prepend ~/.local/bin, which would shadow the shim: wrap them via ZDOTDIR so the shim
         // dir is put first again after they ran. ponytail: bash/fish only get the PATH prepend (add --rcfile etc.
@@ -380,6 +412,8 @@ impl Hub {
     }
 }
 
+const PATH_SEP: char = if cfg!(windows) { ';' } else { ':' };
+
 /// This instance's runtime dir (`$XDG_RUNTIME_DIR/dirigent-<pid>`), removed on quit.
 pub fn runtime_dir() -> PathBuf {
     runtime_parent().join(format!("dirigent-{}", std::process::id()))
@@ -401,13 +435,37 @@ fn remove_stale_dirs(runtime: &Path) {
         else {
             continue;
         };
-        if pid.parse::<u32>().is_ok() && !Path::new("/proc").join(pid).exists() {
+        if pid.parse().is_ok_and(|pid| !alive(pid)) {
             let _ = std::fs::remove_dir_all(e.path());
         }
     }
 }
 
+#[cfg(unix)]
+fn alive(pid: u32) -> bool {
+    Path::new("/proc").join(pid.to_string()).exists()
+}
+
+#[cfg(windows)]
+fn alive(pid: u32) -> bool {
+    use windows_sys::Win32::Foundation::{CloseHandle, STILL_ACTIVE};
+    use windows_sys::Win32::System::Threading::{GetExitCodeProcess, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION};
+    // SAFETY: plain handle queries; the handle is closed before returning.
+    unsafe {
+        let h = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid);
+        if h.is_null() {
+            return false; // no such process (or not ours to see: then not one of our instances either)
+        }
+        let mut code = 0;
+        let running = GetExitCodeProcess(h, &mut code) != 0 && code == STILL_ACTIVE as u32;
+        CloseHandle(h);
+        running
+    }
+}
+
+#[cfg(unix)]
 fn write_exec(path: &Path, body: &str) -> std::io::Result<()> {
+    use std::os::unix::fs::PermissionsExt;
     std::fs::write(path, body)?;
     std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755))
 }
@@ -428,13 +486,17 @@ pub fn prompt_file(tab: usize) -> PathBuf {
 /// Writes a first prompt for the shim (only you can read it). Blocking: call off the UI thread.
 pub fn write_prompt(path: &Path, prompt: &str) -> std::io::Result<()> {
     use std::io::Write;
-    use std::os::unix::fs::OpenOptionsExt;
-    let mut f = std::fs::OpenOptions::new().write(true).create_new(true).mode(0o600).open(path)?;
-    f.write_all(prompt.as_bytes())
+    let mut o = std::fs::OpenOptions::new();
+    o.write(true).create_new(true);
+    // Windows: the runtime dir is in your profile's temp dir, which only you can read.
+    #[cfg(unix)]
+    std::os::unix::fs::OpenOptionsExt::mode(&mut o, 0o600);
+    o.open(path)?.write_all(prompt.as_bytes())
 }
 
 /// `claude` shim: runs the next `claude` on PATH with our settings (hooks + statusLine) layered on top. POSIX sh, so
 /// a first prompt in a file (`DIRIGENT_PROMPT_FILE`) reaches claude intact whatever your shell and aliases are.
+#[cfg(unix)]
 const SHIM: &str = r#"#!/bin/sh
 # dirigent: run the real claude with dirigent hooks + statusLine (--settings). Your settings stay untouched.
 self_dir=$(dirname "$0")
@@ -782,6 +844,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(unix)] // POSIX shim, sh quoting, zsh: Windows gets its own with the hooks step
     fn settings_file_shape() {
         let hub = Hub {
             board: Default::default(),
@@ -799,6 +862,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(unix)] // POSIX shim, sh quoting, zsh: Windows gets its own with the hooks step
     fn shim_runs_real_claude_with_settings_and_skips_itself() {
         let d = std::env::temp_dir().join(format!("dirigent-shim-test-{}", std::process::id()));
         let (shim_dir, real_dir) = (d.join("shim"), d.join("real"));
@@ -833,6 +897,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(unix)] // POSIX shim, sh quoting, zsh: Windows gets its own with the hooks step
     fn shim_passes_a_prompt_file_intact_through_aliases_and_deletes_it() {
         let d = std::env::temp_dir().join(format!("dirigent-shim-prompt-test-{}", std::process::id()));
         let (shim_dir, real_dir) = (d.join("shim"), d.join("real"));
@@ -880,6 +945,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(unix)] // POSIX shim, sh quoting, zsh: Windows gets its own with the hooks step
     fn zsh_wrapper_reports_cwd_after_users_rc() {
         if !Path::new("/usr/bin/zsh").exists() && !Path::new("/bin/zsh").exists() {
             return;

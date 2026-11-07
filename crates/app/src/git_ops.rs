@@ -333,7 +333,7 @@ impl Stop {
 /// `claude -p` on Haiku with no tools, no saved session, none of your settings or hooks (your login): `system`
 /// as the system prompt, `ask` as the prompt, `input` on stdin. `bin`: "claude" (a fake one in tests). Blocking.
 fn claude_p(bin: &str, system: &str, ask: &str, input: &str, stop: &Stop) -> Result<String, String> {
-    let mut cmd = Command::new(bin);
+    let mut cmd = git::cmd(bin);
     cmd.args(["-p", "--setting-sources", "", "--model", "haiku", "--tools", "", "--no-session-persistence"])
         .args(["--system-prompt", system, ask])
         .current_dir(std::env::temp_dir());
@@ -473,6 +473,7 @@ mod tests {
 
     /// A fake `claude` that checks it was asked on Haiku with the prompt on stdin and answers like Haiku does.
     #[test]
+    #[cfg(unix)] // sh scripts as the fake claude
     fn names_through_a_fake_claude() {
         use std::os::unix::fs::PermissionsExt as _;
         let dir = std::env::temp_dir().join(format!("dirigent-fake-claude-{}", std::process::id()));

@@ -582,13 +582,15 @@ impl Workspace {
             "open" => {
                 // Waited on its own thread: no zombie, and a slow file manager never holds the UI.
                 std::thread::spawn(move || {
-                    let status = std::process::Command::new("xdg-open")
+                    // Explorer exits with 1 even when it opened the folder.
+                    let opener = if cfg!(windows) { "explorer.exe" } else { "xdg-open" };
+                    let status = git::cmd(opener)
                         .arg(&dir)
                         .stdin(std::process::Stdio::null())
                         .stdout(std::process::Stdio::null())
                         .stderr(std::process::Stdio::null())
                         .status();
-                    if !status.as_ref().is_ok_and(|s| s.success()) {
+                    if !status.as_ref().is_ok_and(|s| s.success() || cfg!(windows)) {
                         eprintln!("open folder {}: {status:?}", dir.display());
                     }
                 });

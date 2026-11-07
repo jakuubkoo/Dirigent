@@ -4,6 +4,8 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 pub mod notice;
+#[cfg(windows)]
+pub mod pipe;
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 pub struct Msg {
@@ -417,7 +419,9 @@ mod tests {
     #[test]
     fn relative_paths_join_the_cwd() {
         let json = r#"{"hook_event_name":"PostToolUse","cwd":"/r","tool_name":"Write","tool_use_id":"t","tool_input":{"file_path":"src/a.rs"}}"#;
-        assert!(matches!(parse("hook", json), Some(Kind::Hook { path: Some(p), .. }) if p == "/r/src/a.rs"));
+        assert!(
+            matches!(parse("hook", json), Some(Kind::Hook { path: Some(p), .. }) if std::path::Path::new(&p) == std::path::Path::new("/r/src/a.rs"))
+        );
         let empty = r#"{"hook_event_name":"PostToolUse","cwd":"/r","tool_name":"Bash","tool_input":{"file_path":""}}"#;
         assert!(matches!(parse("hook", empty), Some(Kind::Hook { path: None, .. })), "an empty path is no path");
     }

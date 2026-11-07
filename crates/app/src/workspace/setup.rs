@@ -1485,7 +1485,7 @@ mod tests {
         s.name_edited = true;
         s.derive(None);
         assert_eq!((s.branch.text.as_str(), s.full_branch().as_str()), ("esc-ctrl-c", "feat/esc-ctrl-c"));
-        assert_eq!(s.location.text, "/c/app-worktrees/feat-esc-ctrl-c");
+        assert_eq!(Path::new(&s.location.text), Path::new("/c/app-worktrees/feat-esc-ctrl-c"));
         s.prefix = PREFIXES.len() - 1;
         assert_eq!(s.full_branch(), "esc-ctrl-c", "none");
     }

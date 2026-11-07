@@ -68,6 +68,24 @@ impl PlusOpens {
     }
 }
 
+/// Windows: the shell new sessions run (Linux always runs your login shell, `$SHELL`).
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Shell {
+    /// PowerShell 7 when installed, else Windows PowerShell.
+    #[default]
+    #[serde(rename = "auto")]
+    Auto,
+    #[serde(rename = "pwsh")]
+    Pwsh,
+    /// Windows PowerShell 5.1 (`powershell.exe`).
+    #[serde(rename = "powershell")]
+    Powershell,
+    #[serde(rename = "cmd")]
+    Cmd,
+    #[serde(rename = "git-bash")]
+    GitBash,
+}
+
 /// Desktop notifications.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Notifications {
@@ -96,6 +114,7 @@ pub struct Settings {
     pub ui_zoom: u32,
     pub font_size: f32,
     pub scrollback: usize,
+    pub shell: Shell,
     pub notifications: Notifications,
     pub diff_mode: DiffMode,
     pub split_style: SplitStyle,
@@ -143,6 +162,7 @@ impl Default for Settings {
             ui_zoom: 100,
             font_size: crate::theme::TERMINAL_FONT_SIZE,
             scrollback: 10_000,
+            shell: Shell::Auto,
             notifications: Notifications::default(),
             diff_mode: DiffMode::Unified,
             split_style: SplitStyle::Clean,
@@ -159,7 +179,7 @@ impl Default for Settings {
 /// Every key: (section, key). Anything else in the file gets an "unknown" note.
 const KEYS: &[(&str, &[&str])] = &[
     ("general", &["trust_auto_accept", "name_with_claude", "plus_opens", "ui_zoom"]),
-    ("terminal", &["font_size", "scrollback"]),
+    ("terminal", &["font_size", "scrollback", "shell"]),
     ("notifications", &["needs_you", "done", "sound"]),
     ("diff", &["mode", "split_style", "engine"]),
     ("layout", &["sessions", "files", "changes", "search", "left_width", "right_width"]),
@@ -179,7 +199,7 @@ impl Settings {
                     "plus_opens": s.plus_opens,
                     "ui_zoom": s.ui_zoom,
                 },
-                "terminal": { "font_size": s.font_size, "scrollback": s.scrollback },
+                "terminal": { "font_size": s.font_size, "scrollback": s.scrollback, "shell": s.shell },
                 "notifications": {
                     "needs_you": s.notifications.needs_you,
                     "done": s.notifications.done,
@@ -268,6 +288,13 @@ pub fn parse(text: &str, fallback: &Settings) -> Parsed {
         scrollback: g.get("terminal", "scrollback", d.scrollback, "a whole number 0–100000", |n: &usize| {
             (SCROLLBACK.0..=SCROLLBACK.1).contains(n)
         }),
+        shell: g.get(
+            "terminal",
+            "shell",
+            d.shell,
+            "\"auto\", \"pwsh\", \"powershell\", \"cmd\" or \"git-bash\"",
+            |_| true,
+        ),
         notifications: Notifications {
             needs_you: g.get("notifications", "needs_you", d.notifications.needs_you, "true or false", |_| true),
             done: g.get("notifications", "done", d.notifications.done, "true or false", |_| true),
@@ -432,13 +459,18 @@ pub fn themes_dir(settings_path: &Path) -> PathBuf {
 }
 
 /// `DIRIGENT_SETTINGS`; with `DIRIGENT_STATE` (test runs) `settings.json` next to that state file, so a test never
-/// touches the real config; else `$XDG_CONFIG_HOME/dirigent/settings.json`, else `~/.config/…`. Never a file in a
+/// touches the real config; else `$XDG_CONFIG_HOME/dirigent/settings.json`, else `~/.config/…` (Windows:
+/// `%APPDATA%\dirigent\settings.json`). Never a file in a
 /// Dirigent runtime dir: those hold the app's own files (claude's per-tab hook settings). Older builds exported that
 /// file to sessions as `DIRIGENT_SETTINGS`, so a Dirigent started in such a session took it for its settings.json.
 pub fn path() -> PathBuf {
     let var = |k| std::env::var_os(k).filter(|v| !v.is_empty()).map(PathBuf::from);
     let runtime = crate::agent::runtime_parent();
-    path_from(var("DIRIGENT_SETTINGS"), var("DIRIGENT_STATE"), var("XDG_CONFIG_HOME"), var("HOME"), &runtime)
+    #[cfg(unix)]
+    let (config, home) = (var("XDG_CONFIG_HOME"), var("HOME"));
+    #[cfg(windows)]
+    let (config, home) = (var("APPDATA"), None);
+    path_from(var("DIRIGENT_SETTINGS"), var("DIRIGENT_STATE"), config, home, &runtime)
 }
 
 fn path_from(
@@ -599,6 +631,7 @@ mod tests {
             ui_zoom: 130,
             font_size: 15.,
             scrollback: 500,
+            shell: Shell::GitBash,
             notifications: Notifications { needs_you: false, done: true, sound: true },
             diff_mode: DiffMode::Split,
             split_style: SplitStyle::Classic,

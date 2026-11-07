@@ -53,6 +53,12 @@ fn is_file(e: &ignore::DirEntry) -> bool {
     e.file_type().is_some_and(|t| t.is_file() || (t.is_symlink() && e.path().is_file()))
 }
 
+/// A relative path with `/` (git's form, what the index holds) also on Windows.
+fn slashed(rel: &Path) -> String {
+    let s = rel.to_string_lossy();
+    if cfg!(windows) { s.replace('\\', "/") } else { s.into_owned() }
+}
+
 /// Every file under `dir` (relative to `root`), walked in parallel, at most `cap`.
 fn walk(root: &Path, dir: &Path, ignored: bool, cap: usize) -> (Vec<String>, bool) {
     let found = Mutex::new(Vec::new());
@@ -67,7 +73,7 @@ fn walk(root: &Path, dir: &Path, ignored: bool, cap: usize) -> (Vec<String>, boo
                 if count.fetch_add(1, Ordering::Relaxed) >= cap {
                     return ignore::WalkState::Quit;
                 }
-                found.lock().unwrap().push(rel.to_string_lossy().into_owned());
+                found.lock().unwrap().push(slashed(rel));
             }
             ignore::WalkState::Continue
         })
@@ -96,8 +102,7 @@ impl Index {
             if !seen.insert(rel_dir.to_path_buf()) {
                 continue;
             }
-            let prefix =
-                if rel_dir.as_os_str().is_empty() { String::new() } else { format!("{}/", rel_dir.to_string_lossy()) };
+            let prefix = if rel_dir.as_os_str().is_empty() { String::new() } else { format!("{}/", slashed(rel_dir)) };
             if !dir.is_dir() {
                 drop_prefix.push(prefix);
                 continue;

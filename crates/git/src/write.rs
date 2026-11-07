@@ -43,7 +43,7 @@ type Result<T> = std::result::Result<T, GitError>;
 /// git for writes: the user's config applies (author, signing, hooks); no `--no-optional-locks` (writes take
 /// locks anyway); output captured for errors.
 pub(crate) fn run(root: &Path, args: &[&str], stdin: Option<&[u8]>) -> Result<String> {
-    let mut c = Command::new("git");
+    let mut c = crate::cmd("git");
     c.args(args)
         .current_dir(root)
         .env("LC_ALL", "C")

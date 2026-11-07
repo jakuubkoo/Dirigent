@@ -286,10 +286,9 @@ fn watch_tree(w: &mut notify::RecommendedWatcher, dir: &Path, error: &mut Option
 /// Which of `paths` git ignores (one `git check-ignore --stdin` for the whole batch; tracked files never count as
 /// ignored). On any error: none.
 fn check_ignore<'a>(root: &Path, paths: impl Iterator<Item = &'a Path>) -> HashSet<PathBuf> {
-    use std::os::unix::ffi::{OsStrExt, OsStringExt};
     let mut input = Vec::new();
     for p in paths {
-        input.extend_from_slice(p.as_os_str().as_bytes());
+        input.extend_from_slice(p.as_os_str().as_encoded_bytes());
         input.push(0);
     }
     let mut c = git(root);
@@ -308,8 +307,17 @@ fn check_ignore<'a>(root: &Path, paths: impl Iterator<Item = &'a Path>) -> HashS
     }
     let _ = writer.join();
     let _ = child.wait();
-    out.split(|&b| b == 0)
-        .filter(|p| !p.is_empty())
-        .map(|p| PathBuf::from(std::ffi::OsString::from_vec(p.to_vec())))
-        .collect()
+    out.split(|&b| b == 0).filter(|p| !p.is_empty()).map(path_from_bytes).collect()
+}
+
+#[cfg(unix)]
+fn path_from_bytes(b: &[u8]) -> PathBuf {
+    use std::os::unix::ffi::OsStringExt;
+    PathBuf::from(std::ffi::OsString::from_vec(b.to_vec()))
+}
+
+/// git for Windows speaks UTF-8.
+#[cfg(windows)]
+fn path_from_bytes(b: &[u8]) -> PathBuf {
+    PathBuf::from(String::from_utf8_lossy(b).into_owned())
 }

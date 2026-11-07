@@ -1,9 +1,11 @@
 //! `dirigent [--new] [--claude] [PATH]`: argument parsing, path resolution and the single-instance socket. A
-//! running app listens on `$XDG_RUNTIME_DIR/dirigent.sock`; a new process sends it one JSON line (the request) and
-//! exits on the `ok` reply. No socket or a stale one (crashed instance) → the new process becomes the app. No gpui.
+//! running app listens on `$XDG_RUNTIME_DIR/dirigent.sock` (Windows: a named pipe derived from that path); a new
+//! process sends it one JSON line (the request) and exits on the `ok` reply. No socket or a stale one (crashed
+//! instance) → the new process becomes the app. No gpui.
 
 use std::io::{BufRead, BufReader, ErrorKind, Read, Write};
-use std::os::unix::net::{UnixListener, UnixStream};
+#[cfg(unix)]
+use std::os::unix::net::{UnixListener as Listener, UnixStream};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
@@ -111,17 +113,27 @@ fn normalize(p: &Path) -> PathBuf {
 pub fn socket_path(runtime: &Path, state_override: Option<&Path>) -> PathBuf {
     match state_override {
         None => runtime.join("dirigent.sock"),
-        Some(state) => {
-            // FNV-1a: stable across Rust versions (an old running app and a new client agree).
-            let h = state
-                .as_os_str()
-                .as_encoded_bytes()
-                .iter()
-                .fold(0xcbf29ce484222325u64, |h, &b| (h ^ b as u64).wrapping_mul(0x100000001b3));
-            runtime.join(format!("dirigent.{h:016x}.sock"))
-        }
+        Some(state) => runtime.join(format!("dirigent.{:016x}.sock", fnv(state))),
     }
 }
+
+/// FNV-1a: stable across Rust versions (an old running app and a new client agree).
+fn fnv(p: &Path) -> u64 {
+    p.as_os_str()
+        .as_encoded_bytes()
+        .iter()
+        .fold(0xcbf29ce484222325u64, |h, &b| (h ^ b as u64).wrapping_mul(0x100000001b3))
+}
+
+/// Windows has no unix sockets: the pipe stands for the socket path (per user, since the path is in your temp
+/// dir, and per state file like the socket).
+#[cfg(windows)]
+fn pipe_name(sock: &Path) -> String {
+    format!("dirigent-{:016x}", fnv(sock))
+}
+
+#[cfg(windows)]
+pub type Listener = hook::pipe::Server;
 
 #[derive(Debug)]
 pub enum Sent {
@@ -136,29 +148,17 @@ const MAX_REQUEST: u64 = 64 * 1024;
 
 /// Hands the request to a running app.
 pub fn send(sock: &Path, req: &Request) -> Result<Sent, String> {
-    let mut s = match UnixStream::connect(sock) {
-        Ok(s) => s,
-        Err(e) if e.kind() == ErrorKind::NotFound => return Ok(Sent::NotRunning),
-        Err(e) if e.kind() == ErrorKind::ConnectionRefused => {
-            // Left by an instance that crashed (or was killed): nobody accepts on it.
-            std::fs::remove_file(sock).map_err(|e| format!("can't remove stale socket {}: {e}", sock.display()))?;
-            eprintln!("dirigent: removed a stale socket from a crashed instance ({})", sock.display());
-            return Ok(Sent::NotRunning);
-        }
-        Err(e) => return Err(format!("{}: {e}", sock.display())),
-    };
+    let Some(mut s) = connect(sock)? else { return Ok(Sent::NotRunning) };
     let mut line = serde_json::to_string(req).map_err(|e| e.to_string())?;
     line.push('\n');
-    s.set_read_timeout(Some(REPLY_TIMEOUT)).map_err(|e| e.to_string())?;
     s.write_all(line.as_bytes()).map_err(|e| format!("sending to the running dirigent: {e}"))?;
-    let mut reply = String::new();
-    match BufReader::new(s).read_line(&mut reply) {
-        Ok(_) => {}
+    let reply = match read_reply(s) {
+        Ok(r) => r,
         Err(e) if matches!(e.kind(), ErrorKind::WouldBlock | ErrorKind::TimedOut) => {
             return Err("the running dirigent didn't answer within 5 s".into());
         }
         Err(e) => return Err(format!("reading the reply: {e}")),
-    }
+    };
     match reply.trim_end() {
         "ok" => Ok(Sent::Done),
         r => Err(r
@@ -168,11 +168,57 @@ pub fn send(sock: &Path, req: &Request) -> Result<Sent, String> {
     }
 }
 
+/// The running app's socket; None when nobody listens (start the app).
+#[cfg(unix)]
+fn connect(sock: &Path) -> Result<Option<UnixStream>, String> {
+    match UnixStream::connect(sock) {
+        Ok(s) => {
+            s.set_read_timeout(Some(REPLY_TIMEOUT)).map_err(|e| e.to_string())?;
+            Ok(Some(s))
+        }
+        Err(e) if e.kind() == ErrorKind::NotFound => Ok(None),
+        Err(e) if e.kind() == ErrorKind::ConnectionRefused => {
+            // Left by an instance that crashed (or was killed): nobody accepts on it.
+            std::fs::remove_file(sock).map_err(|e| format!("can't remove stale socket {}: {e}", sock.display()))?;
+            eprintln!("dirigent: removed a stale socket from a crashed instance ({})", sock.display());
+            Ok(None)
+        }
+        Err(e) => Err(format!("{}: {e}", sock.display())),
+    }
+}
+
+/// The running app's pipe; None when nobody serves it (a pipe vanishes with its process: never stale).
+#[cfg(windows)]
+fn connect(sock: &Path) -> Result<Option<std::fs::File>, String> {
+    match hook::pipe::connect(&pipe_name(sock), REPLY_TIMEOUT) {
+        Ok(f) => Ok(Some(f)),
+        Err(e) if e.kind() == ErrorKind::NotFound => Ok(None),
+        Err(e) => Err(format!("{}: {e}", hook::pipe::path(&pipe_name(sock)))),
+    }
+}
+
+#[cfg(unix)]
+fn read_reply(s: UnixStream) -> std::io::Result<String> {
+    let mut reply = String::new();
+    BufReader::new(s).read_line(&mut reply).map(|_| reply)
+}
+
+/// Pipes have no read timeout: the read runs on a thread we stop waiting for.
+#[cfg(windows)]
+fn read_reply(s: std::fs::File) -> std::io::Result<String> {
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let mut reply = String::new();
+        let _ = tx.send(BufReader::new(s).read_line(&mut reply).map(|_| reply));
+    });
+    rx.recv_timeout(REPLY_TIMEOUT).unwrap_or_else(|_| Err(ErrorKind::TimedOut.into()))
+}
+
 /// What `main` hands the workspace: the request this process started with, and the bound socket (None: another
 /// instance owns it, or binding failed).
 pub struct Launch {
     pub req: Request,
-    pub listener: Option<UnixListener>,
+    pub listener: Option<Listener>,
     pub sock: PathBuf,
 }
 
@@ -189,20 +235,37 @@ impl Incoming {
 }
 
 /// Binds the socket; `AddrInUse` means another instance is (just) listening there.
-pub fn bind(sock: &Path) -> std::io::Result<UnixListener> {
+#[cfg(unix)]
+pub fn bind(sock: &Path) -> std::io::Result<Listener> {
     if let Some(dir) = sock.parent() {
         std::fs::create_dir_all(dir)?;
     }
-    UnixListener::bind(sock)
+    Listener::bind(sock)
+}
+
+/// Creates the pipe; `AddrInUse` means another instance serves it.
+#[cfg(windows)]
+pub fn bind(sock: &Path) -> std::io::Result<Listener> {
+    Listener::bind(&pipe_name(sock), true)
 }
 
 /// One thread blocked in `accept` (no wakeups while idle); each request goes to the UI, its answer back.
-pub fn serve(listener: UnixListener) -> async_channel::Receiver<Incoming> {
+pub fn serve(listener: Listener) -> async_channel::Receiver<Incoming> {
     let (tx, rx) = async_channel::unbounded();
     let spawned = std::thread::Builder::new().name("cli-listener".into()).spawn(move || {
+        #[cfg(unix)]
         for conn in listener.incoming() {
             let Ok(conn) = conn else { continue };
-            if !answer(conn, &tx) {
+            let _ = conn.set_read_timeout(Some(Duration::from_secs(2)));
+            if !answer(&conn, &tx) {
+                return; // the UI is gone
+            }
+        }
+        // ponytail: no read timeout on a pipe; a local client that connects and never writes blocks the next
+        // request (only your own processes can connect).
+        #[cfg(windows)]
+        while let Ok(conn) = listener.accept() {
+            if !answer(conn.file(), &tx) {
                 return; // the UI is gone
             }
         }
@@ -214,10 +277,9 @@ pub fn serve(listener: UnixListener) -> async_channel::Receiver<Incoming> {
 }
 
 /// Reads one request, waits for the UI, writes `ok` / `error: …`. False when the UI side is gone.
-fn answer(conn: UnixStream, tx: &async_channel::Sender<Incoming>) -> bool {
-    let _ = conn.set_read_timeout(Some(Duration::from_secs(2)));
+fn answer(mut conn: impl Read + Write, tx: &async_channel::Sender<Incoming>) -> bool {
     let mut line = String::new();
-    let read = BufReader::new((&conn).take(MAX_REQUEST)).read_line(&mut line);
+    let read = BufReader::new(Read::by_ref(&mut conn).take(MAX_REQUEST)).read_line(&mut line);
     let result = match read
         .map_err(|e| e.to_string())
         .and_then(|_| serde_json::from_str::<Request>(&line).map_err(|e| e.to_string()))
@@ -235,7 +297,7 @@ fn answer(conn: UnixStream, tx: &async_channel::Sender<Incoming>) -> bool {
         Ok(()) => "ok\n".to_string(),
         Err(e) => format!("error: {}\n", e.replace('\n', " ")),
     };
-    let _ = (&conn).write_all(text.as_bytes());
+    let _ = conn.write_all(text.as_bytes());
     true
 }
 
@@ -291,6 +353,7 @@ mod tests {
     use super::*;
 
     #[test]
+    #[cfg(unix)] // the two Linux installs
     fn install_hint_only_when_both_installs_exist() {
         let home = Path::new("/home/u");
         let (local, system) = (local_exe(home), PathBuf::from(SYSTEM_EXE));
@@ -325,11 +388,13 @@ mod tests {
         let _ = std::fs::remove_dir_all(&d);
         std::fs::create_dir_all(d.join("real/sub")).unwrap();
         std::fs::write(d.join("real/sub/f.rs"), "fn main() {}\n").unwrap();
+        #[cfg(unix)]
         std::os::unix::fs::symlink(d.join("real"), d.join("link")).unwrap();
         d.canonicalize().unwrap()
     }
 
     #[test]
+    #[cfg(unix)] // symlinks need a privilege on Windows
     fn resolves_dirs_files_symlinks_and_missing() {
         let d = tmp("cli-resolve");
         let cmd = |p: &str| Cmd { path: Some(p.into()), ..Default::default() };
@@ -376,6 +441,7 @@ mod tests {
     /// A socket file nobody listens on, made by another process that then exits. Not bound and closed here: another
     /// test spawning a process at that moment hands the child a copy of the listener until the child's exec, and a
     /// connect in that window succeeds instead of being refused (it failed under load).
+    #[cfg(unix)]
     fn stale_socket(path: &Path) {
         let made = std::process::Command::new(std::env::current_exe().unwrap())
             .args(["--exact", "cli::tests::make_stale_socket", "--ignored", "--quiet"])
@@ -386,6 +452,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(unix)]
     #[ignore = "helper: run in its own process by socket_round_trip_stale_race_and_timeout"]
     fn make_stale_socket() {
         if let Some(p) = std::env::var_os("DIRIGENT_TEST_STALE_SOCKET") {
@@ -416,16 +483,20 @@ mod tests {
         // A second instance racing to start can't bind over it.
         assert_eq!(bind(&sock).unwrap_err().kind(), ErrorKind::AddrInUse);
 
-        // Stale: the file stays, nobody accepts → removed, then binding works again.
-        let stale = d.join("stale.sock");
-        stale_socket(&stale);
-        assert!(matches!(send(&stale, &req), Ok(Sent::NotRunning)));
-        assert!(!stale.exists());
-        drop(bind(&stale).unwrap());
+        // Stale: the file stays, nobody accepts → removed, then binding works again. (A pipe dies with its
+        // process: nothing is ever stale on Windows.)
+        #[cfg(unix)]
+        {
+            let stale = d.join("stale.sock");
+            stale_socket(&stale);
+            assert!(matches!(send(&stale, &req), Ok(Sent::NotRunning)));
+            assert!(!stale.exists());
+            drop(bind(&stale).unwrap());
+        }
 
         // A listener that never answers: the client gives up instead of hanging.
         let hang = d.join("hang.sock");
-        let _l = bind(&hang).unwrap(); // accepted by the kernel backlog, never read
+        let _l = bind(&hang).unwrap(); // accepted by the kernel backlog (Windows: the pipe instance), never read
         let t = std::time::Instant::now();
         assert!(send(&hang, &req).unwrap_err().contains("didn't answer"));
         assert!(t.elapsed() < Duration::from_secs(7));

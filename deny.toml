@@ -1,8 +1,8 @@
 # cargo deny check: licenses, RustSec advisories, where crates come from. Runs in CI (`deny` job).
 
 [graph]
-# What we ship: Linux x86_64 (other targets' crates don't reach the binary).
-targets = ["x86_64-unknown-linux-gnu"]
+# What we ship: Linux x86_64 and the Windows x86_64 preview (other targets' crates don't reach the binary).
+targets = ["x86_64-unknown-linux-gnu", "x86_64-pc-windows-msvc"]
 all-features = false
 
 [licenses]
@@ -26,6 +26,8 @@ confidence-threshold = 0.9
 exceptions = [
     # Through gpui's font-kit (dirs → option-ext), used unmodified: MPL-2.0 is file-level copyleft.
     { allow = ["MPL-2.0"], crate = "option-ext" },
+    # Windows: gpui's font-kit's DirectWrite bindings, used unmodified (same reasoning).
+    { allow = ["MPL-2.0"], crate = "dwrote" },
 ]
 
 [licenses.private]

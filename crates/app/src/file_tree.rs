@@ -263,8 +263,9 @@ mod tests {
         let m = marks(Path::new("/r"), &st);
         assert_eq!(m.files[Path::new("/r/src/a/b.rs")], 'M');
         assert_eq!(m.files[Path::new("/r/new/deep/file.txt")], '?');
-        let mut dirs: Vec<_> = m.dirs.iter().map(|d| d.to_str().unwrap()).collect();
+        let mut dirs: Vec<_> = m.dirs.iter().map(PathBuf::as_path).collect();
         dirs.sort();
-        assert_eq!(dirs, vec!["/r/new", "/r/new/deep", "/r/src", "/r/src/a"]);
+        let want = ["/r/new", "/r/new/deep", "/r/src", "/r/src/a"].map(Path::new);
+        assert_eq!(dirs, want, "compared by components (Windows joins with \\)");
     }
 }

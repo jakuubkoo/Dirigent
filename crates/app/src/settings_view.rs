@@ -56,6 +56,8 @@ enum Key {
     Plus,
     FontSize,
     Scrollback,
+    #[cfg(windows)]
+    Shell,
     NeedsYou,
     Done,
     Sound,
@@ -125,6 +127,14 @@ const ITEMS: &[Item] = &[
         label: "Scrollback lines",
         desc: "History kept per session (0–100000). Lowering it drops the oldest lines right away.",
         ctl: Ctl::Number,
+    },
+    #[cfg(windows)]
+    Item {
+        key: Key::Shell,
+        cat: Cat::Terminal,
+        label: "Shell",
+        desc: "What new sessions run. Automatic: PowerShell 7 when installed, else Windows PowerShell. Git Bash comes with Git for Windows.",
+        ctl: Ctl::Choice(&["Automatic", "PowerShell 7", "Windows PowerShell", "Command Prompt", "Git Bash"]),
     },
     Item {
         key: Key::NeedsYou,
@@ -215,6 +225,13 @@ const ITEMS: &[Item] = &[
 
 const DOCKS: Ctl = Ctl::Choice(&["Left", "Right"]);
 
+/// In the order of the Shell item's labels.
+#[cfg(windows)]
+const SHELLS: [crate::settings::Shell; 5] = {
+    use crate::settings::Shell::*;
+    [Auto, Pwsh, Powershell, Cmd, GitBash]
+};
+
 #[derive(Clone, Copy, PartialEq, Debug)]
 enum Val {
     Bool(bool),
@@ -236,6 +253,8 @@ fn get(s: &Settings, k: Key) -> Val {
         Key::Zoom => Val::Num(s.ui_zoom as f64),
         Key::FontSize => Val::Num(s.font_size as f64),
         Key::Scrollback => Val::Num(s.scrollback as f64),
+        #[cfg(windows)]
+        Key::Shell => Val::Choice(SHELLS.iter().position(|&x| x == s.shell).unwrap_or(0)),
         Key::NeedsYou => Val::Bool(n.needs_you),
         Key::Done => Val::Bool(n.done),
         Key::Sound => Val::Bool(n.sound),
@@ -259,6 +278,8 @@ fn set(s: &mut Settings, k: Key, v: Val) {
         (Key::Zoom, Val::Num(n)) => s.ui_zoom = n as u32,
         (Key::FontSize, Val::Num(n)) => s.font_size = n as f32,
         (Key::Scrollback, Val::Num(n)) => s.scrollback = n as usize,
+        #[cfg(windows)]
+        (Key::Shell, Val::Choice(i)) => s.shell = SHELLS[i.min(SHELLS.len() - 1)],
         (Key::NeedsYou, Val::Bool(b)) => s.notifications.needs_you = b,
         (Key::Done, Val::Bool(b)) => s.notifications.done = b,
         (Key::Sound, Val::Bool(b)) => s.notifications.sound = b,

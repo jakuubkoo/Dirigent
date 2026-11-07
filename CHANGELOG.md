@@ -8,6 +8,12 @@ All notable changes to Dirigent are recorded here. The format follows
 
 ### Added
 
+- Windows (preview, first step, not yet tested on real hardware): Dirigent builds and runs on Windows 11 with
+  PowerShell sessions. New sessions start PowerShell 7 when installed, else Windows PowerShell; Settings → Terminal →
+  Shell picks Command Prompt or Git Bash instead. The Changes and Files panels follow `cd` in PowerShell and Command
+  Prompt (your profile and prompt stay as they are). `dirigent <folder>` from a terminal reuses the running window.
+  Settings live in `%APPDATA%\dirigent`, sessions and the log in `%LOCALAPPDATA%\dirigent`. Claude Code hooks, git
+  writes, notifications and WSL come in the next steps.
 - **Edit files in the preview**: type, select with the mouse or Shift+keys, copy/cut/paste, undo/redo, auto-indent
   on Enter, Tab / Shift+Tab (also over selected lines), Ctrl+S saves. A dot next to the name marks unsaved edits;
   Esc, switching or closing the session, opening another file and closing the window ask before dropping them.

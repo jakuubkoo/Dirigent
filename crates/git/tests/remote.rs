@@ -107,6 +107,7 @@ fn fetch_fast_forward_and_diverged() {
 }
 
 #[test]
+#[cfg_attr(windows, ignore = "Windows git step: git prints C:/ paths, the test's temp dir is an 8.3 short path")]
 fn publish_sets_upstream_and_push() {
     let s = setup("publish");
     write::create_branch(&s.mine, "feat/x").unwrap();
@@ -157,6 +158,7 @@ fn branches_and_switching() {
 }
 
 #[test]
+#[cfg_attr(windows, ignore = "Windows git step: the hung ssh child needs a Job Object to die")]
 fn cancel_kills_a_hung_fetch() {
     let s = setup("hung");
     // The "ssh" never answers; git runs core.sshCommand through the shell with its args after `:`.

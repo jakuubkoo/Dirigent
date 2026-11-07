@@ -121,7 +121,8 @@ pub struct WindowState {
     pub h: f32,
 }
 
-/// `DIRIGENT_STATE` (tests/perf runs), else `$XDG_STATE_HOME/dirigent/state.json`, else `~/.local/state/…`.
+/// `DIRIGENT_STATE` (tests/perf runs), else `$XDG_STATE_HOME/dirigent/state.json`, else `~/.local/state/…`
+/// (Windows: `%LOCALAPPDATA%\dirigent\state.json`).
 pub fn path() -> PathBuf {
     if let Some(p) = std::env::var_os("DIRIGENT_STATE") {
         return p.into();
@@ -129,6 +130,12 @@ pub fn path() -> PathBuf {
     state_base().join("dirigent/state.json")
 }
 
+#[cfg(windows)]
+fn state_base() -> PathBuf {
+    std::env::var_os("LOCALAPPDATA").filter(|p| !p.is_empty()).map(PathBuf::from).unwrap_or_else(std::env::temp_dir)
+}
+
+#[cfg(unix)]
 fn state_base() -> PathBuf {
     std::env::var_os("XDG_STATE_HOME")
         .filter(|p| !p.is_empty())
@@ -223,7 +230,7 @@ pub fn transcript_path(session_id: &str) -> Option<PathBuf> {
     if session_id.is_empty() || !session_id.chars().all(|c| c.is_ascii_hexdigit() || c == '-') {
         return None;
     }
-    let projects = PathBuf::from(std::env::var_os("HOME").unwrap_or_default()).join(".claude/projects");
+    let projects = std::env::home_dir().unwrap_or_default().join(".claude").join("projects");
     let dirs = std::fs::read_dir(projects).ok()?;
     dirs.flatten().map(|d| d.path().join(format!("{session_id}.jsonl"))).find(|p| p.is_file())
 }
