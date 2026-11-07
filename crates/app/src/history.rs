@@ -277,7 +277,7 @@ fn entry(path: &Path, root: &Path, worktrees: &Path, cache: &Cache) -> Option<En
     let s = cache.get(path, &meta)?;
     let cwd = PathBuf::from(s.cwd.as_deref()?);
     let prompt = s.prompt.clone().or_else(|| s.command.clone());
-    if !(cwd.starts_with(root) || cwd.starts_with(worktrees))
+    if !(git::path_under(&cwd, root) || git::path_under(&cwd, worktrees))
         || (prompt.is_none() && s.custom.is_none() && s.ai.is_none())
     {
         return None;
@@ -312,7 +312,7 @@ pub struct Running {
 impl Running {
     /// Any of them works in `root` or under `worktrees`.
     pub fn in_project(&self, root: &Path, worktrees: &Path) -> bool {
-        self.cwds.iter().any(|c| c.starts_with(root) || c.starts_with(worktrees))
+        self.cwds.iter().any(|c| git::path_under(c, root) || git::path_under(c, worktrees))
     }
 }
 

@@ -132,7 +132,7 @@ impl Projects {
 
     /// The deepest known project containing `dir`.
     pub fn of_dir(&self, dir: &Path) -> Option<&Project> {
-        self.0.iter().filter(|p| dir.starts_with(&p.root)).max_by_key(|p| p.root.components().count())
+        self.0.iter().filter(|p| git::path_under(dir, &p.root)).max_by_key(|p| p.root.components().count())
     }
 
     /// Indices: pinned first, then most recently used.

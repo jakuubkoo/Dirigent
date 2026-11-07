@@ -82,7 +82,6 @@ fn hunks_partially_staged() {
 }
 
 #[test]
-#[cfg_attr(windows, ignore = "gio trash; the Recycle Bin comes with the Windows git step")]
 fn files_stage_unstage_discard_and_trash() {
     let (r, d) = repo("files");
     edit(&d, "3", "three");
@@ -95,13 +94,58 @@ fn files_stage_unstage_discard_and_trash() {
     write::discard(&r, &file(&r, "f.txt")).unwrap();
     assert_eq!(sh(&d, &["status", "--porcelain"]), "?? new.txt\n");
     // Untracked → the trash (a temp XDG_DATA_HOME on the same filesystem), never deleted.
-    let data = d.join("xdg-data");
-    std::fs::create_dir_all(&data).unwrap();
-    // SAFETY: tests in this binary that read XDG_DATA_HOME don't run concurrently with a different value.
-    unsafe { std::env::set_var("XDG_DATA_HOME", &data) };
-    write::discard(&r, &file(&r, "new.txt")).unwrap();
-    assert!(!d.join("new.txt").exists());
-    assert!(data.join("Trash/files/new.txt").exists(), "moved to the trash");
+    #[cfg(unix)]
+    {
+        let data = d.join("xdg-data");
+        std::fs::create_dir_all(&data).unwrap();
+        // SAFETY: tests in this binary that read XDG_DATA_HOME don't run concurrently with a different value.
+        unsafe { std::env::set_var("XDG_DATA_HOME", &data) };
+        write::discard(&r, &file(&r, "new.txt")).unwrap();
+        assert!(!d.join("new.txt").exists());
+        assert!(data.join("Trash/files/new.txt").exists(), "moved to the trash");
+    }
+    // Windows: the real Recycle Bin, which lists it as deleted from this directory.
+    #[cfg(windows)]
+    {
+        write::discard(&r, &file(&r, "new.txt")).unwrap();
+        assert!(!d.join("new.txt").exists());
+        assert!(recycled(&d).contains(&"new".to_string()), "moved to the Recycle Bin: {:?}", recycled(&d));
+    }
+    let _ = std::fs::remove_dir_all(&d);
+}
+
+/// Names of Recycle Bin items deleted from `dir` (the shell's own view of the bin), without the extension: the
+/// shell hides known extensions unless Explorer is set to show them.
+#[cfg(windows)]
+fn recycled(dir: &Path) -> Vec<String> {
+    let dir = git::plain_path(std::path::absolute(dir).unwrap());
+    let script = format!(
+        "(New-Object -ComObject Shell.Application).Namespace(10).Items() | \
+         Where-Object {{ $_.ExtendedProperty('System.Recycle.DeletedFrom') -eq '{}' }} | ForEach-Object {{ $_.Name }}",
+        dir.display()
+    );
+    let out = Command::new("powershell.exe").args(["-NoProfile", "-Command", &script]).output().unwrap();
+    String::from_utf8_lossy(&out.stdout)
+        .lines()
+        .map(|l| Path::new(l.trim()).file_stem().unwrap_or_default().to_string_lossy().into_owned())
+        .collect()
+}
+
+/// `trash` refuses the UI thread (it can block on a question to the user) and leaves the file; elsewhere it works.
+#[test]
+#[cfg(windows)]
+fn trash_never_runs_on_the_ui_thread() {
+    let (_, d) = repo("ui-thread");
+    let f = d.join("t.txt");
+    std::fs::write(&f, "t\n").unwrap();
+    git::write::set_ui_owner(0); // this test thread plays the UI thread (no window: no owner)
+    let err = write::trash(&f).unwrap_err();
+    assert!(err.to_string().contains("UI thread"), "{err}");
+    assert!(f.exists(), "left alone");
+    let f2 = f.clone();
+    std::thread::spawn(move || write::trash(&f2)).join().unwrap().unwrap();
+    assert!(!f.exists());
+    assert!(recycled(&d).contains(&"t".to_string()));
     let _ = std::fs::remove_dir_all(&d);
 }
 

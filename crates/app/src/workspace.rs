@@ -487,7 +487,7 @@ impl Workspace {
         let dir_watcher = git::DirWatcher::start(repos.reporter())
             .map_err(|e| eprintln!("dirigent: no directory watcher for file trees: {e}"))
             .ok();
-        let (notifier, clicks) = notify::start(agent::runtime_dir().join("icon.svg"));
+        let (notifier, clicks) = notify::start(agent::runtime_dir().join("icon.svg"), cx);
         let mut this = Self {
             tabs: Vec::new(),
             active: 0,
@@ -610,12 +610,12 @@ impl Workspace {
             }
             Err(e) => eprintln!("dirigent: Claude Code integration disabled: {e}"),
         }
-        this._subscriptions.push(cx.observe_window_activation(window, |w, window, _| {
+        this._subscriptions.push(cx.observe_window_activation(window, |w, window, cx| {
             w.window_active = window.is_window_active();
             crate::perf::event_with(|| format!("window active: {}", w.window_active));
             // Looking at the session now: its notification is done.
             if let (true, Some(tab)) = (w.window_active, w.tabs.get(w.active)) {
-                w.notifier.close(tab.id as u32);
+                w.notifier.close(tab.id as u32, cx);
             }
         }));
         this._click_task = Some(cx.spawn_in(window, async move |this, cx| {
@@ -1294,7 +1294,7 @@ impl Workspace {
         if let Some(hub) = &self.agents {
             hub.board.lock().unwrap().mark_seen(new.id as u32);
         }
-        self.notifier.close(new.id as u32);
+        self.notifier.close(new.id as u32, cx);
         // It may have output since its cached frame was recorded.
         view.update(cx, |_, cx| cx.notify());
         if self.modal.is_none() {
@@ -1565,7 +1565,7 @@ impl Workspace {
         if let Some(hub) = &self.agents {
             hub.board.lock().unwrap().mark_seen(t.id as u32);
         }
-        self.notifier.close(t.id as u32);
+        self.notifier.close(t.id as u32, cx);
         cx.notify();
     }
 
@@ -1627,7 +1627,7 @@ impl Workspace {
         if let Some(hub) = &self.agents {
             hub.remove_tab(tab.id as u32);
         }
-        self.notifier.close(tab.id as u32);
+        self.notifier.close(tab.id as u32, cx);
         self.tracker.remove_tab(tab.id as u32);
         if let TabRepo::Repo(root) = &tab.repo {
             self.repos.release(root);
@@ -1867,13 +1867,13 @@ impl Workspace {
         for (i, dir) in moves {
             self.set_cwd(i, dir, cx);
         }
-        self.notify_changes();
+        self.notify_changes(cx);
         cx.notify();
     }
 
     /// One desktop notification per agent state change into "needs you"/"done", unless it's the session you're
     /// looking at (see `notify::should_notify`).
-    fn notify_changes(&mut self) {
+    fn notify_changes(&mut self, cx: &gpui::App) {
         let Some(hub) = &self.agents else { return };
         // Titles only for the tabs with a new notice (this runs on every hook).
         let titles: Vec<Option<String>> = {
@@ -1904,13 +1904,10 @@ impl Workspace {
             let urgent = a.state == agent::State::NeedsYou;
             let body = a.note.clone().unwrap_or_else(|| if urgent { "Needs your input" } else { "Finished" }.into());
             crate::perf::event_with(|| format!("notify tab {}: {body}", tab.id));
-            self.notifier.show(notify::Notice {
-                tab: tab.id as u32,
-                title,
-                body,
-                urgent,
-                sound: self.settings.notifications.sound,
-            });
+            self.notifier.show(
+                notify::Notice { tab: tab.id as u32, title, body, urgent, sound: self.settings.notifications.sound },
+                cx,
+            );
         }
     }
 
@@ -2827,10 +2824,10 @@ impl Workspace {
         }
         let tab = self.tabs.get(self.active);
         let repo = match tab.map(|t| &t.repo) {
-            Some(TabRepo::Repo(root)) if path.starts_with(root) => Some(root.clone()),
+            Some(TabRepo::Repo(root)) if git::path_under(&path, root) => Some(root.clone()),
             _ => None,
         };
-        let base = tab.and_then(Self::tree_root).filter(|r| path.starts_with(r));
+        let base = tab.and_then(Self::tree_root).filter(|r| git::path_under(&path, r));
         let ws = cx.entity().downgrade();
         let m = self.metrics.clone();
         let view = cx.new(|cx| FileView::new(path, repo, base, &m, ws, cx));

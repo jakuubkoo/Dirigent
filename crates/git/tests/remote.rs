@@ -107,7 +107,6 @@ fn fetch_fast_forward_and_diverged() {
 }
 
 #[test]
-#[cfg_attr(windows, ignore = "Windows git step: git prints C:/ paths, the test's temp dir is an 8.3 short path")]
 fn publish_sets_upstream_and_push() {
     let s = setup("publish");
     write::create_branch(&s.mine, "feat/x").unwrap();
@@ -123,7 +122,9 @@ fn publish_sets_upstream_and_push() {
     assert_eq!(sh(&s.bare, &["rev-parse", "feat/x"]), sh(&s.mine, &["rev-parse", "HEAD"]));
     assert_eq!(remote::default_branch(&s.mine, "origin"), "main");
     assert_eq!(remote::last_commit(&s.mine).0, "y.txt");
-    assert_eq!(remote::push_url(&s.mine, "origin").unwrap(), s.bare.to_string_lossy());
+    // Windows: git stores `C:/Users/runneradmin/…`, the test's `%TEMP%` is the 8.3 form `C:\Users\RUNNER~1\…`.
+    let url = remote::push_url(&s.mine, "origin").unwrap();
+    assert_eq!(git::root_key(&url), git::root_key(&s.bare.to_string_lossy()));
 }
 
 #[test]
@@ -158,7 +159,6 @@ fn branches_and_switching() {
 }
 
 #[test]
-#[cfg_attr(windows, ignore = "Windows git step: the hung ssh child needs a Job Object to die")]
 fn cancel_kills_a_hung_fetch() {
     let s = setup("hung");
     // The "ssh" never answers; git runs core.sshCommand through the shell with its args after `:`.

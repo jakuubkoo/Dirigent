@@ -36,3 +36,9 @@ raw-window-handle = "0.6"
 [target.'cfg(windows)'.dependencies]
 # Process liveness for the stale runtime-dir sweep, console attach and the log handles; already in the graph.
 windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_System_Threading", "Win32_System_Console"] }
+# The main window's HWND, owner of the Recycle Bin's questions (main.rs); already in gpui's graph.
+raw-window-handle = "0.6"
+
+[build-dependencies]
+# The exe icon on Windows (build.rs); the same version gpui's own build script already uses (built for every target).
+embed-resource = "3.0.12"

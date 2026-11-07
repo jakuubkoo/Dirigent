@@ -18,6 +18,12 @@ All notable changes to Dirigent are recorded here. The format follows
   shows working / needs you / done and the usage limits, like on Linux, with your own statusLine still shown. The
   first prompt from the New session dialog, resume and the project's claude flags work in every shell; an npm
   install of claude works too. Ctrl-C goes to claude.
+- Windows (preview, third step): git and notifications. Discarding a new file moves it to the Recycle Bin (a drive
+  without one refuses and keeps the file). Cancel stops a fetch or push at once, ssh included, and Git Credential
+  Manager never opens a sign-in window behind your back. Worktrees work, also for a project opened with
+  `dirigent C:\some\dir`, and a folder typed in another case (`cd c:\users\…`) is still the same project. "Needs
+  you" and "done" show as Windows notifications (always silent, so the Sound setting is hidden); clicking one opens
+  its session. The exe has the Dirigent icon.
 - **Edit files in the preview**: type, select with the mouse or Shift+keys, copy/cut/paste, undo/redo, auto-indent
   on Enter, Tab / Shift+Tab (also over selected lines), Ctrl+S saves. A dot next to the name marks unsaved edits;
   Esc, switching or closing the session, opening another file and closing the window ask before dropping them.

@@ -153,6 +153,9 @@ fn main() {
     theme::set(theme::resolve(&loaded.parsed.settings.theme, &loaded.themes).0);
     loaded.parsed.notes.extend(theme::notes(&loaded.themes, &loaded.parsed.settings.theme));
     gpui_platform::application().with_assets(assets::Assets).run(move |cx: &mut App| {
+        // Toasts are shown under this AppUserModelID (gpui registers its display name under HKCU on the first one).
+        #[cfg(windows)]
+        cx.set_app_identity("dev.dirigent.Dirigent", "Dirigent");
         if let Err(e) = cx.text_system().add_fonts(assets::fonts()) {
             eprintln!("dirigent: bundled fonts failed to load: {e}");
         }
@@ -186,6 +189,8 @@ fn main() {
                 ..Default::default()
             },
             |window, cx| {
+                #[cfg(windows)]
+                ui_owner(window);
                 cx.new(|cx| {
                     Workspace::new(
                         saved.clone(),
@@ -203,6 +208,17 @@ fn main() {
         cx.on_window_closed(|cx, _| cx.quit()).detach();
         cx.activate(true);
     });
+}
+
+/// The main window owns the Recycle Bin's questions; `git::write::trash` refuses this (the UI) thread.
+#[cfg(windows)]
+fn ui_owner(window: &gpui::Window) {
+    use raw_window_handle::{HasWindowHandle, RawWindowHandle};
+    if let Ok(h) = HasWindowHandle::window_handle(window)
+        && let RawWindowHandle::Win32(w) = h.as_raw()
+    {
+        git::write::set_ui_owner(w.hwnd.get());
+    }
 }
 
 /// Re-runs this binary detached (own process group: Ctrl+C or closing the terminal don't reach it), stdout/stderr

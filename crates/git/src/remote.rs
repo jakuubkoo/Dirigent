@@ -56,7 +56,13 @@ pub fn run_tool(program: &str, dir: &Path, args: &[&str], cancel: &Cancel, timeo
             });
         }
     }
+    // Git Credential Manager fails instead of opening a sign-in window nobody may be watching (as
+    // GIT_TERMINAL_PROMPT=0 does for the terminal prompt).
+    #[cfg(windows)]
+    c.env("GCM_INTERACTIVE", "never");
     let mut child = c.spawn().map_err(GitError::Io)?;
+    #[cfg(windows)]
+    let job = win::Job::of(&child);
     let reader = |mut pipe: Box<dyn std::io::Read + Send>| {
         std::thread::spawn(move || {
             let mut buf = Vec::new();
@@ -73,6 +79,10 @@ pub fn run_tool(program: &str, dir: &Path, args: &[&str], cancel: &Cancel, timeo
             break Some(s);
         }
         if cancel.load(Ordering::Relaxed) || started.elapsed() > timeout {
+            #[cfg(windows)]
+            if let Some(job) = &job {
+                job.terminate();
+            }
             kill_tree(&mut child);
             let _ = child.wait();
             break None;
@@ -95,11 +105,50 @@ fn kill_tree(child: &mut std::process::Child) {
     unsafe { libc::kill(-(child.id() as i32), libc::SIGKILL) };
 }
 
-// ponytail: kills only the direct child on Windows (its ssh may linger until it times out); a Job Object
-// (KILL_ON_JOB_CLOSE) takes the whole tree in the git/notifications step.
+/// Windows: the job (`win::Job`) already took the tree; this is the fallback when the job couldn't be made.
 #[cfg(windows)]
 fn kill_tree(child: &mut std::process::Child) {
     let _ = child.kill();
+}
+
+#[cfg(windows)]
+mod win {
+    use std::os::windows::io::AsRawHandle;
+    use windows_sys::Win32::Foundation::{CloseHandle, HANDLE};
+    use windows_sys::Win32::System::JobObjects::{AssignProcessToJobObject, CreateJobObjectW, TerminateJobObject};
+
+    /// The child and everything it starts (ssh, git-remote-https, the `sh` of core.sshCommand): Windows has no
+    /// process groups. Closing the handle leaves them running (a finished git may leave a credential daemon); only
+    /// `terminate` kills.
+    // ponytail: a grandchild started between spawn and the assign below escapes; git starts ssh only after
+    // milliseconds of setup. CREATE_SUSPENDED + resume if that ever shows.
+    pub struct Job(HANDLE);
+
+    impl Job {
+        pub fn of(child: &std::process::Child) -> Option<Job> {
+            // SAFETY: a fresh job handle and the child's live process handle.
+            unsafe {
+                let job = CreateJobObjectW(std::ptr::null(), std::ptr::null());
+                if job.is_null() {
+                    return None;
+                }
+                let job = Job(job);
+                (AssignProcessToJobObject(job.0, child.as_raw_handle()) != 0).then_some(job)
+            }
+        }
+
+        pub fn terminate(&self) {
+            // SAFETY: our own job handle.
+            unsafe { TerminateJobObject(self.0, 1) };
+        }
+    }
+
+    impl Drop for Job {
+        fn drop(&mut self) {
+            // SAFETY: our own job handle, closed once.
+            unsafe { CloseHandle(self.0) };
+        }
+    }
 }
 
 /// Auth failures get a line saying where to fix them (the user's git setup), above git's own message.

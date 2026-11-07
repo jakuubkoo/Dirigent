@@ -16,3 +16,8 @@ memchr = "2"
 [target.'cfg(unix)'.dependencies]
 # setsid/kill for network commands (already in the graph).
 libc = "0.2"
+
+[target.'cfg(windows)'.dependencies]
+# Job Object for network commands (`remote.rs`), the Recycle Bin (`write::trash`), 8.3 names in tests; already in
+# the graph.
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Storage_FileSystem", "Win32_System_JobObjects", "Win32_UI_Shell"] }

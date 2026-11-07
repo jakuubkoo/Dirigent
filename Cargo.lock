@@ -1091,6 +1091,7 @@ name = "dirigent"
 version = "0.3.0"
 dependencies = [
  "async-channel",
+ "embed-resource",
  "git",
  "gpui",
  "gpui_platform",
@@ -1727,6 +1728,7 @@ dependencies = [
  "memchr",
  "notify",
  "regex",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
