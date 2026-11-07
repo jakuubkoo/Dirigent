@@ -109,12 +109,13 @@ fn files_stage_unstage_discard_and_trash() {
     {
         write::discard(&r, &file(&r, "new.txt")).unwrap();
         assert!(!d.join("new.txt").exists());
-        assert!(recycled(&d).contains(&"new.txt".to_string()), "moved to the Recycle Bin: {:?}", recycled(&d));
+        assert!(recycled(&d).contains(&"new".to_string()), "moved to the Recycle Bin: {:?}", recycled(&d));
     }
     let _ = std::fs::remove_dir_all(&d);
 }
 
-/// Names of Recycle Bin items deleted from `dir` (the shell's own view of the bin).
+/// Names of Recycle Bin items deleted from `dir` (the shell's own view of the bin), without the extension: the
+/// shell hides known extensions unless Explorer is set to show them.
 #[cfg(windows)]
 fn recycled(dir: &Path) -> Vec<String> {
     let dir = git::plain_path(std::path::absolute(dir).unwrap());
@@ -124,7 +125,10 @@ fn recycled(dir: &Path) -> Vec<String> {
         dir.display()
     );
     let out = Command::new("powershell.exe").args(["-NoProfile", "-Command", &script]).output().unwrap();
-    String::from_utf8_lossy(&out.stdout).lines().map(|l| l.trim().to_string()).collect()
+    String::from_utf8_lossy(&out.stdout)
+        .lines()
+        .map(|l| Path::new(l.trim()).file_stem().unwrap_or_default().to_string_lossy().into_owned())
+        .collect()
 }
 
 /// `trash` refuses the UI thread (it can block on a question to the user) and leaves the file; elsewhere it works.
@@ -141,7 +145,7 @@ fn trash_never_runs_on_the_ui_thread() {
     let f2 = f.clone();
     std::thread::spawn(move || write::trash(&f2)).join().unwrap().unwrap();
     assert!(!f.exists());
-    assert!(recycled(&d).contains(&"t.txt".to_string()));
+    assert!(recycled(&d).contains(&"t".to_string()));
     let _ = std::fs::remove_dir_all(&d);
 }
 
