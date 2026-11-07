@@ -294,9 +294,9 @@ fn branch_row(b: &Branches, i: usize, cx: &mut Context<Workspace>) -> AnyElement
                 if br.current {
                     t.accent
                 } else if br.remote {
-                    t.text.faint
-                } else {
                     t.text.dim
+                } else {
+                    t.text.muted
                 },
             ))
             .child(
