@@ -939,7 +939,7 @@ impl FileView {
                     .pr(z(space::LG))
                     .flex()
                     .justify_end()
-                    .text_color(if caret.is_some() { t.text.muted } else { t.text.faint })
+                    .text_color(if caret.is_some() { t.text.muted } else { t.diff.gutter })
                     .child((ix + 1).to_string()),
             )
             .child(
@@ -1188,7 +1188,7 @@ impl FileView {
                     let (bg, fg) = match kind {
                         '-' => (Some(t.diff.del_bg), t.diff.del_fg),
                         '+' => (Some(t.diff.add_bg), t.diff.add_fg),
-                        '⋯' => (None, t.text.faint),
+                        '⋯' => (None, t.diff.hunk),
                         _ => (None, t.diff.context),
                     };
                     div()

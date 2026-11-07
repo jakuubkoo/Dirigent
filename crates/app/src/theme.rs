@@ -458,7 +458,8 @@ mod tests {
     }
 
     /// The same thresholds for every built-in theme: small text 4.5:1 (AA), `text.faint` (ignored files,
-    /// placeholders, disabled controls), line numbers and non-text marks 3:1. A theme that fails can't be merged.
+    /// placeholders, disabled controls), line numbers and non-text marks 3:1; the accent is text too (4.5:1). A theme
+    /// that fails can't be merged.
     #[test]
     fn contrast() {
         let mut fails = Vec::new();
@@ -483,7 +484,6 @@ mod tests {
                 ("text.on_accent on state.error".into(), tx.on_accent, t.state.error, 4.5),
                 ("terminal.fg".into(), t.terminal.fg, t.terminal.bg, 4.5),
                 ("text.primary on search_match".into(), tx.primary, t.search_match, 4.5),
-                ("state.needs_you (text)".into(), t.state.needs_you, bg.panel, 4.5),
             ]);
             let sx = &t.syntax;
             for (name, c) in [
@@ -523,7 +523,15 @@ mod tests {
             ] {
                 rules.push((format!("state.{name}"), c, bg.panel, 3.));
             }
-            rules.extend([bg.panel, bg.selected].map(|b| ("accent".into(), t.accent, b, 3.)));
+            // Warning and error colors are text too (notes, banners, "1 needs you").
+            for (name, c) in [("state.needs_you", t.state.needs_you), ("state.error", t.state.error)] {
+                rules.extend([bg.base, bg.panel, bg.elevated].map(|b| (format!("{name} (text)"), c, b, 4.5)));
+            }
+            // The accent is also text (search match highlights, links), on lists and selected rows.
+            rules.extend(
+                [bg.panel, bg.elevated, bg.hover, bg.selected, bg.selected_focus]
+                    .map(|b| ("accent (text)".into(), t.accent, b, 4.5)),
+            );
             rules.extend(t.project.iter().enumerate().map(|(i, &c)| (format!("project[{i}]"), c, bg.panel, 3.)));
             rules.push(("border.strong".into(), t.border.strong, bg.panel, 1.3));
             // Same-luminance hues pass any ratio: colors that must read as different states also differ in hue.

@@ -22,7 +22,7 @@
     "faint": "#7f828d",
     "on_accent": "#0b0c10"
   },
-  "accent": "#7c8aff",
+  "accent": "#8e9aff",
   "state": {
     "working": "#60a5fa",
     "needs_you": "#f5a524",
@@ -61,7 +61,7 @@
   },
   "meter": {
     "track": "#ffffff14",
-    "ok": "#7c8aff",
+    "ok": "#8e9aff",
     "warn": "#f5a524",
     "crit": "#f87171"
   },
