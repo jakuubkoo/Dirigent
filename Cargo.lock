@@ -1732,6 +1732,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "gitserve"
+version = "0.3.0"
+dependencies = [
+ "libc",
+]
+
+[[package]]
 name = "gl_generator"
 version = "0.14.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2263,6 +2270,7 @@ dependencies = [
 name = "hook"
 version = "0.3.0"
 dependencies = [
+ "gitserve",
  "libc",
  "serde",
  "serde_json",

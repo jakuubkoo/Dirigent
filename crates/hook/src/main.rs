@@ -2,6 +2,7 @@
 //! `dirigent-hook <socket> <tab> argv <claude args...>`, the old sh shim's flag report (older runtime dirs).
 //! Started under the name `claude` it is the shim instead (`hook::shim`).
 //! Windows: `dirigent-hook <pipe> 0 relay` passes a message the Linux helper built inside WSL on to the app.
+//! Linux: `dirigent-hook git-server` runs the app's git calls for repos inside a WSL distro (`gitserve`).
 //!
 //! Fire-and-forget: forwards a small message to the app (Unix a non-blocking datagram, Windows a named pipe). If the
 //! app isn't running the send fails instantly and is ignored. Always exits 0 so Claude Code is never slowed down or
@@ -23,6 +24,12 @@ fn main() {
         std::process::exit(hook::shim::run(&argv0, argv.collect()));
     }
     let args: Vec<String> = std::env::args().collect();
+    #[cfg(unix)]
+    if let [_, mode] = args.as_slice()
+        && mode == "git-server"
+    {
+        std::process::exit(gitserve::serve());
+    }
     let [_, socket, tab, mode, rest @ ..] = args.as_slice() else { return };
     // Windows, started from WSL through interop: a message the Linux helper built, passed on as is.
     if cfg!(windows) && mode == "relay" {
