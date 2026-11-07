@@ -305,13 +305,15 @@ fn view(t: &Tab, status: Option<(&Path, &Status)>, owners: &HashMap<&Path, usize
     let (mut files, mut add, mut del) = (HashMap::new(), 0u64, 0u64);
     for (abs, touch) in &t.files {
         let Some(rel) = abs.strip_prefix(root).ok().and_then(Path::to_str) else { continue };
-        let Some(f) = by_path.get(rel) else { continue };
+        // git's form (`/`), also when claude on Windows sent `C:\repo\src\a.rs`.
+        let rel = if cfg!(windows) { rel.replace('\\', "/") } else { rel.to_string() };
+        let Some(f) = by_path.get(rel.as_str()) else { continue };
         if let Some((a, d)) = f.lines {
             add += a as u64;
             del += d as u64;
         }
         let shared = owners.get(abs.as_path()).is_some_and(|&n| n > 1);
-        files.insert(rel.to_string(), Mark { shared, via_command: touch.via_command });
+        files.insert(rel, Mark { shared, via_command: touch.via_command });
     }
     let summary = (!files.is_empty()).then_some((files.len(), add, del));
     View { summary, files, touched }

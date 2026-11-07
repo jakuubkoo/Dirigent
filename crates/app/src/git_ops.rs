@@ -333,11 +333,34 @@ impl Stop {
 /// `claude -p` on Haiku with no tools, no saved session, none of your settings or hooks (your login): `system`
 /// as the system prompt, `ask` as the prompt, `input` on stdin. `bin`: "claude" (a fake one in tests). Blocking.
 fn claude_p(bin: &str, system: &str, ask: &str, input: &str, stop: &Stop) -> Result<String, String> {
-    let mut cmd = git::cmd(bin);
+    let mut cmd = claude_command(bin);
     cmd.args(["-p", "--setting-sources", "", "--model", "haiku", "--tools", "", "--no-session-persistence"])
         .args(["--system-prompt", system, ask])
         .current_dir(std::env::temp_dir());
     run_stoppable(cmd, input, stop).map_err(|e| e.replace("{cmd}", "claude"))
+}
+
+#[cfg(unix)]
+fn claude_command(bin: &str) -> Command {
+    git::cmd(bin)
+}
+
+/// Windows: `claude` is resolved like the shim does (`claude.exe`, or what an npm `claude.cmd` launches), since a
+/// plain spawn finds only `.exe` files.
+#[cfg(windows)]
+fn claude_command(bin: &str) -> Command {
+    let path = std::env::var_os("PATH").unwrap_or_default();
+    let found = (bin == "claude").then(|| hook::shim::find_claude(&path, None)).flatten();
+    match found.as_deref().map(hook::shim::target) {
+        Some(hook::shim::Target::Exe(exe)) => git::cmd(exe),
+        Some(hook::shim::Target::Node { node, script }) => {
+            let mut c = git::cmd(node);
+            c.arg(script);
+            c
+        }
+        Some(hook::shim::Target::Batch) => git::cmd(found.unwrap()),
+        None => git::cmd(bin),
+    }
 }
 
 /// Runs `cmd` with `input` on stdin and returns its stdout; `stop` can kill it meanwhile. Blocking.
