@@ -300,6 +300,98 @@ fn is_session_id(s: &str) -> bool {
     s.len() == 36 && s.chars().all(|c| c.is_ascii_hexdigit() || c == '-')
 }
 
+/// Claude processes this app didn't start (Linux: read from `/proc`; elsewhere nothing is known).
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Running {
+    /// Session ids named on a command line (`--resume <id>`, `-r <id>`, `--session-id <id>`): exact.
+    pub sessions: Vec<String>,
+    /// Every such process's working directory (a fresh `claude` names no session).
+    pub cwds: Vec<PathBuf>,
+}
+
+impl Running {
+    /// Any of them works in `root` or under `worktrees`.
+    pub fn in_project(&self, root: &Path, worktrees: &Path) -> bool {
+        self.cwds.iter().any(|c| c.starts_with(root) || c.starts_with(worktrees))
+    }
+}
+
+/// The claude processes running now, minus this app's own (their `--settings` file lies in `own_runtime`).
+/// Verified on 2.1.319: an idle claude keeps no fd on its transcript (appends open and close it), so only the
+/// command line and the cwd tell. Blocking IO: call off the UI thread.
+#[cfg(target_os = "linux")]
+pub fn running(own_runtime: &Path) -> Running {
+    running_in(Path::new("/proc"), own_runtime)
+}
+
+#[cfg(not(target_os = "linux"))]
+pub fn running(_own_runtime: &Path) -> Running {
+    Running::default()
+}
+
+/// `running` over a `/proc`-shaped directory (tests use a fake one).
+#[cfg(target_os = "linux")]
+fn running_in(proc: &Path, own_runtime: &Path) -> Running {
+    let mut r = Running::default();
+    let Ok(dir) = std::fs::read_dir(proc) else { return r };
+    for d in dir.flatten() {
+        if !d.file_name().to_string_lossy().bytes().all(|b| b.is_ascii_digit()) {
+            continue;
+        }
+        let Ok(raw) = std::fs::read(d.path().join("cmdline")) else { continue };
+        let args = split_cmdline(&raw);
+        let exe = std::fs::read_link(d.path().join("exe")).unwrap_or_default();
+        if !is_claude(&args, &exe) || is_own(&args, own_runtime) {
+            continue;
+        }
+        r.sessions.extend(named_session(&args));
+        if let Ok(cwd) = std::fs::read_link(d.path().join("cwd")) {
+            r.cwds.push(cwd);
+        }
+    }
+    r
+}
+
+/// `/proc/<pid>/cmdline`: NUL-separated, NUL-terminated.
+#[cfg(target_os = "linux")]
+fn split_cmdline(raw: &[u8]) -> Vec<String> {
+    let raw = raw.strip_suffix(b"\0").unwrap_or(raw);
+    if raw.is_empty() {
+        return Vec::new();
+    }
+    raw.split(|&b| b == 0).map(|a| String::from_utf8_lossy(a).into_owned()).collect()
+}
+
+/// The CLI itself: `claude` as typed or through a path (native installs exec `~/.local/share/claude/versions/<v>`),
+/// or node running the npm package. Not Claude Desktop (`claude-desktop`).
+#[cfg(target_os = "linux")]
+fn is_claude(args: &[String], exe: &Path) -> bool {
+    let name = |s: &str| Path::new(s).file_name().is_some_and(|n| n == "claude");
+    let node = args.first().is_some_and(|a| Path::new(a).file_name().is_some_and(|n| n == "node"))
+        && args.get(1).is_some_and(|a| a.contains("claude-code"));
+    args.first().is_some_and(|a| name(a)) || node || exe.to_string_lossy().contains("/claude/versions/")
+}
+
+/// Started by this app's shim: `--settings <own runtime dir>/tab-<id>.json`.
+#[cfg(target_os = "linux")]
+fn is_own(args: &[String], own_runtime: &Path) -> bool {
+    args.windows(2).any(|w| w[0] == "--settings" && Path::new(&w[1]).starts_with(own_runtime))
+}
+
+/// The session a command line names (before a `--`: what follows is the prompt).
+#[cfg(target_os = "linux")]
+fn named_session(args: &[String]) -> Option<String> {
+    let args = &args[..args.iter().position(|a| a == "--").unwrap_or(args.len())];
+    args.iter().enumerate().skip(1).find_map(|(i, a)| {
+        let value = match a.split_once('=') {
+            Some((k, v)) if k == "--resume" || k == "--session-id" => Some(v),
+            _ if a == "--resume" || a == "-r" || a == "--session-id" => args.get(i + 1).map(String::as_str),
+            _ => None,
+        };
+        value.filter(|v| is_session_id(v)).map(str::to_string)
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -390,12 +482,75 @@ mod tests {
         let _ = std::fs::remove_dir_all(&tmp);
     }
 
+    /// Command lines as seen on this machine (2.1.319; the prompt redacted).
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn claude_processes_are_recognized() {
+        let args = |s: &str| split_cmdline(s.replace('|', "\0").as_bytes());
+        let id = "37649fe7-f190-49cd-bfb8-233041d7377a";
+        let resumed = args(&format!("claude|--resume|{id}|"));
+        assert_eq!(resumed, ["claude", "--resume", id]);
+        assert_eq!(named_session(&resumed).as_deref(), Some(id));
+        assert_eq!(named_session(&args(&format!("claude|--model|opus|-r|{id}|"))).as_deref(), Some(id));
+        assert_eq!(named_session(&args(&format!("claude|--resume={id}|"))).as_deref(), Some(id));
+        assert_eq!(named_session(&args(&format!("claude|--session-id|{id}|"))).as_deref(), Some(id));
+        // A prompt after `--` that looks like a flag, an interactive `--resume` picker, a bad id: nothing named.
+        assert_eq!(named_session(&args(&format!("claude|--|--resume {id}|"))), None);
+        assert_eq!(named_session(&args("claude|--resume|")), None);
+        assert_eq!(named_session(&args("claude|--resume|../../etc|")), None);
+
+        let shim = args("/home/u/.local/bin/claude|--settings|/run/user/1000/dirigent-866966/tab-2.json|--|<prompt>|");
+        let versions = Path::new("/home/u/.local/share/claude/versions/2.1.319");
+        assert!(is_claude(&args("claude||"), versions));
+        assert!(is_claude(&shim, Path::new("")));
+        assert!(is_claude(&args("node|/usr/lib/node_modules/@anthropic-ai/claude-code/cli.js|"), Path::new("")));
+        assert!(!is_claude(&args("/usr/lib/claude-desktop/claude-desktop|--type=gpu-process|"), Path::new("")));
+        assert!(!is_claude(&args("vim|claude|"), Path::new("/usr/bin/vim")));
+        assert!(is_own(&shim, Path::new("/run/user/1000/dirigent-866966")));
+        assert!(!is_own(&shim, Path::new("/run/user/1000/dirigent-1")), "another instance's claude is elsewhere");
+        assert!(split_cmdline(b"").is_empty(), "kernel threads have an empty cmdline");
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn scans_a_proc_tree() {
+        let tmp = std::env::temp_dir().join(format!("dirigent-procs-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        let proc = tmp.join("proc");
+        let own = tmp.join("run/dirigent-7");
+        let id = "37649fe7-f190-49cd-bfb8-233041d7377a";
+        let put = |pid: &str, cmdline: &str, cwd: &str| {
+            let d = proc.join(pid);
+            std::fs::create_dir_all(&d).unwrap();
+            std::fs::write(d.join("cmdline"), cmdline.replace('|', "\0")).unwrap();
+            std::os::unix::fs::symlink(cwd, d.join("cwd")).unwrap();
+        };
+        put("100", &format!("claude|--resume|{id}|"), "/r/app");
+        put("101", "claude||", "/r/app-worktrees/feat");
+        put("102", &format!("claude|--settings|{}/tab-3.json|", own.display()), "/r/app"); // ours
+        put("103", "zsh||", "/r/app");
+        put("104", "claude||", "/r/other");
+        std::fs::create_dir_all(proc.join("self")).unwrap(); // not a pid
+        let r = running_in(&proc, &own);
+        assert_eq!(r.sessions, [id]);
+        let mut cwds = r.cwds.clone();
+        cwds.sort();
+        assert_eq!(cwds, [PathBuf::from("/r/app"), "/r/app-worktrees/feat".into(), "/r/other".into()]);
+        assert!(r.in_project(Path::new("/r/app"), Path::new("/r/app-worktrees")));
+        let only_other = Running { sessions: Vec::new(), cwds: vec!["/r/other".into(), "/r/app-x".into()] };
+        assert!(!only_other.in_project(Path::new("/r/app"), Path::new("/r/app-worktrees")));
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
     /// Every transcript on this machine (read-only): outliers and timings, to inspect after a claude upgrade.
     /// `cargo test --release -p dirigent history_real_data -- --ignored --nocapture`
     #[test]
     #[ignore]
     fn history_real_data() {
         let projects = PathBuf::from(std::env::var("HOME").unwrap()).join(".claude/projects");
+        let t = std::time::Instant::now();
+        let r = running(Path::new("/nonexistent")); // every claude counts as outside here
+        println!("running: {:?} named, cwds {:?} ({} ms)", r.sessions, r.cwds, t.elapsed().as_millis());
         let cache = Cache::default();
         for pass in ["cold", "warm"] {
             let t = std::time::Instant::now();

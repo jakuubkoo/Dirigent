@@ -19,8 +19,10 @@ All notable changes to Dirigent are recorded here. The format follows
   Command Center), newest first, with Claude's title or your name for it, the first prompt, branch, message count
   and last activity; type to search titles and prompts. Enter resumes the session in a new tab where it was
   started, or switches to the tab that already has it. Read from Claude's own transcripts, never changed. A session
-  written in the last 2 minutes that no tab here holds is marked "maybe running elsewhere" and asks before resuming,
-  so two claude processes don't write one transcript. With no session open, the command asks for the project first.
+  that a claude outside Dirigent runs (Linux: its command line names it) or that was written in the last 2 minutes is
+  marked "maybe running elsewhere" and asks before resuming, so two claude processes don't write one transcript. When
+  a claude outside Dirigent works in the project (Linux), the list says so in its header. With no session open, the
+  command asks for the project first.
 
 ### Changed
 

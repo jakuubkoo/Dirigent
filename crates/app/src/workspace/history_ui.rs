@@ -25,8 +25,13 @@ const RECENT_SECS: i64 = 120;
 pub(super) struct History {
     root: PathBuf,
     pub edit: LineEdit,
+    /// Where its worktrees go (sessions there count as the project's).
+    worktrees: PathBuf,
     /// None while the transcripts are read.
     all: Option<Arc<Vec<Entry>>>,
+    /// Claude processes outside this app, read with the list (Linux; empty elsewhere). Not refreshed while open:
+    /// nothing polls.
+    running: crate::history::Running,
     rows: Vec<Row>,
     sel: usize,
     scroll: UniformListScrollHandle,
@@ -56,25 +61,28 @@ impl Workspace {
     /// transcripts are read off the UI thread (cached per file version for the app's lifetime).
     pub(super) fn open_history(&mut self, root: PathBuf, window: &mut Window, cx: &mut Context<Self>) {
         self.menu = None;
+        let wt_dir = self.projects.get(&root).and_then(|p| p.worktrees_dir.clone());
+        let worktrees = projects::worktrees_base(&root, wt_dir.as_deref());
         self.modal = Some(Modal::History(Box::new(History {
             root: root.clone(),
+            worktrees: worktrees.clone(),
             edit: LineEdit::new(""),
             all: None,
+            running: Default::default(),
             rows: Vec::new(),
             sel: 0,
             scroll: UniformListScrollHandle::new(),
             drag: Default::default(),
         })));
-        let wt_dir = self.projects.get(&root).and_then(|p| p.worktrees_dir.clone());
-        let worktrees = projects::worktrees_base(&root, wt_dir.as_deref());
         let cache = self.history.clone();
         cx.spawn(async move |this, cx| {
             let r = root.clone();
-            let all = cx
+            let (all, running) = cx
                 .background_executor()
                 .spawn(async move {
                     let projects = home().join(".claude/projects");
-                    crate::history::list(&projects, &r, &worktrees, &cache)
+                    let all = crate::history::list(&projects, &r, &worktrees, &cache);
+                    (all, crate::history::running(&agent::runtime_dir()))
                 })
                 .await;
             let _ = this.update(cx, |w, cx| {
@@ -82,6 +90,7 @@ impl Workspace {
                     && h.root == root
                 {
                     h.all = Some(Arc::new(all));
+                    h.running = running;
                     w.history_filter();
                     cx.notify();
                 }
@@ -157,6 +166,8 @@ impl Workspace {
             return;
         };
         let root = h.root.clone();
+        let (exact, recent) = (h.running.sessions.contains(&e.id), now_secs() - e.modified < RECENT_SECS);
+        let in_project = h.running.in_project(&h.root, &h.worktrees);
         self.modal = None;
         let dir = if e.cwd_exists { e.cwd.clone() } else { root.clone() };
         if let Some(i) = self.held_by(&e.id) {
@@ -165,12 +176,18 @@ impl Workspace {
             } else {
                 self.resume_one(i, window, cx);
             }
-        } else if now_secs() - e.modified < RECENT_SECS {
+        } else if exact || recent {
+            let why = if exact {
+                "A claude outside Dirigent runs this session (its command line names it)."
+            } else {
+                "Its transcript changed in the last 2 minutes and no session here has it: claude may still run it in \
+                 another terminal."
+            };
+            // The project-level hint never asks on its own; here it adds a line.
+            let also = if in_project && !exact { " A claude outside Dirigent runs in this project." } else { "" };
             self.modal = Some(Modal::Confirm {
                 title: "Resume a session that may be running?".into(),
-                body: "Its transcript changed in the last 2 minutes and no session here has it: claude may still run \
-                       it in another terminal. Two claude processes on one session both write its transcript."
-                    .into(),
+                body: format!("{why}{also} Two claude processes on one session both write its transcript."),
                 files: Vec::new(),
                 ok: "Resume anyway",
                 danger: true,
@@ -256,7 +273,24 @@ impl Workspace {
                     .items_baseline()
                     .gap(z(space::SM))
                     .child(div().font_weight(FontWeight::SEMIBOLD).child(format!("History of {}", short_path(&h.root))))
-                    .children(count.map(|c| div().text_size(z(text_size::XS)).text_color(t.text.dim).child(c))),
+                    .children(count.map(|c| div().text_size(z(text_size::XS)).text_color(t.text.dim).child(c)))
+                    .when(h.running.in_project(&h.root, &h.worktrees), |d| {
+                        d.child(
+                            div()
+                                .id("history-busy")
+                                .ml_auto()
+                                .flex()
+                                .items_center()
+                                .gap(z(space::XS))
+                                .text_size(z(text_size::XS))
+                                .text_color(t.text.muted)
+                                .child(ui::icon(icon::TERMINAL, 12., t.state.needs_you))
+                                .child("claude running in this project")
+                                .tooltip(ui::tip(
+                                    "A claude started outside Dirigent works here (it names no session, so none is marked).",
+                                )),
+                        )
+                    }),
             )
             .child(search)
             .child(
@@ -290,7 +324,7 @@ impl Workspace {
         let row = &h.rows[i];
         let Some(e) = h.all.as_ref().map(|a| &a[row.ix]) else { return div().into_any_element() };
         let open = self.held_by(&e.id).is_some();
-        let elsewhere = !open && now - e.modified < RECENT_SECS;
+        let elsewhere = !open && (h.running.sessions.contains(&e.id) || now - e.modified < RECENT_SECS);
         let styled = |text: &str, hl: &[usize]| {
             let ranges: Vec<_> = hl
                 .iter()
@@ -366,12 +400,10 @@ impl Workspace {
                     )
                     .when(open, |d| d.child(ui::pill("open")))
                     .when(elsewhere, |d| {
-                        d.child(
-                            div()
-                                .id(("elsewhere", i))
-                                .child(ui::pill("maybe running elsewhere"))
-                                .tooltip(ui::tip("Written in the last 2 minutes, but no session here has it")),
-                        )
+                        d.child(div().id(("elsewhere", i)).child(ui::pill("maybe running elsewhere")).tooltip(ui::tip(
+                            "A claude outside Dirigent names it, or it was written in the last 2 minutes; \
+                                     no session here has it",
+                        )))
                     }),
             )
             .child(meta)
