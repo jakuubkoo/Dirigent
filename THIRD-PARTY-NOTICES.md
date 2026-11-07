@@ -25,7 +25,7 @@ Regenerate with `scripts/third-party-notices.sh`.
 
 ## Linked crates
 
-435 crates linked into the Linux build (`cargo tree -e normal --target x86_64-unknown-linux-gnu`).
+437 crates linked into the Linux build (`cargo tree -e normal --target x86_64-unknown-linux-gnu`).
 
 | Crate | Version | License | Source |
 |---|---|---|---|
@@ -303,6 +303,7 @@ Regenerate with `scripts/third-party-notices.sh`.
 | renderdoc-sys | 1.1.0 | MIT OR Apache-2.0 | https://github.com/ebkalderon/renderdoc-rs |
 | resvg | 0.46.0 | Apache-2.0 OR MIT | https://github.com/linebender/resvg |
 | rgb | 0.8.53 | MIT | https://github.com/kornelski/rust-rgb |
+| ropey | 1.6.1 | MIT | https://github.com/cessen/ropey |
 | roxmltree | 0.20.0 | MIT OR Apache-2.0 | https://github.com/RazrFalcon/roxmltree |
 | roxmltree | 0.21.2 | MIT OR Apache-2.0 | https://github.com/RazrFalcon/roxmltree |
 | rustc-demangle | 0.1.28 | MIT/Apache-2.0 | https://github.com/rust-lang/rustc-demangle |
@@ -347,6 +348,7 @@ Regenerate with `scripts/third-party-notices.sh`.
 | spirv | 0.4.0+sdk-1.4.341.0 | Apache-2.0 | https://github.com/gfx-rs/rspirv |
 | stable_deref_trait | 1.2.1 | MIT OR Apache-2.0 | https://github.com/storyyeller/stable_deref_trait |
 | static_assertions | 1.1.0 | MIT OR Apache-2.0 | https://github.com/nvzqz/static-assertions-rs |
+| str_indices | 0.4.4 | MIT OR Apache-2.0 | https://github.com/cessen/str_indices |
 | streaming-iterator | 0.1.9 | MIT OR Apache-2.0 | https://github.com/sfackler/streaming-iterator |
 | strict-num | 0.1.1 | MIT | https://github.com/RazrFalcon/strict-num |
 | strum | 0.28.0 | MIT | https://github.com/Peternator7/strum |

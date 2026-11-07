@@ -5,6 +5,7 @@ mod changes;
 mod cli;
 mod commit_box;
 mod diff_syntax;
+mod editor;
 mod file_tree;
 mod files_panel;
 mod git_ops;
