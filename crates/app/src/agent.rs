@@ -88,6 +88,35 @@ pub struct Board {
     /// Account-wide; last known value is kept when a statusline omits it.
     pub five_hour: Option<Limit>,
     pub seven_day: Option<Limit>,
+    /// Hooks arriving while our statusLine never ran mean its command didn't work in Claude's shell: said once.
+    status_check: StatusCheck,
+}
+
+#[derive(Default, Debug)]
+struct StatusCheck {
+    seen: bool,
+    first_hook: Option<std::time::Instant>,
+    warned: bool,
+}
+
+impl StatusCheck {
+    /// Claude runs the statusLine at start and after every message, well within this.
+    const WITHIN: std::time::Duration = std::time::Duration::from_secs(20);
+
+    fn hook(&mut self) {
+        if self.seen || self.warned {
+            return;
+        }
+        let first = *self.first_hook.get_or_insert_with(std::time::Instant::now);
+        if first.elapsed() > Self::WITHIN {
+            self.warned = true;
+            eprintln!(
+                "dirigent: Claude Code's hooks arrive but its statusLine never ran dirigent-hook (in {} s): no model or \
+                 limits. The statusLine's shell (Git Bash or PowerShell) didn't find it on PATH or failed to run it.",
+                Self::WITHIN.as_secs()
+            );
+        }
+    }
 }
 
 impl Board {
@@ -102,6 +131,7 @@ impl Board {
                 agent.started = false;
             }
             Kind::Hook { event, notification_type, session_id, cwd, message, title, .. } => {
+                self.status_check.hook();
                 agent.last_activity = Some(now_secs());
                 if let Some(text) = title {
                     let new = Auto { text, source: Source::Prompt, session: session_id.clone() };
@@ -168,6 +198,7 @@ impl Board {
                 }
             }
             Kind::Status { model, context_pct, five_hour, seven_day, session_name, session_id } => {
+                self.status_check.seen = true;
                 if let Some(text) = session_name {
                     let session = session_id.or_else(|| agent.session_id.clone());
                     let new = Auto { text, source: Source::Claude, session };
@@ -290,19 +321,32 @@ impl Hub {
         if let Some(runtime) = dir.parent() {
             remove_stale_dirs(runtime);
         }
+        let helper = std::env::current_exe()?.with_file_name(format!("dirigent-hook{}", std::env::consts::EXE_SUFFIX));
+        Self::start_in(tracker, dir, helper)
+    }
+
+    /// `start` with a given runtime dir and helper (tests).
+    fn start_in(tracker: Arc<crate::changes::Tracker>, dir: PathBuf, helper: PathBuf) -> std::io::Result<Self> {
         let (bin, zdotdir) = (dir.join("bin"), dir.join("zsh"));
         std::fs::create_dir_all(&bin)?;
         std::fs::create_dir_all(&zdotdir)?;
+        // The `claude` shim is the helper under another name (`hook::shim`).
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
             std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700))?;
-            write_exec(&bin.join("claude"), SHIM)?;
+            std::os::unix::fs::symlink(&helper, bin.join("claude"))?;
+        }
+        // Windows: hardlinks (a copy across volumes): `claude.exe` the shim, `dirigent-hook.exe` for the statusLine,
+        // which runs through a shell and finds it on the session's PATH by name (no path to quote).
+        #[cfg(windows)]
+        for name in ["claude.exe", "dirigent-hook.exe"] {
+            let to = bin.join(name);
+            std::fs::hard_link(&helper, &to).or_else(|_| std::fs::copy(&helper, &to).map(drop))?;
         }
         for (name, body) in ZSH_WRAPPERS {
             std::fs::write(zdotdir.join(name), body)?;
         }
-        let helper = std::env::current_exe()?.with_file_name("dirigent-hook");
 
         let board = Arc::new(Mutex::new(Board::default()));
         let (tx, changes) = async_channel::bounded(1);
@@ -383,33 +427,48 @@ impl Hub {
         Ok(env)
     }
 
+    #[cfg(unix)]
     fn settings_json(&self, tab: u32) -> String {
         let cmd = |mode: &str| format!("{} {} {tab} {mode}", sh_quote(&self.helper), sh_quote(&self.sock));
         let handler = serde_json::json!([{ "hooks": [{ "type": "command", "command": cmd("hook"), "async": true }] }]);
-        let events = [
-            "SessionStart",
-            "UserPromptSubmit",
-            "PreToolUse",
-            "PostToolUse",
-            "PermissionRequest",
-            "Notification",
-            "Stop",
-            "StopFailure",
-            "SessionEnd",
-        ];
-        let hooks: serde_json::Map<String, serde_json::Value> =
-            events.iter().map(|e| (e.to_string(), handler.clone())).collect();
-        serde_json::json!({
-            "hooks": hooks,
-            "statusLine": { "type": "command", "command": cmd("status") },
-        })
-        .to_string()
+        let status = serde_json::json!({ "type": "command", "command": cmd("status") });
+        hooks_json(handler, status)
+    }
+
+    /// Windows: hooks in exec form (the helper's path and arguments, no shell, nothing to quote); the statusLine has
+    /// no exec form, so it is a bare command line that works in either shell Claude Code picks (`hook::shell`).
+    #[cfg(windows)]
+    fn settings_json(&self, tab: u32) -> String {
+        let (helper, pipe) = (self.helper.to_string_lossy().replace('\\', "/"), self.sock.to_string_lossy());
+        let handler = serde_json::json!([{ "hooks": [{
+            "type": "command", "command": helper, "args": [pipe, tab.to_string(), "hook"], "async": true,
+        }] }]);
+        let line = hook::shell::status_command(&pipe, tab);
+        hooks_json(handler, serde_json::json!({ "type": "command", "command": line }))
     }
 
     pub fn remove_tab(&self, tab: u32) {
         self.board.lock().unwrap().tabs.remove(&tab);
         let _ = std::fs::remove_file(self.dir.join(format!("tab-{tab}.json")));
     }
+}
+
+/// The settings file: `handler` for every hook event we follow, `status` as the statusLine.
+fn hooks_json(handler: serde_json::Value, status: serde_json::Value) -> String {
+    let events = [
+        "SessionStart",
+        "UserPromptSubmit",
+        "PreToolUse",
+        "PostToolUse",
+        "PermissionRequest",
+        "Notification",
+        "Stop",
+        "StopFailure",
+        "SessionEnd",
+    ];
+    let hooks: serde_json::Map<String, serde_json::Value> =
+        events.iter().map(|e| (e.to_string(), handler.clone())).collect();
+    serde_json::json!({ "hooks": hooks, "statusLine": status }).to_string()
 }
 
 const PATH_SEP: char = if cfg!(windows) { ';' } else { ':' };
@@ -464,18 +523,14 @@ fn alive(pid: u32) -> bool {
 }
 
 #[cfg(unix)]
-fn write_exec(path: &Path, body: &str) -> std::io::Result<()> {
-    use std::os::unix::fs::PermissionsExt;
-    std::fs::write(path, body)?;
-    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755))
-}
-
 fn sh_quote(p: &Path) -> String {
     format!("'{}'", p.display().to_string().replace('\'', r"'\''"))
 }
 
 /// Names a file whose text the shim passes to claude as the first prompt (then the file and the variable go).
-pub const PROMPT_ENV: &str = "DIRIGENT_PROMPT_FILE";
+pub const PROMPT_ENV: &str = hook::shim::PROMPT_ENV;
+/// Windows: names a file with claude's flags (JSON), which the shim reads; typed lines carry no flags there.
+pub const ARGS_ENV: &str = hook::shim::ARGS_ENV;
 
 /// A new file for tab `tab`'s first prompt in this run's runtime dir (`start_line`, then the shim reads it).
 pub fn prompt_file(tab: usize) -> PathBuf {
@@ -483,7 +538,14 @@ pub fn prompt_file(tab: usize) -> PathBuf {
     runtime_dir().join(format!("prompt-{tab}-{nanos}.txt"))
 }
 
-/// Writes a first prompt for the shim (only you can read it). Blocking: call off the UI thread.
+/// A new file for tab `tab`'s claude flags (Windows; `start_line`, then the shim reads it).
+pub fn args_file(tab: usize) -> PathBuf {
+    let nanos = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_nanos());
+    runtime_dir().join(format!("args-{tab}-{nanos}.json"))
+}
+
+/// Writes a first prompt or the flags file for the shim (only you can read it, never over an existing file).
+/// Blocking: call off the UI thread.
 pub fn write_prompt(path: &Path, prompt: &str) -> std::io::Result<()> {
     use std::io::Write;
     let mut o = std::fs::OpenOptions::new();
@@ -493,40 +555,6 @@ pub fn write_prompt(path: &Path, prompt: &str) -> std::io::Result<()> {
     std::os::unix::fs::OpenOptionsExt::mode(&mut o, 0o600);
     o.open(path)?.write_all(prompt.as_bytes())
 }
-
-/// `claude` shim: runs the next `claude` on PATH with our settings (hooks + statusLine) layered on top. POSIX sh, so
-/// a first prompt in a file (`DIRIGENT_PROMPT_FILE`) reaches claude intact whatever your shell and aliases are.
-#[cfg(unix)]
-const SHIM: &str = r#"#!/bin/sh
-# dirigent: run the real claude with dirigent hooks + statusLine (--settings). Your settings stay untouched.
-self_dir=$(dirname "$0")
-# A first prompt from the New session dialog: the file's text is the prompt (newlines and quotes intact), then the
-# file and the variable go (claude and what it runs never see it). Run again from history, the file is gone: claude
-# starts without it.
-if [ -n "${DIRIGENT_PROMPT_FILE:-}" ]; then
-  prompt_file=$DIRIGENT_PROMPT_FILE
-  unset DIRIGENT_PROMPT_FILE
-  if [ -f "$prompt_file" ]; then
-    prompt=$(cat "$prompt_file")
-    rm -f "$prompt_file"
-    set -- "$@" -- "$prompt"
-  fi
-fi
-IFS=:
-for d in $PATH; do
-  [ -z "$d" ] || [ "$d" = "$self_dir" ] && continue
-  if [ -x "$d/claude" ] && [ ! -d "$d/claude" ]; then
-    if [ -f "$DIRIGENT_CLAUDE_SETTINGS" ]; then
-      # Remember the flags for resuming later (fire-and-forget, never reads the terminal).
-      [ -x "$DIRIGENT_HOOK" ] && "$DIRIGENT_HOOK" "$DIRIGENT_SOCKET" "$DIRIGENT_TAB_ID" argv "$@" </dev/null
-      exec "$d/claude" --settings "$DIRIGENT_CLAUDE_SETTINGS" "$@"
-    fi
-    exec "$d/claude" "$@"
-  fi
-done
-echo "dirigent: no claude found on PATH" >&2
-exit 127
-"#;
 
 /// zsh startup wrappers: each sources the user's own file, then (rc/login) puts the shim dir first in `path` and
 /// restores ZDOTDIR, so the user's config and child shells behave exactly as without dirigent.
@@ -843,8 +871,29 @@ mod tests {
         assert_eq!(b.five_hour, Some(five));
     }
 
+    #[cfg(unix)]
+    fn write_exec(path: &Path, body: &str) -> std::io::Result<()> {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::write(path, body)?;
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755))
+    }
+
+    /// The built `dirigent-hook` (`cargo test` at the workspace root builds it; the app finds it next to itself).
+    fn helper_bin() -> PathBuf {
+        let exe = std::env::current_exe().unwrap();
+        let p = exe.parent().unwrap().parent().unwrap().join(format!("dirigent-hook{}", std::env::consts::EXE_SUFFIX));
+        assert!(p.is_file(), "{} missing: run cargo test at the workspace root", p.display());
+        p
+    }
+
+    /// The shim exactly as `Hub::start` makes it.
+    #[cfg(unix)]
+    fn install_shim(dir: &Path) {
+        std::os::unix::fs::symlink(helper_bin(), dir.join("claude")).unwrap();
+    }
+
     #[test]
-    #[cfg(unix)] // POSIX shim, sh quoting, zsh: Windows gets its own with the hooks step
+    #[cfg(unix)] // sh quoting: the Windows file has its own test
     fn settings_file_shape() {
         let hub = Hub {
             board: Default::default(),
@@ -862,18 +911,18 @@ mod tests {
     }
 
     #[test]
-    #[cfg(unix)] // POSIX shim, sh quoting, zsh: Windows gets its own with the hooks step
+    #[cfg(unix)] // sh scripts as claude; Windows: crates/hook/tests/shim.rs
     fn shim_runs_real_claude_with_settings_and_skips_itself() {
         let d = std::env::temp_dir().join(format!("dirigent-shim-test-{}", std::process::id()));
         let (shim_dir, real_dir) = (d.join("shim"), d.join("real"));
         std::fs::create_dir_all(&shim_dir).unwrap();
         std::fs::create_dir_all(&real_dir).unwrap();
-        write_exec(&shim_dir.join("claude"), SHIM).unwrap();
+        install_shim(&shim_dir);
         write_exec(&real_dir.join("claude"), "#!/bin/sh\necho real \"$@\"\n").unwrap();
-        // Stand-in for dirigent-hook: records what the shim reports.
-        let reported = d.join("argv.txt");
-        let fake_hook = d.join("hook.sh");
-        write_exec(&fake_hook, &format!("#!/bin/sh\nshift 3; printf '%s|' \"$@\" > {}\n", reported.display())).unwrap();
+        // Stand-in for the app: receives what the shim reports.
+        let app_sock = d.join("app.sock");
+        let app = std::os::unix::net::UnixDatagram::bind(&app_sock).unwrap();
+        app.set_read_timeout(Some(std::time::Duration::from_secs(2))).unwrap();
         let settings = d.join("s.json");
         std::fs::write(&settings, "{}").unwrap();
         let run = |settings: &Path| {
@@ -882,28 +931,31 @@ mod tests {
                 .arg("a b")
                 .env("PATH", format!("{}:{}:/usr/bin:/bin", shim_dir.display(), real_dir.display()))
                 .env("DIRIGENT_CLAUDE_SETTINGS", settings)
-                .env("DIRIGENT_HOOK", &fake_hook)
-                .env("DIRIGENT_SOCKET", "/nowhere")
+                .env("DIRIGENT_SOCKET", &app_sock)
                 .env("DIRIGENT_TAB_ID", "3")
+                .env_remove("DIRIGENT_BIN")
                 .output()
                 .unwrap();
             String::from_utf8(out.stdout).unwrap()
         };
         assert_eq!(run(&settings), format!("real --settings {} --model a b\n", settings.display()));
-        assert_eq!(std::fs::read_to_string(&reported).unwrap(), "--model|a b|", "argv reported before exec");
+        let mut buf = [0u8; 4096];
+        let n = app.recv(&mut buf).unwrap();
+        let msg: Msg = serde_json::from_slice(&buf[..n]).unwrap();
+        assert_eq!(msg.kind, Kind::Argv { args: vec!["--model".into(), "a b".into()] }, "argv reported before exec");
         // Settings gone (app quit): plain claude, never a broken --settings.
         assert_eq!(run(&d.join("missing.json")), "real --model a b\n");
         let _ = std::fs::remove_dir_all(&d);
     }
 
     #[test]
-    #[cfg(unix)] // POSIX shim, sh quoting, zsh: Windows gets its own with the hooks step
+    #[cfg(unix)] // POSIX shells; Windows: typed_lines_reach_claude_intact_in_powershell_and_cmd
     fn shim_passes_a_prompt_file_intact_through_aliases_and_deletes_it() {
         let d = std::env::temp_dir().join(format!("dirigent-shim-prompt-test-{}", std::process::id()));
         let (shim_dir, real_dir) = (d.join("shim"), d.join("real"));
         std::fs::create_dir_all(&shim_dir).unwrap();
         std::fs::create_dir_all(&real_dir).unwrap();
-        write_exec(&shim_dir.join("claude"), SHIM).unwrap();
+        install_shim(&shim_dir);
         // Each argument in brackets (one per prompt, exactly as written), then whether the variable reached claude.
         write_exec(
             &real_dir.join("claude"),
@@ -912,7 +964,15 @@ mod tests {
         .unwrap();
         let prompt = "Branch: feat/x\n\nFix the 'login' \"bug\": $HOME `id` \\n\n  - keep it\n-starts with a dash";
         let file = d.join("prompt-1-1.txt");
-        let line = crate::projects::start_line(None, true, &["--effort".into(), "high".into()], Some(&file)).unwrap();
+        let line = crate::projects::start_line(
+            Default::default(),
+            None,
+            true,
+            &["--effort".into(), "high".into()],
+            Some(&file),
+            None,
+        )
+        .unwrap();
         // The line as a session's shell runs it, after an alias that adds flags of its own.
         let script = d.join("typed.sh");
         std::fs::write(&script, format!("alias claude='claude --model \"a b\"'\n{line}\n")).unwrap();
@@ -928,6 +988,7 @@ mod tests {
                     .arg(&script)
                     .env("PATH", format!("{}:{}:/usr/bin:/bin", shim_dir.display(), real_dir.display()))
                     .env_remove("DIRIGENT_CLAUDE_SETTINGS")
+                    .env_remove("DIRIGENT_BIN")
                     .env_remove(PROMPT_ENV)
                     .output()
                     .unwrap();
@@ -945,7 +1006,7 @@ mod tests {
     }
 
     #[test]
-    #[cfg(unix)] // POSIX shim, sh quoting, zsh: Windows gets its own with the hooks step
+    #[cfg(unix)] // zsh; Windows: shell.rs tests
     fn zsh_wrapper_reports_cwd_after_users_rc() {
         if !Path::new("/usr/bin/zsh").exists() && !Path::new("/bin/zsh").exists() {
             return;
@@ -984,6 +1045,140 @@ mod tests {
         s.write(b"cd '/tmp'\r");
         wait_for(Path::new("/tmp"));
         drop(s);
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    fn hook_fixture(name: &str) -> String {
+        std::fs::read_to_string(format!("{}/../hook/tests/fixtures/{name}.json", env!("CARGO_MANIFEST_DIR"))).unwrap()
+    }
+
+    /// The real helper → the app's listener (datagram / pipe) → the board: states and limits as the UI shows them.
+    #[test]
+    fn states_and_limits_from_the_real_helper() {
+        let d = std::env::temp_dir().join(format!("dirigent-hub-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        let (tracker, _rx) = crate::changes::Tracker::new();
+        let hub = Hub::start_in(tracker, d.clone(), helper_bin()).unwrap();
+        let send = |mode: &str, fixture: &str| {
+            use std::io::Write as _;
+            let mut child = std::process::Command::new(helper_bin())
+                .args([hub.sock.to_str().unwrap(), "7", mode])
+                .env("CLAUDE_CONFIG_DIR", d.join("no-user-settings"))
+                .stdin(std::process::Stdio::piped())
+                .stdout(std::process::Stdio::null())
+                .spawn()
+                .unwrap();
+            child.stdin.take().unwrap().write_all(hook_fixture(fixture).as_bytes()).unwrap();
+            assert!(child.wait().unwrap().success());
+        };
+        let wait_for = |what: &str, f: &dyn Fn(&Board) -> bool| {
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+            while !f(&hub.board.lock().unwrap()) {
+                assert!(std::time::Instant::now() < deadline, "timed out waiting for {what}");
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+        };
+        send("hook", "hook_UserPromptSubmit");
+        wait_for("working", &|b| b.get(7).state == State::Working);
+        send("hook", "hook_PermissionRequest");
+        wait_for("needs you", &|b| b.get(7).state == State::NeedsYou);
+        send("hook", "hook_Stop");
+        wait_for("done", &|b| b.get(7).state == State::Done);
+        send("status", "status_after_response");
+        wait_for("limits", &|b| b.five_hour.is_some_and(|l| l.used_pct.round() == 14.));
+        drop(hub);
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn settings_file_shape_windows() {
+        let hub = Hub {
+            board: Default::default(),
+            changes: async_channel::bounded(1).1,
+            dir: r"C:\T\dirigent-9".into(),
+            sock: "dirigent-hook-9".into(),
+            bin: r"C:\T\dirigent-9\bin".into(),
+            zdotdir: r"C:\T\dirigent-9\zsh".into(),
+            helper: r"C:\Program Files\Dirigent\dirigent-hook.exe".into(),
+        };
+        let v: serde_json::Value = serde_json::from_str(&hub.settings_json(4)).unwrap();
+        let stop = &v["hooks"]["Stop"][0]["hooks"][0];
+        assert_eq!(stop["command"], "C:/Program Files/Dirigent/dirigent-hook.exe", "exec form: no shell, no quoting");
+        assert_eq!(stop["args"], serde_json::json!(["dirigent-hook-9", "4", "hook"]));
+        assert_eq!(stop["async"], true);
+        assert_eq!(v["hooks"].as_object().unwrap().len(), 9);
+        let line = hook::shell::status_command("dirigent-hook-9", 4);
+        assert_eq!(v["statusLine"]["command"], line.as_str());
+    }
+
+    /// Windows: the lines a new session types, typed into real PowerShell 5.1 / 7 and cmd sessions (our shell setup,
+    /// the shim first on PATH), with the flags in the args file: claude gets flags that end in `\`, hold `"`, spaces
+    /// and `%`, and the first prompt, intact.
+    #[test]
+    #[cfg(windows)]
+    fn typed_lines_reach_claude_intact_in_powershell_and_cmd() {
+        use crate::settings::Shell;
+        let d = std::env::temp_dir().join(format!("dirigent-typed-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        let (shim, real) = (d.join("shim"), d.join("real"));
+        std::fs::create_dir_all(&shim).unwrap();
+        std::fs::create_dir_all(&real).unwrap();
+        std::fs::copy(helper_bin(), shim.join("claude.exe")).unwrap();
+        let fake = helper_bin().parent().unwrap().join("examples").join("fake_claude.exe");
+        std::fs::copy(&fake, real.join("claude.exe")).unwrap();
+        let prompt = "Fix the 'login' \"bug\": $HOME %PATH% `id`\n  - C:\\x\\ & | ^ ;\n-dash";
+        let flags: Vec<String> =
+            ["--add-dir", r"C:\it's here\", "--name", r#"say "hi" 100%"#, "--model", "a b"].map(String::from).into();
+        // A PATH where the real claude comes first: the PowerShell setup must put the shim back in front.
+        let sys = std::env::var_os("PATH").unwrap();
+        let path = std::env::join_paths([real.clone(), shim.clone()].into_iter().chain(std::env::split_paths(&sys)));
+        let mut shells = vec![Shell::Powershell, Shell::Cmd];
+        if hook::shell::find_on_path("pwsh.exe").is_some() {
+            shells.push(Shell::Pwsh);
+        }
+        for (n, shell) in shells.into_iter().enumerate() {
+            let out = d.join(format!("out-{shell:?}.txt"));
+            let (prompt_file, args_file) = (d.join(format!("prompt-{n}.txt")), d.join(format!("args-{n}.json")));
+            write_prompt(&prompt_file, prompt).unwrap();
+            write_prompt(&args_file, &serde_json::to_string(&flags).unwrap()).unwrap();
+            let mut cmd = crate::shell::command(shell);
+            cmd.env("PATH", path.as_ref().unwrap());
+            cmd.env("DIRIGENT_BIN", &shim);
+            cmd.env("FAKE_CLAUDE_OUT", &out);
+            if shell == Shell::Cmd {
+                // cmd has no profile to fix PATH: the shim must come first, as the app's PATH prepend does.
+                let first = [shim.clone(), real.clone()].into_iter().chain(std::env::split_paths(&sys));
+                cmd.env("PATH", std::env::join_paths(first).unwrap());
+            }
+            let size = session::Size { cols: 200, rows: 30, cell_width: 8, cell_height: 16 };
+            let s = session::Session::spawn_command(cmd, &d, size).unwrap();
+            let syntax = crate::shell::syntax(shell);
+            let line = crate::projects::start_line(
+                syntax,
+                Some("echo setup"),
+                true,
+                &flags,
+                Some(&prompt_file),
+                Some(&args_file),
+            )
+            .unwrap();
+            s.write(format!("{line}\r").as_bytes());
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+            while !out.is_file() {
+                assert!(std::time::Instant::now() < deadline, "{shell:?}: claude never ran for `{line}`");
+                std::thread::sleep(std::time::Duration::from_millis(50));
+            }
+            std::thread::sleep(std::time::Duration::from_millis(200));
+            let text = std::fs::read_to_string(&out).unwrap();
+            let mut lines = text.lines();
+            let got: Vec<String> = serde_json::from_str(lines.next().unwrap()).unwrap();
+            let mut want = flags.clone();
+            want.extend(["--".to_string(), prompt.to_string()]);
+            assert_eq!(got, want, "{shell:?}: `{line}`");
+            assert_eq!(lines.next(), Some("noenv"), "{shell:?}: neither variable reaches claude");
+            assert!(!prompt_file.exists() && !args_file.exists(), "{shell:?}: both files are deleted");
+        }
         let _ = std::fs::remove_dir_all(&d);
     }
 }

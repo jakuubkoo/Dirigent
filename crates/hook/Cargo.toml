@@ -14,5 +14,9 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 
 [target.'cfg(windows)'.dependencies]
-# Named pipes (`pipe.rs`); already in the graph.
-windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Security", "Win32_Storage_FileSystem", "Win32_System_Pipes", "Win32_System_IO"] }
+# Named pipes (`pipe.rs`), the shim's Ctrl-C handler and Job Object (`shim.rs`); already in the graph.
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Security", "Win32_Storage_FileSystem", "Win32_System_Pipes", "Win32_System_IO", "Win32_System_Console", "Win32_System_JobObjects", "Win32_System_Threading"] }
+
+[target.'cfg(windows)'.dev-dependencies]
+# The shim's Ctrl-C test runs it in a real ConPTY session.
+session.workspace = true

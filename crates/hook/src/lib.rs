@@ -6,6 +6,28 @@ use serde_json::Value;
 pub mod notice;
 #[cfg(windows)]
 pub mod pipe;
+pub mod shell;
+pub mod shim;
+
+/// Fire-and-forget to the app: Unix a non-blocking datagram to the socket path, Windows the pipe `socket` (busy:
+/// waited for at most 20 ms). App gone: nothing, instantly.
+#[cfg(unix)]
+pub fn send(socket: &str, bytes: &[u8]) {
+    use std::os::unix::net::UnixDatagram;
+    if let Ok(sock) = UnixDatagram::unbound()
+        && sock.set_nonblocking(true).is_ok()
+    {
+        let _ = sock.send_to(bytes, socket);
+    }
+}
+
+#[cfg(windows)]
+pub fn send(socket: &str, bytes: &[u8]) {
+    use std::io::Write as _;
+    if let Ok(mut pipe) = pipe::connect(socket, std::time::Duration::from_millis(20)) {
+        let _ = pipe.write_all(bytes);
+    }
+}
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 pub struct Msg {
@@ -203,7 +225,8 @@ pub fn resume_args(args: &[String]) -> Vec<String> {
 }
 
 /// Splits a typed flag line into words like a shell would for plain words: whitespace separates, `'…'` and `"…"`
-/// group (no expansion), `\` escapes the next char. An unterminated quote takes the rest of the line.
+/// group (no expansion), `\` escapes the next char (Windows: a plain character, it separates paths). An
+/// unterminated quote takes the rest of the line.
 pub fn split_words(line: &str) -> Vec<String> {
     let mut out = Vec::new();
     let mut word: Option<String> = None;
@@ -220,7 +243,7 @@ pub fn split_words(line: &str) -> Vec<String> {
                     w.push(q);
                 }
             }
-            '\\' => word.get_or_insert_with(String::new).extend(chars.next()),
+            '\\' if cfg!(unix) => word.get_or_insert_with(String::new).extend(chars.next()),
             c => word.get_or_insert_with(String::new).push(c),
         }
     }
@@ -234,10 +257,12 @@ mod tests {
 
     #[test]
     fn split_words_like_a_shell() {
-        assert_eq!(
-            split_words("  --model opus --add-dir '/a b' \"c\"d\\ e ''"),
-            ["--model", "opus", "--add-dir", "/a b", "cd e", ""]
-        );
+        // Windows: `\` is a plain character (it separates paths there).
+        let escaped: &[&str] = if cfg!(windows) { &["cd\\", "e"] } else { &["cd e"] };
+        let mut want = vec!["--model", "opus", "--add-dir", "/a b"];
+        want.extend(escaped);
+        want.push("");
+        assert_eq!(split_words("  --model opus --add-dir '/a b' \"c\"d\\ e ''"), want);
         assert!(split_words("   ").is_empty());
         // Typed defaults go through the resume allowlist: bypasses never survive.
         let words = split_words(

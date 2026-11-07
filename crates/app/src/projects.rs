@@ -260,24 +260,111 @@ pub fn inside_repo(repo_root: &Path, path: &Path) -> bool {
     path.starts_with(repo_root)
 }
 
-/// What a new session types: `<setup> && [DIRIGENT_PROMPT_FILE=<file>] claude <flags>` (each part optional; None:
-/// nothing). The first prompt never goes through your shell: it waits in `prompt_file` and our `claude` shim passes
-/// it on as one argument, newlines and quotes intact (`agent::SHIM`). An env var, not an argument: an alias that
-/// adds flags (`alias claude='claude --model opus'`) still expands after the assignment and can't move it. Flags
-/// are shell-quoted; the setup command is typed as you wrote it.
-pub fn start_line(setup: Option<&str>, claude: bool, args: &[String], prompt_file: Option<&Path>) -> Option<String> {
-    let claude = claude.then(|| {
-        let mut words = Vec::new();
-        if let Some(f) = prompt_file {
-            words.push(format!("{}={}", crate::agent::PROMPT_ENV, crate::workspace::sh_word(&f.to_string_lossy())));
+/// How the session's shell reads a typed line: sh/zsh/bash (Linux, Git Bash), PowerShell, or cmd.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[cfg_attr(not(windows), allow(dead_code))] // PowerShell / cmd come from `shell::syntax` (Windows)
+pub enum Syntax {
+    #[default]
+    Posix,
+    PowerShell,
+    Cmd,
+}
+
+impl Syntax {
+    /// One word, quoted for this shell when it has anything beyond plain characters.
+    pub fn word(self, s: &str) -> String {
+        let plain = |extra: &str| !s.is_empty() && s.chars().all(|c| c.is_ascii_alphanumeric() || extra.contains(c));
+        match self {
+            Syntax::Posix => crate::workspace::sh_word(s),
+            // No `,` or `@`: PowerShell reads them as an array / a splat.
+            Syntax::PowerShell if plain("-_./=:\\") => s.to_string(),
+            Syntax::PowerShell => format!("'{}'", s.replace('\'', "''")),
+            Syntax::Cmd if plain("-_./=:\\,+@") => s.to_string(),
+            Syntax::Cmd => msvc_quote(s),
         }
-        words.push("claude".to_string());
-        words.extend(args.iter().map(|a| crate::workspace::sh_word(a)));
-        words.join(" ")
+    }
+
+    /// `VAR=value` for the next command only (PowerShell / cmd: set in the shell, which the shim tolerates: it
+    /// ignores a prompt file that no longer exists).
+    fn with_env(self, var: &str, value: &str, then: &str) -> String {
+        match self {
+            Syntax::Posix => format!("{var}={} {then}", self.word(value)),
+            Syntax::PowerShell => format!("$env:{var}={}; {then}", Syntax::PowerShell.quoted(value)),
+            Syntax::Cmd => format!("set \"{var}={value}\" && {then}"),
+        }
+    }
+
+    /// PowerShell: always quoted (an assignment's value, not a command argument).
+    fn quoted(self, s: &str) -> String {
+        format!("'{}'", s.replace('\'', "''"))
+    }
+
+    /// `first`, then `then` only if it succeeded. Windows PowerShell 5.1 has no `&&`.
+    fn and_then(self, first: &str, then: &str) -> String {
+        match self {
+            Syntax::PowerShell => format!("{first}; if ($?) {{ {then} }}"),
+            _ => format!("{first} && {then}"),
+        }
+    }
+}
+
+/// One argument as a Windows program's command line parser (MSVC rules) reads it back: in `"…"`, a `"` as `\"`,
+/// and backslashes doubled only where they precede a `"` (also the closing one).
+fn msvc_quote(s: &str) -> String {
+    let mut out = String::from("\"");
+    let mut slashes = 0; // the run of `\` just written
+    for c in s.chars() {
+        if c == '"' {
+            // The run doubled, plus one to escape the quote.
+            out.extend(std::iter::repeat_n('\\', slashes + 1));
+        }
+        slashes = if c == '\\' { slashes + 1 } else { 0 };
+        out.push(c);
+    }
+    out.extend(std::iter::repeat_n('\\', slashes));
+    out.push('"');
+    out
+}
+
+/// What a new session types: `<setup> && [DIRIGENT_PROMPT_FILE=<file>] claude <flags>` (each part optional; None:
+/// nothing), in the session shell's `syntax`. The first prompt never goes through your shell: it waits in
+/// `prompt_file` and our `claude` shim passes it on as one argument, newlines and quotes intact (`hook::shim`). An
+/// env var, not an argument: an alias that adds flags (`alias claude='claude --model opus'`) still expands after the
+/// assignment and can't move it. Flags are shell-quoted; the setup command is typed as you wrote it. With
+/// `args_file` (Windows) the flags aren't typed at all: the caller writes them there and the shim reads them.
+pub fn start_line(
+    syntax: Syntax,
+    setup: Option<&str>,
+    claude: bool,
+    args: &[String],
+    prompt_file: Option<&Path>,
+    args_file: Option<&Path>,
+) -> Option<String> {
+    let claude = claude.then(|| {
+        let typed = if args_file.is_some() { &[][..] } else { args };
+        let words: Vec<String> =
+            std::iter::once("claude".to_string()).chain(typed.iter().map(|a| syntax.word(a))).collect();
+        let mut run = words.join(" ");
+        for (var, file) in [(crate::agent::PROMPT_ENV, prompt_file), (crate::agent::ARGS_ENV, args_file)] {
+            if let Some(f) = file {
+                run = syntax.with_env(var, &f.to_string_lossy(), &run);
+            }
+        }
+        run
     });
     match (setup.map(str::trim).filter(|s| !s.is_empty()), claude) {
-        (Some(s), Some(c)) => Some(format!("{s} && {c}")),
+        (Some(s), Some(c)) => Some(syntax.and_then(s, &c)),
         (s, c) => s.map(str::to_string).or(c),
+    }
+}
+
+/// A stored flag as shown in the flags fields (read back with `hook::split_words`, where `\` is a plain character on
+/// Windows).
+pub fn flag_word(s: &str) -> String {
+    if cfg!(windows) {
+        if s.is_empty() || s.contains(char::is_whitespace) { format!("\"{s}\"") } else { s.to_string() }
+    } else {
+        crate::workspace::sh_word(s)
     }
 }
 
@@ -481,18 +568,53 @@ mod tests {
     fn start_lines() {
         let args = vec!["--model".to_string(), "opus".to_string()];
         let file = Path::new("/run/user/1/dirigent-9/prompt-3-1.txt");
-        assert_eq!(start_line(None, false, &args, Some(file)), None);
-        assert_eq!(start_line(None, true, &args, None).unwrap(), "claude --model opus");
+        let sh = Syntax::Posix;
+        assert_eq!(start_line(sh, None, false, &args, Some(file), None), None);
+        assert_eq!(start_line(sh, None, true, &args, None, None).unwrap(), "claude --model opus");
         assert_eq!(
-            start_line(Some(" pnpm install "), true, &args, Some(file)).unwrap(),
+            start_line(sh, Some(" pnpm install "), true, &args, Some(file), None).unwrap(),
             "pnpm install && DIRIGENT_PROMPT_FILE=/run/user/1/dirigent-9/prompt-3-1.txt claude --model opus"
         );
         assert_eq!(
-            start_line(None, true, &[], Some(Path::new("/tmp/it's here/p.txt"))).unwrap(),
+            start_line(sh, None, true, &[], Some(Path::new("/tmp/it's here/p.txt")), None).unwrap(),
             "DIRIGENT_PROMPT_FILE='/tmp/it'\\''s here/p.txt' claude"
         );
-        assert_eq!(start_line(Some("cargo fetch"), false, &[], None).unwrap(), "cargo fetch");
-        assert_eq!(start_line(Some("  "), true, &[], None).unwrap(), "claude");
+        assert_eq!(start_line(sh, Some("cargo fetch"), false, &[], None, None).unwrap(), "cargo fetch");
+        assert_eq!(start_line(sh, Some("  "), true, &[], None, None).unwrap(), "claude");
+    }
+
+    #[test]
+    fn start_lines_for_powershell_and_cmd() {
+        let args = vec!["--model".to_string(), "opus".to_string(), "--add-dir".into(), r"C:\it's here".into()];
+        let file = Path::new(r"C:\Users\J O\AppData\Local\Temp\dirigent-9\prompt-3-1.txt");
+        assert_eq!(
+            start_line(Syntax::PowerShell, Some("pnpm install"), true, &args, Some(file), None).unwrap(),
+            r"pnpm install; if ($?) { $env:DIRIGENT_PROMPT_FILE='C:\Users\J O\AppData\Local\Temp\dirigent-9\prompt-3-1.txt'; claude --model opus --add-dir 'C:\it''s here' }"
+        );
+        assert_eq!(
+            start_line(Syntax::Cmd, Some("pnpm install"), true, &args, Some(file), None).unwrap(),
+            r#"pnpm install && set "DIRIGENT_PROMPT_FILE=C:\Users\J O\AppData\Local\Temp\dirigent-9\prompt-3-1.txt" && claude --model opus --add-dir "C:\it's here""#
+        );
+        assert_eq!(start_line(Syntax::PowerShell, None, true, &[], None, None).unwrap(), "claude");
+        assert_eq!(Syntax::PowerShell.word("--tools=Read,Edit"), "'--tools=Read,Edit'", "a comma makes an array");
+        // Windows: the flags go through a file, the line only names it (and the prompt's).
+        let flags = Path::new(r"C:\T\args-3-1.json");
+        assert_eq!(
+            start_line(Syntax::PowerShell, None, true, &args, Some(file), Some(flags)).unwrap(),
+            r"$env:DIRIGENT_ARGS_FILE='C:\T\args-3-1.json'; $env:DIRIGENT_PROMPT_FILE='C:\Users\J O\AppData\Local\Temp\dirigent-9\prompt-3-1.txt'; claude"
+        );
+        assert_eq!(
+            start_line(Syntax::Cmd, Some("x"), true, &args, None, Some(flags)).unwrap(),
+            r#"x && set "DIRIGENT_ARGS_FILE=C:\T\args-3-1.json" && claude"#
+        );
+        assert_eq!(
+            start_line(Syntax::Posix, None, true, &args, None, Some(Path::new("C:/T/a.json"))).unwrap(),
+            "DIRIGENT_ARGS_FILE=C:/T/a.json claude",
+            "Git Bash"
+        );
+        assert_eq!(Syntax::Cmd.word(r#"say "hi" & go"#), r#""say \"hi\" & go""#);
+        assert_eq!(Syntax::Cmd.word(r"C:\my dir\"), r#""C:\my dir\\""#, "a trailing \\ doesn't escape the quote");
+        assert_eq!(Syntax::Cmd.word(r#"a\"b c"#), r#""a\\\"b c""#);
     }
 
     #[test]

@@ -14,6 +14,10 @@ All notable changes to Dirigent are recorded here. The format follows
   Prompt (your profile and prompt stay as they are). `dirigent <folder>` from a terminal reuses the running window.
   Settings live in `%APPDATA%\dirigent`, sessions and the log in `%LOCALAPPDATA%\dirigent`. Claude Code hooks, git
   writes, notifications and WSL come in the next steps.
+- Windows (preview, second step): `claude` in a session (PowerShell, Windows PowerShell, Command Prompt, Git Bash)
+  shows working / needs you / done and the usage limits, like on Linux, with your own statusLine still shown. The
+  first prompt from the New session dialog, resume and the project's claude flags work in every shell; an npm
+  install of claude works too. Ctrl-C goes to claude.
 - **Edit files in the preview**: type, select with the mouse or Shift+keys, copy/cut/paste, undo/redo, auto-indent
   on Enter, Tab / Shift+Tab (also over selected lines), Ctrl+S saves. A dot next to the name marks unsaved edits;
   Esc, switching or closing the session, opening another file and closing the window ask before dropping them.
@@ -48,6 +52,8 @@ All notable changes to Dirigent are recorded here. The format follows
 
 ### Changed
 
+- The `claude` shim that adds Dirigent's hooks is now part of `dirigent-hook` instead of a shell script: claude
+  starts about 2 ms sooner, everything else behaves as before.
 - Clearer layers and more contrast: the sidebar, main area and right dock are told apart, headers and tab bars are
   set off from their content, project groups have a stronger header with a divider, and the active session has a
   bold accent bar on a stronger background, unlike a hovered one. All small text now reaches WCAG AA (4.5:1): hints,

@@ -2263,6 +2263,7 @@ version = "0.3.0"
 dependencies = [
  "serde",
  "serde_json",
+ "session",
  "windows-sys 0.61.2",
 ]
 

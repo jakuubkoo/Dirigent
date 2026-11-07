@@ -78,6 +78,8 @@ const TRUST_PROMPT: &str = "Yes, I trust this folder";
 
 struct Tab {
     id: usize,
+    /// How its shell reads typed lines (set when the shell starts).
+    syntax: crate::projects::Syntax,
     /// A name the user set (rename, setup dialog): always shown, never replaced.
     custom: Option<String>,
     /// The automatic name (Claude's title or the first prompt); `Workspace::tab_title` resolves what is shown.
@@ -1198,6 +1200,7 @@ impl Workspace {
             notified_seq: 0,
             agent_only: None,
             remember: false,
+            syntax: Default::default(),
             main_root: None,
         });
         self.tabs.len() - 1
@@ -1209,10 +1212,10 @@ impl Workspace {
             return view.clone();
         }
         let tab = &self.tabs[i];
-        let dir = if tab.dir_missing { home() } else { tab.cwd.clone() };
-        let (id, resume) = (tab.id, resume_command(tab));
+        let (id, dir) = (tab.id, if tab.dir_missing { home() } else { tab.cwd.clone() });
+        // After the spawn: the resume command is typed in the shell that started (`Tab.syntax`).
         let view = self.new_view(id, &dir, window, cx);
-        if let Some(cmd) = resume {
+        if let Some(cmd) = resume_banner(&self.tabs[i]) {
             view.update(cx, |v, cx| v.set_banner(Some(Banner::Resume(cmd)), cx));
         }
         self.tabs[i].view = Some(view.clone());
@@ -1239,12 +1242,21 @@ impl Workspace {
                 }
                 Session::spawn_command(cmd, dir, self.applied)
             };
-            spawn(self.settings.shell)
-                .or_else(|e| {
-                    eprintln!("dirigent: couldn't start {:?} ({e}), using Windows PowerShell", self.settings.shell);
-                    spawn(crate::settings::Shell::Powershell)
-                })
-                .expect("spawn shell")
+            let shell = self.settings.shell;
+            let (session, started) = match spawn(shell) {
+                Ok(s) => (s, shell),
+                Err(e) => {
+                    eprintln!("dirigent: couldn't start {shell:?} ({e}), using Windows PowerShell");
+                    (
+                        spawn(crate::settings::Shell::Powershell).expect("spawn shell"),
+                        crate::settings::Shell::Powershell,
+                    )
+                }
+            };
+            if let Some(t) = self.tabs.iter_mut().find(|t| t.id == id) {
+                t.syntax = crate::shell::syntax(started);
+            }
+            session
         };
         if self.settings.scrollback != Settings::default().scrollback {
             session.set_scrollback(self.settings.scrollback);
@@ -1427,34 +1439,16 @@ impl Workspace {
         let claude = opts.resume.is_some() || opts.claude.unwrap_or(project.auto_claude);
         let setup = project.setup_cmd.as_deref().filter(|_| opts.setup);
         let prompt = opts.prompt.filter(|p| claude && !p.trim().is_empty());
-        let prompt_file = prompt.as_ref().map(|_| agent::prompt_file(self.tabs[i].id));
-        let line = match opts.resume {
+        let prompt = prompt.map(|p| (agent::prompt_file(self.tabs[i].id), p));
+        let typed = match opts.resume {
             Some(_) => resume_command(&self.tabs[i]),
-            None => crate::projects::start_line(setup, claude, &project.claude_args, prompt_file.as_deref()),
+            None => claude_typed(&self.tabs[i], setup, claude, &project.claude_args, prompt),
         };
-        if let (Some(line), Some(v)) = (line, &self.tabs[i].view) {
+        if let (Some(typed), Some(v)) = (typed, &self.tabs[i].view) {
             // Our shim is first on the session's PATH: claude starts with our hooks. The PTY holds the line until the
             // shell has read its rc files.
             let session = v.read(cx).session.clone();
-            let line = format!("{line}\r");
-            match (prompt_file, prompt) {
-                // The prompt file first (off the UI thread), then the line that names it.
-                (Some(path), Some(prompt)) => {
-                    let session = session.clone();
-                    cx.spawn(async move |_, cx| {
-                        let p = path.clone();
-                        let written =
-                            cx.background_executor().spawn(async move { agent::write_prompt(&p, &prompt) }).await;
-                        if let Err(e) = written {
-                            // The shim then starts claude without it.
-                            eprintln!("dirigent: couldn't write the first prompt to {}: {e}", path.display());
-                        }
-                        session.write(line.as_bytes());
-                    })
-                    .detach();
-                }
-                _ => session.write(line.as_bytes()),
-            }
+            type_into(session.clone(), typed, cx);
             // A folder claude hasn't seen asks "Do you trust the files in this folder?" with "No, exit" selected:
             // Down + Enter picks "Yes, I trust this folder". Only for this start, within 30 s; a trusted folder never
             // shows it and the watch expires. Off in Settings → General.
@@ -2177,7 +2171,7 @@ impl Workspace {
     }
 
     fn resume_tabs(&mut self, tabs: Vec<usize>, cx: &mut Context<Self>) {
-        let jobs: Vec<(usize, String, String)> = tabs
+        let jobs: Vec<(usize, String, Typed)> = tabs
             .into_iter()
             .filter_map(|i| {
                 let t = &self.tabs[i];
@@ -2185,7 +2179,7 @@ impl Workspace {
             })
             .collect();
         cx.spawn(async move |this, cx| {
-            let checked: Vec<(usize, String, String, bool)> = cx
+            let checked: Vec<(usize, String, Typed, bool)> = cx
                 .background_executor()
                 .spawn(async move {
                     jobs.into_iter()
@@ -2201,7 +2195,7 @@ impl Workspace {
                     let Some(t) = w.tabs.iter_mut().find(|t| t.id == id) else { continue };
                     let Some(view) = t.view.clone() else { continue };
                     if exists {
-                        view.read(cx).session.write(format!("{cmd}\r").as_bytes());
+                        type_into(view.read(cx).session.clone(), cmd, cx);
                     } else {
                         t.claude_session = None;
                         view.update(cx, |v, cx| {
@@ -3588,13 +3582,72 @@ fn window_state(window: &Window) -> Option<WindowState> {
 
 /// What resuming a tab types (also shown in its banner): saved flags minus prompt, session-starting and
 /// permission-bypassing ones (`hook::resume_args`).
-fn resume_command(t: &Tab) -> Option<String> {
-    let mut cmd = format!("claude --resume {}", sh_word(t.claude_session.as_ref()?));
-    for a in hook::resume_args(&t.claude_args) {
-        cmd.push(' ');
-        cmd.push_str(&sh_word(&a));
+/// A line to type into a session and the files the shim reads, which must exist first (the first prompt; the flags
+/// on Windows).
+struct Typed {
+    line: String,
+    files: Vec<(PathBuf, String)>,
+}
+
+/// Writes the files (off the UI thread), then types the line. A file that can't be written is left out: the shim
+/// then starts claude without it.
+fn type_into(session: std::rc::Rc<Session>, t: Typed, cx: &mut Context<Workspace>) {
+    let line = format!("{}\r", t.line);
+    if t.files.is_empty() {
+        return session.write(line.as_bytes());
     }
-    Some(cmd)
+    cx.spawn(async move |_, cx| {
+        let files = t.files;
+        let failed = cx
+            .background_executor()
+            .spawn(async move {
+                files
+                    .iter()
+                    .filter_map(|(p, text)| agent::write_prompt(p, text).err().map(|e| (p.clone(), e)))
+                    .collect::<Vec<_>>()
+            })
+            .await;
+        for (p, e) in failed {
+            eprintln!("dirigent: couldn't write {}: {e}", p.display());
+        }
+        session.write(line.as_bytes());
+    })
+    .detach();
+}
+
+/// What tab `t` types to start claude with `args` after `setup`; `prompt` = (file, text). Windows: the flags go
+/// through a file too (Windows PowerShell 5.1 mangles native arguments ending in `\` or holding `"`), the same way
+/// in all its shells.
+fn claude_typed(
+    t: &Tab,
+    setup: Option<&str>,
+    claude: bool,
+    args: &[String],
+    prompt: Option<(PathBuf, String)>,
+) -> Option<Typed> {
+    let args_file = (cfg!(windows) && claude && !args.is_empty()).then(|| agent::args_file(t.id));
+    let prompt_file = prompt.as_ref().map(|(p, _)| p.as_path());
+    let line = crate::projects::start_line(t.syntax, setup, claude, args, prompt_file, args_file.as_deref())?;
+    let mut files: Vec<(PathBuf, String)> = prompt.into_iter().collect();
+    files.extend(args_file.map(|f| (f, serde_json::to_string(args).unwrap_or_default())));
+    Some(Typed { line, files })
+}
+
+/// `--resume <id>` and the flags worth replaying (`hook::resume_args`).
+fn resume_flags(t: &Tab) -> Option<Vec<String>> {
+    let id = t.claude_session.clone()?;
+    Some(["--resume".to_string(), id].into_iter().chain(hook::resume_args(&t.claude_args)).collect())
+}
+
+fn resume_command(t: &Tab) -> Option<Typed> {
+    claude_typed(t, None, true, &resume_flags(t)?, None)
+}
+
+/// The resume banner's command, as you would type it (Linux: exactly what Enter types).
+fn resume_banner(t: &Tab) -> Option<String> {
+    let flags = resume_flags(t)?;
+    let words = std::iter::once("claude".to_string()).chain(flags.iter().map(|a| sh_word(a)));
+    Some(words.collect::<Vec<_>>().join(" "))
 }
 
 /// Quotes one shell word for typing into zsh/sh.

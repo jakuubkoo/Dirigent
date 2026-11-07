@@ -8,10 +8,14 @@ use session::CommandBuilder;
 
 use crate::settings::Shell;
 
-/// Runs after your profile, inside your session: keeps your prompt (Starship, oh-my-posh, posh-git: it is called
-/// first, so `$?` is still the last command's) and puts an OSC 7 with the current drive path in front of it.
+/// Runs after your profile, inside your session: puts our `claude` shim first on PATH again (a profile may have
+/// rebuilt PATH, e.g. prepended the real claude's dir), keeps your prompt (Starship, oh-my-posh, posh-git: it is
+/// called first, so `$?` is still the last command's) and puts an OSC 7 with the current drive path in front of it.
 /// Passed as `-EncodedCommand`: a command, not a script file, so the execution policy doesn't apply.
 const PS_HOOK: &str = r#"
+if ($env:DIRIGENT_BIN) {
+    $env:PATH = (@($env:DIRIGENT_BIN) + @($env:PATH -split ';' | Where-Object { $_ -and $_ -ne $env:DIRIGENT_BIN })) -join ';'
+}
 $global:__dirigent_prompt = $function:prompt
 function global:prompt {
     $out = & $global:__dirigent_prompt
@@ -26,6 +30,16 @@ function global:prompt {
 
 /// cmd's prompt with the same OSC 7 (`$P` = the raw path, parsed leniently), then the default `C:\x>`.
 const CMD_PROMPT: &str = r"$E]7;file://localhost/$P$E\$P$G";
+
+/// How `shell` reads a typed line.
+pub fn syntax(shell: Shell) -> crate::projects::Syntax {
+    use crate::projects::Syntax;
+    match shell {
+        Shell::Cmd => Syntax::Cmd,
+        Shell::GitBash => Syntax::Posix,
+        Shell::Auto | Shell::Pwsh | Shell::Powershell => Syntax::PowerShell,
+    }
+}
 
 /// The program, arguments and environment for `shell`.
 pub fn command(shell: Shell) -> CommandBuilder {
@@ -54,28 +68,16 @@ pub fn command(shell: Shell) -> CommandBuilder {
     }
 }
 
-/// `C:\Program Files\Git\bin\bash.exe`, found next to the `git.exe` on PATH (`…\Git\cmd\git.exe`). Never a bare
-/// `bash.exe`: that is WSL's in System32.
+/// Git for Windows' bash (`hook::shell`, the same lookup Claude Code's statusLine rule uses); the usual install
+/// path when there is none, so the error names it.
 fn git_bash() -> PathBuf {
-    let next_to_git = find_on_path("git.exe")
-        .and_then(|git| Some(git.parent()?.parent()?.join("bin").join("bash.exe")))
-        .filter(|b| b.is_file());
-    next_to_git.unwrap_or_else(|| {
-        let programs =
-            std::env::var_os("ProgramFiles").map_or_else(|| PathBuf::from(r"C:\Program Files"), PathBuf::from);
-        programs.join(r"Git\bin\bash.exe")
-    })
-}
-
-/// The first `name` in PATH (a few stats).
-fn find_on_path(name: &str) -> Option<PathBuf> {
-    std::env::split_paths(&std::env::var_os("PATH")?).map(|d| d.join(name)).find(|p| p.is_file())
+    hook::shell::git_bash().unwrap_or_else(|| PathBuf::from(r"C:\Program Files\Git\bin\bash.exe"))
 }
 
 /// Whether PowerShell 7 is installed, looked up once per run.
 fn has_pwsh() -> bool {
     static PWSH: OnceLock<bool> = OnceLock::new();
-    *PWSH.get_or_init(|| find_on_path("pwsh.exe").is_some())
+    *PWSH.get_or_init(|| hook::shell::find_on_path("pwsh.exe").is_some())
 }
 
 /// PowerShell's `-EncodedCommand`: base64 of the UTF-16LE text.
@@ -118,7 +120,7 @@ mod tests {
         let dir = std::env::temp_dir();
         for shell in [Shell::Powershell, Shell::Pwsh] {
             let exe = if shell == Shell::Pwsh { "pwsh.exe" } else { "powershell.exe" };
-            if find_on_path(exe).is_none() {
+            if hook::shell::find_on_path(exe).is_none() {
                 eprintln!("{exe} not installed, skipped");
                 continue;
             }
