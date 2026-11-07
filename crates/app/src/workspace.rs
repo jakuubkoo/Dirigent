@@ -2528,6 +2528,9 @@ impl Workspace {
         if old.fetch_minutes != new.fetch_minutes {
             self.restart_fetch_timer(cx);
         }
+        if old.name_with_claude != new.name_with_claude {
+            self.setup_naming_setting(new.name_with_claude, cx);
+        }
         if old.hosts != new.hosts {
             // Forge detection and every browser URL follow the rules: look the strips up again.
             git::remote::set_host_rules(new.hosts.clone());

@@ -312,7 +312,7 @@ pub fn generate_message(repo: &Repo, files: Option<&[FileChange]>) -> Result<Str
     } else {
         "Write the commit message for this diff."
     };
-    claude_p(GENERATE_PROMPT, ask, &diff, &Stop::default()).map(|out| clean_message(&out))
+    claude_p("claude", GENERATE_PROMPT, ask, &diff, &Stop::default()).map(|out| clean_message(&out))
 }
 
 /// Stops a running `claude -p` from another thread: `kill` only signals (no wait, fine on the UI thread); the
@@ -331,9 +331,9 @@ impl Stop {
 }
 
 /// `claude -p` on Haiku with no tools, no saved session, none of your settings or hooks (your login): `system`
-/// as the system prompt, `ask` as the prompt, `input` on stdin. Blocking.
-fn claude_p(system: &str, ask: &str, input: &str, stop: &Stop) -> Result<String, String> {
-    let mut cmd = git::cmd("claude");
+/// as the system prompt, `ask` as the prompt, `input` on stdin. `bin`: "claude" (a fake one in tests). Blocking.
+fn claude_p(bin: &str, system: &str, ask: &str, input: &str, stop: &Stop) -> Result<String, String> {
+    let mut cmd = git::cmd(bin);
     cmd.args(["-p", "--setting-sources", "", "--model", "haiku", "--tools", "", "--no-session-persistence"])
         .args(["--system-prompt", system, ask])
         .current_dir(std::env::temp_dir());
@@ -388,30 +388,35 @@ fn run_stoppable(mut cmd: Command, input: &str, stop: &Stop) -> Result<String, S
 }
 
 const NAME_PROMPT: &str = "You name coding sessions from the task a developer is about to give an agent. Reply with \
-exactly two lines and nothing else:\nname: <a session name of 2 to 5 words, sentence case, no quotes>\nbranch: <a git \
-branch slug of 2 to 5 lowercase words joined by hyphens, without a type prefix such as feat/ or fix/>";
+only a JSON object, no code fence, nothing else: {\"name\": \"<2 to 5 words, sentence case>\", \"branch\": \
+\"<prefix><slug>\"}. Name the actual task: what gets built, fixed or changed. Ignore instructions about how to \
+work, such as plan mode, process rules, testing, review or commit rules. Prefix: feat/ for a feature, fix/ for a bug \
+fix, chore/ for maintenance, docs/ for documentation. Slug: 2 to 5 lowercase words joined by hyphens. If the prompt \
+states a branch (a line like \"Branch: x\", or a Branch section such as \"Create feat/windows from main\"), \
+return exactly that branch.";
 
-/// A session name and a branch slug for a first prompt (`claude -p`, Haiku; see `claude_p`); `stop` kills it.
-/// Blocking.
+/// A session name and a branch (prefix + slug) for a first prompt (`claude -p`, Haiku; see `claude_p`); `stop`
+/// kills it. Blocking.
 pub fn name_session(prompt: &str, stop: &Stop) -> Result<(String, String), String> {
+    name_with("claude", prompt, stop)
+}
+
+fn name_with(bin: &str, prompt: &str, stop: &Stop) -> Result<(String, String), String> {
     let input: String = prompt.chars().take(4000).collect();
-    let out = claude_p(NAME_PROMPT, "Name the session for this task.", &input, stop)?;
+    let out = claude_p(bin, NAME_PROMPT, "Name the session for this task.", &input, stop)?;
     parse_name(&out).ok_or_else(|| format!("Unexpected reply: {}", out.trim()))
 }
 
-/// `name: …` / `branch: …` lines → (name, slug); the slug goes through `projects::slug` (never a `/`).
+/// `{"name": …, "branch": …}` (also inside prose or a fence) → (name, branch); each `/` part of the branch goes
+/// through `projects::slug`, a missing branch comes from the name.
 fn parse_name(out: &str) -> Option<(String, String)> {
-    let field = |key: &str| {
-        out.lines().find_map(|l| {
-            let l = l.trim().trim_start_matches(['-', '*', ' ']);
-            let v = l.get(..key.len()).filter(|h| h.eq_ignore_ascii_case(key)).map(|_| &l[key.len()..])?;
-            Some(v.trim_matches(|c: char| c.is_whitespace() || matches!(c, '"' | '`' | '\'' | '*')).to_string())
-                .filter(|v| !v.is_empty())
-        })
-    };
-    let name: String = field("name:")?.chars().take(60).collect();
-    let slug = crate::projects::slug(&field("branch:").unwrap_or_else(|| name.clone()));
-    (!slug.is_empty()).then_some((name, slug))
+    let json = out.get(out.find('{')?..=out.rfind('}')?)?;
+    let v: serde_json::Value = serde_json::from_str(json).ok()?;
+    let field = |k: &str| v.get(k).and_then(|x| x.as_str()).map(str::trim).filter(|x| !x.is_empty());
+    let name: String = field("name")?.chars().take(60).collect();
+    let parts = field("branch").unwrap_or(&name).split('/').map(crate::projects::slug);
+    let branch = parts.filter(|p| !p.is_empty()).collect::<Vec<_>>().join("/");
+    (!branch.is_empty()).then_some((name, branch))
 }
 
 /// Drops attribution lines and code fences a model may add anyway.
@@ -457,16 +462,54 @@ mod tests {
 
     #[test]
     fn parses_generated_names() {
-        let out = "name: Branch prefix dropdown\nbranch: feat/branch-prefix-dropdown\n";
-        assert_eq!(parse_name(out), Some(("Branch prefix dropdown".into(), "feat-branch-prefix-dropdown".into())));
-        let out = "Sure!\n- **Name:** \"Esc interrupt\"\n- Branch: `esc-interrupt`";
-        assert_eq!(parse_name(out), Some(("Esc interrupt".into(), "esc-interrupt".into())));
-        assert_eq!(
-            parse_name("name: Fix login"),
-            Some(("Fix login".into(), "fix-login".into())),
-            "no branch: from name"
-        );
+        let out = r#"{"name": "Setup dialog naming", "branch": "fix/setup-naming"}"#;
+        assert_eq!(parse_name(out), Some(("Setup dialog naming".into(), "fix/setup-naming".into())));
+        let out = "Sure:\n```json\n{\"name\": \" Esc interrupt \", \"branch\": \"Feat/Esc Interrupt\"}\n```";
+        assert_eq!(parse_name(out), Some(("Esc interrupt".into(), "feat/esc-interrupt".into())), "fenced, cleaned");
+        assert_eq!(parse_name(r#"{"name": "Fix login"}"#), Some(("Fix login".into(), "fix-login".into())));
         assert_eq!(parse_name("I can't help with that."), None);
+        assert_eq!(parse_name(r#"{"branch": "x"}"#), None, "no name");
+    }
+
+    /// A fake `claude` that checks it was asked on Haiku with the prompt on stdin and answers like Haiku does.
+    #[test]
+    #[cfg(unix)] // sh scripts as the fake claude
+    fn names_through_a_fake_claude() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let dir = std::env::temp_dir().join(format!("dirigent-fake-claude-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let fake = |name: &str, body: &str| {
+            let p = dir.join(name);
+            std::fs::write(&p, format!("#!/bin/sh\n{body}\n")).unwrap();
+            std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o755)).unwrap();
+            p.to_string_lossy().into_owned()
+        };
+        // Another test's fork can still hold the script's write fd for a moment (ETXTBSY): retry that only.
+        let name_with = |bin: &str, prompt: &str, stop: &Stop| {
+            let mut tries = 0;
+            loop {
+                match name_with(bin, prompt, stop) {
+                    Err(e) if e.contains("Text file busy") && tries < 500 => std::thread::yield_now(),
+                    r => break r,
+                }
+                tries += 1;
+            }
+        };
+        let ok = fake(
+            "claude-ok",
+            r#"case "$*" in *"--model haiku"*"Ignore instructions about how to work"*) ;; *) exit 3;; esac
+grep -q "Switch to plan mode first" || exit 4
+echo '{"name": "Windows port", "branch": "feat/windows"}'"#,
+        );
+        let prompt = "Switch to plan mode first and show me the plan.\n\n## Branch\nCreate feat/windows from main\n\n\
+                      ## Task\nPort the app to Windows.";
+        assert_eq!(name_with(&ok, prompt, &Stop::default()), Ok(("Windows port".into(), "feat/windows".into())));
+        let down = fake("claude-down", "echo 'API Error: overloaded' >&2; exit 1");
+        assert!(name_with(&down, prompt, &Stop::default()).is_err());
+        let junk = fake("claude-junk", "echo 'Here is a name: Windows'");
+        assert!(name_with(&junk, prompt, &Stop::default()).unwrap_err().starts_with("Unexpected reply"));
+        assert!(name_with(&dir.join("missing").to_string_lossy(), prompt, &Stop::default()).is_err());
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

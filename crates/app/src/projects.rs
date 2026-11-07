@@ -149,29 +149,76 @@ pub fn prefix_index(saved: Option<&str>) -> usize {
     PREFIXES.iter().position(|x| *x == p).unwrap_or(PREFIXES.len() - 1)
 }
 
-/// An explicit `Branch: x` line in a prompt: x as written (first word, without quotes/backticks or a trailing
-/// `.`/`,`), split into a known prefix's index and the rest; an unknown prefix stays in the rest (prefix none).
+/// An explicit branch in a prompt, as written (without quotes/backticks/bold or a trailing `.`/`,`): a `Branch: x`
+/// line (first word), or the first line of a `## Branch` section (`Create feat/x from main`: the first word with a
+/// `/`, else the first that isn't a verb like "create"). Split by `split_branch`.
 pub fn branch_line(prompt: &str) -> Option<(usize, String)> {
-    let line = prompt.lines().find_map(|l| {
-        let l = l.trim_start().trim_start_matches(['-', '*', ' ']);
-        l.get(..7).filter(|h| h.eq_ignore_ascii_case("branch:")).map(|_| &l[7..])
+    let mut section = false;
+    let word = prompt.lines().find_map(|l| {
+        let l = l.trim().trim_start_matches(['-', '*', ' ']);
+        if let Some(h) = l.strip_prefix('#') {
+            section = is_branch_heading(h);
+            return None;
+        }
+        if l.is_empty() {
+            return None;
+        }
+        if std::mem::take(&mut section) {
+            let ws: Vec<&str> = words(l).collect();
+            const FILLER: [&str; 10] = ["create", "use", "new", "branch", "switch", "to", "on", "checkout", "a", "the"];
+            return ws
+                .iter()
+                .find(|w| w.contains('/'))
+                .or_else(|| ws.iter().find(|w| !FILLER.contains(&w.to_ascii_lowercase().as_str())))
+                .map(|w| w.to_string());
+        }
+        let rest = l.get(..7).filter(|h| h.eq_ignore_ascii_case("branch:")).map(|_| &l[7..])?;
+        words(rest).next().map(str::to_string)
     })?;
-    let word = line.split_whitespace().next()?.trim_matches(['`', '"', '\'', '.', ',', ';']);
-    if word.is_empty() {
-        return None;
-    }
-    let none = PREFIXES.len() - 1;
-    Some(match PREFIXES[..none].iter().position(|p| word.starts_with(p) && word.len() > p.len()) {
-        Some(i) => (i, word[PREFIXES[i].len()..].to_string()),
-        None => (none, word.to_string()),
-    })
+    Some(split_branch(&word))
 }
 
-/// A session name without claude: the first words of the prompt's first line that isn't `Branch: x`.
+fn is_branch_heading(h: &str) -> bool {
+    h.trim_start_matches('#').trim().trim_end_matches(':').eq_ignore_ascii_case("branch")
+}
+
+fn words(s: &str) -> impl Iterator<Item = &str> {
+    s.split_whitespace().map(|w| w.trim_matches(['`', '"', '\'', '.', ',', ';', '*'])).filter(|w| !w.is_empty())
+}
+
+/// A branch → a known prefix's index and the rest; an unknown prefix stays in the rest (prefix none).
+pub fn split_branch(word: &str) -> (usize, String) {
+    let none = PREFIXES.len() - 1;
+    match PREFIXES[..none].iter().position(|p| word.starts_with(p) && word.len() > p.len()) {
+        Some(i) => (i, word[PREFIXES[i].len()..].to_string()),
+        None => (none, word.to_string()),
+    }
+}
+
+/// A session name when claude can't make one: the first words of the prompt's first line that says what the task
+/// is (not a heading, a branch line or a `## Branch` section's line, nor one opening with plan mode).
 pub fn fallback_name(prompt: &str) -> String {
-    let line = prompt.lines().map(str::trim).find(|l| !l.is_empty() && branch_line(l).is_none()).unwrap_or("");
+    let mut section = false;
+    let line = prompt
+        .lines()
+        .map(str::trim)
+        .find(|l| {
+            if let Some(h) = l.strip_prefix('#') {
+                section = is_branch_heading(h);
+                return false;
+            }
+            !l.is_empty() && !std::mem::take(&mut section) && branch_line(l).is_none() && !opens_with_plan_mode(l)
+        })
+        .unwrap_or("");
     let words: Vec<&str> = line.split_whitespace().take(5).collect();
     words.join(" ").trim_end_matches(|c: char| !c.is_alphanumeric()).to_string()
+}
+
+/// "Switch to plan mode first…", "No plan mode needed": plan mode within the first five words (a line that only
+/// quotes it later still names the task).
+fn opens_with_plan_mode(line: &str) -> bool {
+    let w: Vec<String> = line.split_whitespace().take(5).map(|w| w.to_ascii_lowercase()).collect();
+    w.windows(2).any(|p| p[0].trim_matches('"') == "plan" && p[1].trim_matches(['"', ',', '.', ':', ';']) == "mode")
 }
 
 /// Default directory for a new worktree: `<worktrees_dir or <parent>/<repo>-worktrees>/<branch with / → ->`.
@@ -440,6 +487,23 @@ mod tests {
             "Fix the Esc/Ctrl+C interrupt in"
         );
         assert_eq!(fallback_name("Why?"), "Why");
+        // The user's real formats: a Branch line with boilerplate, a plan-mode opener with a ## Branch section.
+        let p = "Branch: fix/setup-naming from main. Small fix, no plan mode needed.\nThe setup dialog names sessions \
+                 from boilerplate: my prompts start with \"Switch to plan mode first...\"";
+        assert_eq!(
+            (branch_line(p), fallback_name(p).as_str()),
+            (Some((1, "setup-naming".into())), "The setup dialog names sessions")
+        );
+        let p = "Switch to plan mode first and show me the plan before editing anything.\n\n## Branch\n\n\
+                 Create feat/windows from main\n\n## Goal\nPort the app to Windows 11.";
+        assert_eq!(
+            (branch_line(p), fallback_name(p).as_str()),
+            (Some((0, "windows".into())), "Port the app to Windows")
+        );
+        assert_eq!(branch_line("## Branch:\nCreate `windows-port` from main"), Some((4, "windows-port".into())));
+        assert_eq!(branch_line("**Branch:** `fix/x`"), Some((1, "x".into())), "bold label");
+        assert_eq!(branch_line("## Branch\n"), None, "empty section");
+        assert_eq!(branch_line("## Branching strategy\nUse trunk"), None, "another heading");
         assert_eq!(fallback_name(""), "");
     }
 
