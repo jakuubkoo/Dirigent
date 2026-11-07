@@ -487,10 +487,13 @@ mod tests {
     #[cfg(unix)]
     fn exit_is_reported_with_code() {
         let s = Session::spawn_command(sh("exit 3"), Path::new("/"), SIZE).unwrap();
-        let pid = s.pid().unwrap();
+        // None when the shell already exited and was reaped (the reader thread took the child): nothing to check.
+        let pid = s.pid();
         wait_until("exit", || s.is_exited() && s.wakeups.is_closed());
         assert_eq!(s.exit_code(), Some(3));
-        assert!(!Path::new(&format!("/proc/{pid}")).exists(), "exited shell must be reaped, not a zombie");
+        if let Some(pid) = pid {
+            assert!(!Path::new(&format!("/proc/{pid}")).exists(), "exited shell must be reaped, not a zombie");
+        }
     }
 
     #[test]
