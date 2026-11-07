@@ -11,10 +11,14 @@ All notable changes to Dirigent are recorded here. The format follows
 - New session dialog: a branch prefix dropdown (`feat/`, `fix/`, `chore/`, `docs/`, none) next to the branch field,
   `feat/` by default and remembered per project. The slug made from the session name never takes a `/` from it
   (`esc-ctrl-c`, not `esc/ctrl-c`).
-- New session dialog: while Name is empty, the first prompt names the session and its branch: its first words as you
-  type, then `claude -p` on Haiku (off the UI thread, no tools, no saved session) when you leave the prompt or press
-  Create. One call at a time; closing the dialog stops it. A name you type stays; a `Branch: x` line in the prompt
-  gives the branch as written.
+- New session dialog: while Name is empty, `claude -p` on Haiku (off the UI thread, no tools, no saved session) names
+  the session and its branch (prefix included) from the first prompt: right after you paste it, when you leave the
+  prompt or press Create. It names the actual task and ignores instructions like plan mode or commit rules; "naming…"
+  shows meanwhile. One call at a time (a newer one stops the older); closing the dialog stops it. A name or branch you
+  type stays; a `Branch: x` line or a `## Branch` section (`Create feat/windows from main`) gives the branch as
+  written. The prompt's first words (skipping headings and plan mode lines) name it only when claude can't.
+- Settings → General → "Name new sessions with Claude" (on by default): off, the New session dialog makes no
+  `claude -p` call; a branch written in the prompt and its first words still name the session.
 
 ### Changed
 
