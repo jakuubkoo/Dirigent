@@ -854,6 +854,11 @@ impl FileView {
         Some((e.buf.rope.to_string(), e.buf.dirty(), banner))
     }
 
+    /// Harness: why the open file is read-only.
+    pub fn perf_read_only(&self) -> Option<ReadOnly> {
+        self.read_only
+    }
+
     /// Harness: the conflict banner's Overwrite.
     pub fn perf_overwrite(&mut self, cx: &mut Context<Self>) {
         self.save(true, cx);
