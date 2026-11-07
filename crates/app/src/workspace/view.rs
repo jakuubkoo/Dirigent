@@ -224,12 +224,13 @@ fn square_button(id: impl Into<gpui::ElementId>, glyph: &'static str, active: bo
 
 /// `~/Code/project/crates/app/src` → `~/Code/…/app/src` (keeps the first two and the last two components).
 pub(super) fn short_path(p: &Path) -> String {
-    let full = tilde(p);
-    let parts: Vec<&str> = full.split('/').collect();
+    let (full, sep) = (tilde(p), std::path::MAIN_SEPARATOR);
+    let parts: Vec<&str> = full.split(sep).collect();
     if parts.len() <= 5 {
         return full;
     }
-    format!("{}/{}/…/{}/{}", parts[0], parts[1], parts[parts.len() - 2], parts[parts.len() - 1])
+    let n = parts.len();
+    format!("{}{sep}{}{sep}…{sep}{}{sep}{}", parts[0], parts[1], parts[n - 2], parts[n - 1])
 }
 
 /// "<1m", "4m", "2h", "3d".
@@ -1244,10 +1245,11 @@ mod tests {
 
     #[test]
     fn short_paths() {
-        assert_eq!(short_path(Path::new("/a/b")), "/a/b");
+        let native = |s: &str| s.replace('/', std::path::MAIN_SEPARATOR_STR);
+        assert_eq!(short_path(Path::new(&native("/a/b"))), native("/a/b"));
         let home = home();
-        assert_eq!(short_path(&home.join("Code/x")), "~/Code/x");
-        assert_eq!(short_path(&home.join("Code/proj/crates/app/src")), "~/Code/…/app/src");
+        assert_eq!(short_path(&home.join(native("Code/x"))), native("~/Code/x"));
+        assert_eq!(short_path(&home.join(native("Code/proj/crates/app/src"))), native("~/Code/…/app/src"));
         assert_eq!(fmt_for(5), "<1m");
         assert_eq!(fmt_for(125), "2m");
     }
