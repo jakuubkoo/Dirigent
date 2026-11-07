@@ -511,7 +511,11 @@ impl Workspace {
             flash: None,
             _click_task: None,
             _cli_task: None,
-            projects: crate::projects::Projects(saved.projects.clone().unwrap_or_default()),
+            projects: {
+                let mut p = crate::projects::Projects(saved.projects.clone().unwrap_or_default());
+                p.fill_colors();
+                p
+            },
             seed_projects: saved.projects.is_none(),
             menu: None,
             pending_open: None,
@@ -1288,6 +1292,15 @@ impl Workspace {
             .map(|p| p.root.clone())
             .collect();
         with_pinned(group_order(&keys), &pinned)
+    }
+
+    /// A group's color: its project's pick, else (a repo never opened as a project) one from its path.
+    pub(crate) fn project_color(&self, root: &Path) -> gpui::Rgba {
+        let ix = self.projects.get(root).and_then(|p| p.color).map_or_else(
+            || root.as_os_str().as_encoded_bytes().iter().fold(5381usize, |h, &b| h.wrapping_mul(33) ^ b as usize),
+            usize::from,
+        );
+        crate::theme::project_color(ix)
     }
 
     /// A tab's sidebar group: its repo root; outside repos the known project its directory is in, else "Other".

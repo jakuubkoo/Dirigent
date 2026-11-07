@@ -428,17 +428,18 @@ impl Workspace {
                             w.open_menu(r2.clone(), projects_ui::MenuKind::New, ev.position(), cx);
                         },
                     )))
-                    .child(b("g-more", icon::MORE, "Project: pin, rename, defaults").on_click(cx.listener(
+                    .child(b("g-more", icon::MORE, "Project: pin, rename, color, defaults").on_click(cx.listener(
                         move |w, ev: &ClickEvent, _, cx| {
                             cx.stop_propagation();
                             w.open_menu(r3.clone(), projects_ui::MenuKind::Project, ev.position(), cx);
                         },
                     )))
             });
-            // Groups are separated by a hairline.
+            // Groups are separated by a hairline; the header carries the project's color.
             if gi > 0 {
                 items.push(div().h(z(1.)).mx(z(space::MD)).mt(z(space::MD)).bg(t.border.strong).into_any_element());
             }
+            let dot = key.as_ref().map(|r| div().flex_none().size(z(8.)).rounded_full().bg(self.project_color(r)));
             items.push(
                 div()
                     .id(SharedString::from(format!("group-{}", id.display())))
@@ -457,6 +458,7 @@ impl Workspace {
                     .text_size(z(text_size::MD))
                     .child(ui::icon(if collapsed { icon::CHEVRON_RIGHT } else { icon::CHEVRON_DOWN }, 12., t.text.dim))
                     .group(gname.clone())
+                    .children(dot)
                     .child(
                         // The name keeps its room (up to 60 %); "N need you" gives way first.
                         div()
@@ -676,7 +678,8 @@ impl Workspace {
                 .gap(z(space::XS))
                 // A linked worktree's branch: accent icon (its own checkout; it groups under the main project).
                 .when(matches!(tab.repo, TabRepo::Repo(_)), |d| {
-                    d.child(ui::icon(icon::BRANCH, 11., if tab.main_root.is_some() { t.accent } else { t.text.dim }))
+                    let plain = self.tab_group(i).map_or(t.text.dim, |r| self.project_color(&r));
+                    d.child(ui::icon(icon::BRANCH, 11., if tab.main_root.is_some() { t.accent } else { plain }))
                 })
                 .child(div().min_w_0().truncate().child(label))
                 .children(status.map(|(files, add, del)| {

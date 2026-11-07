@@ -18,6 +18,8 @@ All notable changes to Dirigent are recorded here. The format follows
 - Themes: Slate (the new default), Neutral, Recessed, Ember, High contrast and Paper (light), picked in Settings →
   Appearance from cards with a small preview and applied at once. Your own themes are JSON files in `themes/` next
   to settings.json; any token left out or invalid comes from Slate, with a note saying which.
+- Project colors: each project gets its own color, shown as a dot by its name and on its sessions' branch icons.
+  Change it with ⋯ → Color… on the group header.
 
 ### Changed
 

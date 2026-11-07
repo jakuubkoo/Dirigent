@@ -185,6 +185,8 @@ pub struct Theme {
     pub search_match: Rgba,
     /// The current match of the terminal's find bar (the others use `search_match`).
     pub search_current: Rgba,
+    /// Project colors (group header dot, session row branch icon), auto-assigned or picked per project.
+    pub project: [Rgba; 8],
 }
 
 /// Built-in themes: (id, JSON); the first one is the default.
@@ -358,6 +360,12 @@ fn overlay(base: &mut Value, user: &Value, path: &str, file: &str, notes: &mut V
     }
 }
 
+/// A project's color: palette index `ix` (wraps), so it follows the theme.
+pub fn project_color(ix: usize) -> Rgba {
+    let p = &get().project;
+    p[ix % p.len()]
+}
+
 /// Color of a git status letter (M/A/D/R/C/T/U/?).
 pub fn git_kind(kind: char) -> Rgba {
     let g = &get().git;
@@ -516,6 +524,7 @@ mod tests {
                 rules.push((format!("state.{name}"), c, bg.panel, 3.));
             }
             rules.extend([bg.panel, bg.selected].map(|b| ("accent".into(), t.accent, b, 3.)));
+            rules.extend(t.project.iter().enumerate().map(|(i, &c)| (format!("project[{i}]"), c, bg.panel, 3.)));
             rules.push(("border.strong".into(), t.border.strong, bg.panel, 1.3));
             // Same-luminance hues pass any ratio: colors that must read as different states also differ in hue.
             let dist = |a: Rgba, b: Rgba| ((a.r - b.r).powi(2) + (a.g - b.g).powi(2) + (a.b - b.b).powi(2)).sqrt();

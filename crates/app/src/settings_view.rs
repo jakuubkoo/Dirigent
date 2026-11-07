@@ -1236,7 +1236,7 @@ fn theme_card(
                 .flex()
                 .items_center()
                 .gap(z(space::XXS))
-                .child(div().size(z(5.)).rounded_full().bg(c.state.done))
+                .child(div().size(z(5.)).rounded_full().bg(c.project[0]))
                 .child(bar(26., c.text.primary)),
         )
         .child(

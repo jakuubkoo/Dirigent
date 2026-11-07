@@ -106,5 +106,15 @@
   },
   "danger_hover": "#c4314b",
   "search_match": "#5c4a14",
-  "search_current": "#96700f"
+  "search_current": "#96700f",
+  "project": [
+    "#73c991",
+    "#e0af68",
+    "#f7768e",
+    "#5ccfe6",
+    "#bb9af7",
+    "#ff9e64",
+    "#e9a3d4",
+    "#7aa2f7"
+  ]
 }
