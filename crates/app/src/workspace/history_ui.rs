@@ -80,9 +80,21 @@ impl Workspace {
             let (all, running) = cx
                 .background_executor()
                 .spawn(async move {
-                    let projects = home().join(".claude/projects");
-                    let all = crate::history::list(&projects, &r, &worktrees, &cache);
-                    (all, crate::history::running(&agent::runtime_dir()))
+                    // Inside WSL: the distro user's `~/.claude`, whose transcripts name Linux paths.
+                    let wsl = git::wsl::of(&r).and_then(|(d, linux)| Some((git::wsl::home(&d)?, d, linux)));
+                    let Some((home, d, linux)) = wsl else {
+                        let projects = home().join(".claude/projects");
+                        let all = crate::history::list(&projects, &r, &worktrees, &cache);
+                        return (all, crate::history::running(&agent::runtime_dir()));
+                    };
+                    let projects = git::wsl::to_windows(&d, &format!("{home}/.claude/projects"));
+                    let wt = git::wsl::to_linux(&worktrees.to_string_lossy()).map_or(worktrees, PathBuf::from);
+                    let mut all = crate::history::list(&projects, Path::new(&linux), &wt, &cache);
+                    for e in &mut all {
+                        e.cwd = git::wsl::to_windows(&d, &e.cwd.to_string_lossy());
+                        e.cwd_exists = e.cwd.is_dir();
+                    }
+                    (all, Default::default())
                 })
                 .await;
             let _ = this.update(cx, |w, cx| {

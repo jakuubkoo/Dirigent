@@ -23,6 +23,8 @@ pub(super) struct Picker {
     pub error: Option<String>,
     /// Picking a project for History (the Command Center with no session open), not a new session.
     for_history: bool,
+    /// Windows: the installed WSL distros (listed off-thread when the picker opens), offered as rows.
+    distros: Vec<String>,
 }
 
 pub(super) enum PickRow {
@@ -41,6 +43,8 @@ pub(super) enum PickRow {
         path: PathBuf,
         label: String,
     },
+    /// A WSL distro: picking it starts path mode at its root (`\\wsl.localhost\<distro>\`).
+    Distro(String),
 }
 
 /// An open dropdown: under a group header button, or a session row's context menu.
@@ -120,9 +124,22 @@ impl Workspace {
             listing: None,
             error: None,
             for_history,
+            distros: Vec::new(),
         };
         self.modal = Some(Modal::Picker(Box::new(picker)));
         self.refilter(cx);
+        #[cfg(windows)]
+        cx.spawn(async move |this, cx| {
+            let distros = cx.background_executor().spawn(async { git::wsl::distros() }).await;
+            let _ = this.update(cx, |w, cx| {
+                if let Some(Modal::Picker(p)) = &mut w.modal {
+                    p.distros = distros;
+                    w.refilter(cx);
+                    cx.notify();
+                }
+            });
+        })
+        .detach();
         window.focus(&self.focus, cx);
         cx.notify();
     }
@@ -196,6 +213,13 @@ impl Workspace {
             }
             let Some(Modal::Picker(p)) = &mut self.modal else { return };
             p.rows = scored.into_iter().map(|(_, r)| r).collect();
+            let ql = q.to_lowercase();
+            p.rows.extend(
+                p.distros
+                    .iter()
+                    .filter(|d| d.to_lowercase().contains(&ql) || "wsl".contains(&ql))
+                    .map(|d| PickRow::Distro(d.clone())),
+            );
         }
         if let Some(Modal::Picker(p)) = &self.modal {
             p.scroll.scroll_to_item(0, gpui::ScrollStrategy::Top);
@@ -235,7 +259,7 @@ impl Workspace {
     fn picker_complete(&mut self, cx: &mut Context<Self>) {
         let Some(Modal::Picker(p)) = &mut self.modal else { return };
         let q = p.edit.text.clone();
-        let base = &q[..q.rfind('/').map_or(0, |i| i + 1)];
+        let base = &q[..q.rfind(['/', '\\']).map_or(0, |i| i + 1)];
         let seg = &q[base.len()..];
         let next = match p.rows.get(p.sel) {
             Some(PickRow::Project { root, .. }) => format!("{}/", tilde(root)),
@@ -252,6 +276,7 @@ impl Workspace {
                     format!("{base}{label}/")
                 }
             }
+            Some(PickRow::Distro(d)) => wsl_root(d),
             None => return,
         };
         p.edit = LineEdit::new(next);
@@ -277,6 +302,13 @@ impl Workspace {
         let dir = match p.rows.get(ix.unwrap_or(p.sel)) {
             Some(PickRow::Project { root, .. }) => root.clone(),
             Some(PickRow::Dir { path, .. }) => path.clone(),
+            Some(PickRow::Distro(d)) => {
+                // Into the distro: its directories to pick from.
+                p.edit = LineEdit::new(wsl_root(d));
+                self.refilter(cx);
+                cx.notify();
+                return;
+            }
             None if projects::is_path_query(&p.edit.text) => {
                 let (dir, seg) = projects::split_path_query(&p.edit.text, &home(), &cwd);
                 let typed = dir.join(seg);
@@ -764,7 +796,7 @@ impl Workspace {
         .flex_1();
         let empty = if n == 0 {
             Some(div().p(z(space::LG)).text_size(z(text_size::SM)).text_color(t.text.dim).child(if path_mode {
-                if p.edit.text.ends_with('/') {
+                if p.edit.text.ends_with(['/', '\\']) {
                     "No subdirectories. Enter opens this directory."
                 } else {
                     "No match. Enter opens the typed path if it is a directory."
@@ -798,6 +830,11 @@ impl Workspace {
             }))
             .into_any_element()
     }
+}
+
+/// Path mode at a WSL distro's root.
+fn wsl_root(distro: &str) -> String {
+    format!(r"\\wsl.localhost\{distro}\")
 }
 
 fn picker_row(p: &Picker, i: usize, now: i64, cx: &mut Context<Workspace>) -> AnyElement {
@@ -885,6 +922,19 @@ fn picker_row(p: &Picker, i: usize, now: i64, cx: &mut Context<Workspace>) -> An
             )
             .into_any_element()
         }
+        PickRow::Distro(d) => row
+            .child(ui::icon(icon::TERMINAL, 14., t.text.dim))
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .truncate()
+                    .text_size(z(text_size::MD))
+                    .text_color(t.text.primary)
+                    .child(d.clone()),
+            )
+            .child(div().flex_none().text_size(z(text_size::XS)).text_color(t.text.dim).child("WSL"))
+            .into_any_element(),
         PickRow::Dir { label, path } => row
             .child(ui::icon(icon::FOLDER, 14., t.text.dim))
             .child(
