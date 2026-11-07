@@ -1,5 +1,5 @@
 //! Desktop notifications for agent states, behind a small trait (Linux: freedesktop notifications over D-Bus;
-//! Windows toasts can be another impl later).
+//! Windows: toasts through gpui, always silent there).
 //!
 //! Everything D-Bus runs off the UI thread and only after the first notification: a command thread owns the
 //! session connection (Notify / CloseNotification), a signal thread blocks on its socket for clicks. No timers,
@@ -12,14 +12,16 @@ use std::sync::Mutex;
 use crate::agent::State;
 use crate::settings::Notifications;
 
-// Windows has no notifier yet (toasts come with the notifications step).
-#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+#[cfg_attr(not(any(target_os = "linux", windows)), allow(dead_code))]
 pub struct Notice {
     pub tab: u32,
     pub title: String,
     pub body: String,
     /// Needs you (vs. done): higher urgency.
+    #[cfg_attr(windows, allow(dead_code))]
     pub urgent: bool,
+    /// Windows toasts have no sound (gpui shows them silent).
+    #[cfg_attr(windows, allow(dead_code))]
     pub sound: bool,
 }
 
@@ -31,9 +33,9 @@ pub struct Click {
 
 pub trait Notifier {
     /// Shows `n`, replacing the tab's notification still on screen (never stacks).
-    fn show(&self, n: Notice);
+    fn show(&self, n: Notice, cx: &gpui::App);
     /// Removes the tab's notification, if any (its session was opened).
-    fn close(&self, tab: u32);
+    fn close(&self, tab: u32, cx: &gpui::App);
 }
 
 /// Whether a state change of a session is worth a notification. The session in front of you (focused window,
@@ -47,11 +49,22 @@ pub fn should_notify(state: State, window_active: bool, active_tab: bool, settin
 }
 
 /// The platform notifier and the clicks it reports. `icon`: an image file for the notification.
-pub fn start(icon: PathBuf) -> (Box<dyn Notifier>, async_channel::Receiver<Click>) {
+#[cfg_attr(not(windows), allow(unused_variables))]
+pub fn start(icon: PathBuf, cx: &gpui::App) -> (Box<dyn Notifier>, async_channel::Receiver<Click>) {
     let (clicks, rx) = async_channel::unbounded();
     #[cfg(target_os = "linux")]
     let n: Box<dyn Notifier> = Box::new(freedesktop::FreeDesktop { cmds: Mutex::new(None), icon, clicks });
-    #[cfg(not(target_os = "linux"))]
+    #[cfg(windows)]
+    let n: Box<dyn Notifier> = {
+        let _ = icon; // the toast shows the app's own icon (its AppUserModelID)
+        cx.on_system_notification_response(move |r, _| {
+            if let Some(c) = click(&r) {
+                let _ = clicks.try_send(c);
+            }
+        });
+        Box::new(Toasts)
+    };
+    #[cfg(not(any(target_os = "linux", windows)))]
     let n: Box<dyn Notifier> = {
         let _ = (icon, clicks);
         Box::new(Silent)
@@ -59,13 +72,49 @@ pub fn start(icon: PathBuf) -> (Box<dyn Notifier>, async_channel::Receiver<Click
     (n, rx)
 }
 
-#[cfg(not(target_os = "linux"))]
+/// The toast tag of a tab's notification: a newer one with the same tag replaces it.
+#[cfg_attr(not(windows), allow(dead_code))]
+fn tag(tab: u32) -> String {
+    format!("tab-{tab}")
+}
+
+/// A toast response worth acting on: a click on the body of one of our tabs' toasts.
+#[cfg_attr(not(windows), allow(dead_code))]
+fn click(r: &gpui::SystemNotificationResponse) -> Option<Click> {
+    if r.action_id.is_some() {
+        return None;
+    }
+    let tab = r.tag.strip_prefix("tab-")?.parse().ok()?;
+    Some(Click { tab, token: None })
+}
+
+/// Windows toasts (gpui: WinRT `ToastNotifier` under our AppUserModelID, set in `main`).
+#[cfg(windows)]
+struct Toasts;
+
+#[cfg(windows)]
+impl Notifier for Toasts {
+    fn show(&self, n: Notice, cx: &gpui::App) {
+        cx.show_system_notification(gpui::SystemNotification {
+            tag: tag(n.tab).into(),
+            title: n.title.into(),
+            body: n.body.into(),
+            actions: Vec::new(),
+        });
+    }
+
+    fn close(&self, tab: u32, cx: &gpui::App) {
+        cx.dismiss_system_notification(&tag(tab));
+    }
+}
+
+#[cfg(not(any(target_os = "linux", windows)))]
 struct Silent;
 
-#[cfg(not(target_os = "linux"))]
+#[cfg(not(any(target_os = "linux", windows)))]
 impl Notifier for Silent {
-    fn show(&self, _: Notice) {}
-    fn close(&self, _: u32) {}
+    fn show(&self, _: Notice, _: &gpui::App) {}
+    fn close(&self, _: u32, _: &gpui::App) {}
 }
 
 /// freedesktop notifications over D-Bus (zbus).
@@ -106,7 +155,17 @@ mod freedesktop {
     }
 
     impl Notifier for FreeDesktop {
-        fn show(&self, n: Notice) {
+        fn show(&self, n: Notice, _: &gpui::App) {
+            self.show_now(n);
+        }
+
+        fn close(&self, tab: u32, _: &gpui::App) {
+            self.close_now(tab);
+        }
+    }
+
+    impl FreeDesktop {
+        pub(super) fn show_now(&self, n: Notice) {
             let mut cmds = self.cmds.lock().unwrap();
             let tx = cmds.get_or_insert_with(|| {
                 let (tx, rx) = mpsc::channel();
@@ -118,7 +177,7 @@ mod freedesktop {
             let _ = tx.send(Cmd::Show(n));
         }
 
-        fn close(&self, tab: u32) {
+        pub(super) fn close_now(&self, tab: u32) {
             if let Some(tx) = self.cmds.lock().unwrap().as_ref() {
                 let _ = tx.send(Cmd::Close(tab));
             }
@@ -338,6 +397,20 @@ mod tests {
         assert!(!should_notify(State::Done, false, false, off));
     }
 
+    /// A click on a toast's body opens its tab; its buttons (we add none) and other apps' tags don't.
+    #[test]
+    fn toast_clicks() {
+        use gpui::SystemNotificationResponse as R;
+        let r = |tag: &str, action: Option<&str>| R {
+            tag: tag.to_string().into(),
+            action_id: action.map(|a| a.to_string().into()),
+        };
+        assert_eq!(click(&r(&tag(7), None)).map(|c| (c.tab, c.token)), Some((7, None)));
+        assert!(click(&r(&tag(7), Some("open"))).is_none());
+        assert!(click(&r("thread-1", None)).is_none());
+        assert!(click(&r("tab-x", None)).is_none());
+    }
+
     /// No session bus: showing returns at once, nothing panics, later calls are no-ops.
     #[test]
     #[cfg(target_os = "linux")]
@@ -345,14 +418,16 @@ mod tests {
         // SAFETY of set_var: this test binary doesn't read the variable elsewhere concurrently that matters; the
         // notifier thread reads it once at connect.
         unsafe { std::env::set_var("DBUS_SESSION_BUS_ADDRESS", "unix:path=/nonexistent/dirigent-test") };
-        let (n, clicks) = start(PathBuf::from("/nonexistent.svg"));
+        let (tx, clicks) = async_channel::unbounded();
+        let n =
+            freedesktop::FreeDesktop { cmds: Mutex::new(None), icon: PathBuf::from("/nonexistent.svg"), clicks: tx };
         let t = std::time::Instant::now();
         for tab in 0..3 {
-            n.show(Notice { tab, title: "t".into(), body: "b".into(), urgent: true, sound: false });
-            n.close(tab);
+            n.show_now(Notice { tab, title: "t".into(), body: "b".into(), urgent: true, sound: false });
+            n.close_now(tab);
         }
         assert!(t.elapsed() < std::time::Duration::from_millis(100), "show/close never block the caller");
-        n.show(Notice { tab: 9, title: "t".into(), body: "b".into(), urgent: false, sound: false });
+        n.show_now(Notice { tab: 9, title: "t".into(), body: "b".into(), urgent: false, sound: false });
         assert!(clicks.try_recv().is_err());
     }
 }

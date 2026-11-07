@@ -153,6 +153,9 @@ fn main() {
     theme::set(theme::resolve(&loaded.parsed.settings.theme, &loaded.themes).0);
     loaded.parsed.notes.extend(theme::notes(&loaded.themes, &loaded.parsed.settings.theme));
     gpui_platform::application().with_assets(assets::Assets).run(move |cx: &mut App| {
+        // Toasts are shown under this AppUserModelID (gpui registers its display name under HKCU on the first one).
+        #[cfg(windows)]
+        cx.set_app_identity("dev.dirigent.Dirigent", "Dirigent");
         if let Err(e) = cx.text_system().add_fonts(assets::fonts()) {
             eprintln!("dirigent: bundled fonts failed to load: {e}");
         }

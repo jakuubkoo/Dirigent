@@ -460,7 +460,7 @@ impl SettingsView {
 
     fn items_of(&self, cat: Cat, q: &str) -> Vec<&'static Item> {
         let name = CATS.iter().find(|(c, _)| *c == cat).map_or("", |(_, n)| *n);
-        ITEMS.iter().filter(|i| i.cat == cat && Self::hit(q, &[i.label, i.desc, name])).collect()
+        ITEMS.iter().filter(|i| i.cat == cat && shown(i.key) && Self::hit(q, &[i.label, i.desc, name])).collect()
     }
 
     fn projects_of(&self, projects: &[Project], q: &str) -> Vec<Project> {
@@ -1359,9 +1359,20 @@ fn theme_card(
         .into_any_element()
 }
 
+/// Settings that do nothing on this OS stay out of the list: Windows toasts are always silent (gpui), so Sound.
+fn shown(k: Key) -> bool {
+    !(cfg!(windows) && k == Key::Sound)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn sound_is_hidden_where_toasts_are_silent() {
+        assert_eq!(shown(Key::Sound), !cfg!(windows));
+        assert!(ITEMS.iter().filter(|i| i.key != Key::Sound).all(|i| shown(i.key)));
+    }
 
     #[test]
     fn every_item_round_trips_and_resets() {
