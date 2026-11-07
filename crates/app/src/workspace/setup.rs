@@ -34,8 +34,12 @@ pub(super) struct Setup {
     pub name: LineEdit,
     /// Typed by hand and not empty: the first prompt no longer names the session.
     name_edited: bool,
-    /// The name and branch slug claude made from the first prompt (None: its first words).
-    generated: Option<(String, String)>,
+    /// The name, branch prefix (`PREFIXES` index) and branch claude made from the first prompt.
+    generated: Option<(String, usize, String)>,
+    /// The last naming call failed (no claude, no answer): the prompt's first words name the session.
+    name_failed: bool,
+    /// `general.name_with_claude`: off = no call, the first words name it.
+    claude_naming: bool,
     /// Bumped by every prompt change: a naming run for an older prompt is dropped.
     gen_seq: u64,
     /// The running naming call (at most one: a new one or closing the dialog kills it) and the prompt version it
@@ -68,13 +72,15 @@ pub(super) struct Setup {
 }
 
 impl Setup {
-    fn new(project: PathBuf, claude: bool, prefix_saved: usize) -> Self {
+    fn new(project: PathBuf, claude: bool, prefix_saved: usize, claude_naming: bool) -> Self {
         Setup {
             project,
             branches: None,
             name: LineEdit::new(""),
             name_edited: false,
             generated: None,
+            name_failed: false,
+            claude_naming,
             gen_seq: 0,
             naming_run: None,
             named_for: None,
@@ -139,7 +145,11 @@ impl Setup {
 
     /// The name still comes from the prompt and no naming call finished for this version of it.
     fn wants_name(&self) -> bool {
-        self.claude && !self.name_edited && !self.prompt.text.trim().is_empty() && self.named_for != Some(self.gen_seq)
+        self.claude
+            && self.claude_naming
+            && !self.name_edited
+            && !self.prompt.text.trim().is_empty()
+            && self.named_for != Some(self.gen_seq)
     }
 
     /// The branch to create: the prefix and the branch field.
@@ -147,28 +157,39 @@ impl Setup {
         format!("{}{}", PREFIXES[self.prefix], self.branch.text.trim())
     }
 
-    /// First prompt → name (until typed) → branch slug (a `Branch:` line wins) → location, each until edited.
+    /// First prompt → name (until typed: claude's; empty while claude names it; the first words only when claude
+    /// failed) → branch (an explicit one in the prompt wins, then claude's while its name is used, else from the
+    /// name) → location, each until edited.
     fn derive(&mut self, worktrees_dir: Option<&Path>) {
         // Without claude there is no first prompt.
         let prompt = if self.claude { self.prompt.text.as_str() } else { "" };
-        let generated = self.generated.clone().filter(|_| self.claude);
+        let naming = self.naming && !self.name_edited;
+        let generated =
+            self.generated.clone().filter(|_| self.claude && self.claude_naming && !self.name_edited && !naming);
         let explicit = projects::branch_line(prompt);
         if !self.name_edited {
             let name = match &generated {
-                Some((n, _)) => n.clone(),
-                None => projects::fallback_name(prompt),
+                _ if naming => String::new(),
+                Some((n, _, _)) => n.clone(),
+                None if self.name_failed || !self.claude_naming => projects::fallback_name(prompt),
+                None => String::new(),
             };
             if name != self.name.text {
                 self.name = LineEdit::new(name);
             }
         }
         if !self.prefix_picked {
-            self.prefix = explicit.as_ref().map_or(self.prefix_saved, |(i, _)| *i);
+            self.prefix = match (&explicit, &generated) {
+                (Some((i, _)), _) => *i,
+                // A bare slug from claude (no prefix at all) keeps the project's prefix.
+                (None, Some((_, i, b))) if !self.branch_edited && (*i != PREFIXES.len() - 1 || b.contains('/')) => *i,
+                _ => self.prefix_saved,
+            };
         }
         if !self.branch_edited {
             let b = match (explicit, &generated) {
                 (Some((_, b)), _) => b,
-                (None, Some((_, slug))) if !self.name_edited => slug.clone(),
+                (None, Some((_, _, b))) => b.clone(),
                 _ => projects::slug(&self.name.text),
             };
             self.branch = LineEdit::new(b);
@@ -227,7 +248,8 @@ impl Workspace {
     pub(super) fn open_setup(&mut self, project: PathBuf, window: &mut Window, cx: &mut Context<Self>) {
         self.menu = None;
         let p = self.projects.get(&project).cloned().unwrap_or_default();
-        let mut setup = Setup::new(project.clone(), p.auto_claude, projects::prefix_index(p.branch_prefix.as_deref()));
+        let prefix = projects::prefix_index(p.branch_prefix.as_deref());
+        let mut setup = Setup::new(project.clone(), p.auto_claude, prefix, self.settings.name_with_claude);
         setup.derive(p.worktrees_dir.as_deref());
         self.modal = Some(Modal::Setup(Box::new(setup)));
         cx.spawn(async move |this, cx| {
@@ -288,9 +310,9 @@ impl Workspace {
         match (key, s.focus) {
             ("escape", _) => return self.close_modal(window, cx),
             ("tab", _) => step(s, if m.shift { -1 } else { 1 }),
-            ("enter", Field::Prompt) if !ctrl => return self.setup_prompt_key(ev, cx),
+            ("enter", Field::Prompt) if !ctrl => return self.setup_prompt_key(ev, window, cx),
             ("enter", _) => return self.setup_create(window, cx),
-            (_, Field::Prompt) => return self.setup_prompt_key(ev, cx),
+            (_, Field::Prompt) => return self.setup_prompt_key(ev, window, cx),
             ("up", Field::Base) => s.base_sel = s.base_sel.saturating_sub(1),
             ("down", Field::Base) => s.base_sel = (s.base_sel + 1).min(s.bases().len().saturating_sub(1)),
             ("up", _) => step(s, -1),
@@ -356,11 +378,12 @@ impl Workspace {
     }
 
     /// A key in the multi-line First prompt (Enter: new line; Ctrl+Enter, Tab, Esc are handled before).
-    fn setup_prompt_key(&mut self, ev: &KeyDownEvent, cx: &mut Context<Self>) {
+    fn setup_prompt_key(&mut self, ev: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
         let Some(Modal::Setup(s)) = &mut self.modal else { return };
         let ks = &ev.keystroke;
         let ctrl = ks.modifiers.control || ks.modifiers.platform;
-        let result = if ctrl && ks.key == "v" {
+        let paste = ctrl && ks.key == "v";
+        let result = if paste {
             match cx.read_from_clipboard().and_then(|c| c.text()) {
                 Some(text) => {
                     s.prompt.insert(&text, false);
@@ -375,6 +398,9 @@ impl Workspace {
             Key::Changed => {
                 s.error = None;
                 self.setup_prompt_changed(cx);
+                if paste {
+                    self.setup_name(window, cx); // one paste = one call (an older one is killed)
+                }
             }
             Key::Copy(text) => {
                 cx.write_to_clipboard(gpui::ClipboardItem::new_string(text));
@@ -384,8 +410,8 @@ impl Workspace {
         }
     }
 
-    /// The first prompt changed (or Name was cleared): name and branch from its first words now; claude names it
-    /// when you leave the field or press Create (`setup_name`).
+    /// The first prompt changed (or Name was cleared); claude names it after a paste, when you leave the field or on
+    /// Create (`setup_name`).
     fn setup_prompt_changed(&mut self, cx: &mut Context<Self>) {
         let Some(Modal::Setup(s)) = &mut self.modal else { return };
         s.gen_seq += 1;
@@ -425,6 +451,7 @@ impl Workspace {
         s.naming_run = Some((stop.clone(), seq));
         s.naming = true;
         let prompt = s.prompt.text.trim().to_string();
+        self.setup_derive(); // "naming…" instead of the old name
         cx.notify();
         cx.spawn_in(window, async move |this, cx| {
             let result =
@@ -437,9 +464,16 @@ impl Workspace {
                 s.naming_run = None;
                 s.naming = false;
                 s.named_for = Some(seq);
-                // No claude or no answer: the first words stay. Typed meanwhile: dropped.
-                if let (Ok(g), true) = (result, s.gen_seq == seq && !s.name_edited) {
-                    s.generated = Some(g);
+                // No claude or no answer: the first words. Typed meanwhile: dropped.
+                match result {
+                    Ok((name, branch)) => {
+                        s.name_failed = false;
+                        if s.gen_seq == seq && !s.name_edited {
+                            let (prefix, rest) = projects::split_branch(&branch);
+                            s.generated = Some((name, prefix, rest));
+                        }
+                    }
+                    Err(_) => s.name_failed = true, // not logged: the reply may quote the prompt
                 }
                 let create = std::mem::take(&mut s.create_pending);
                 w.setup_derive();
@@ -451,6 +485,20 @@ impl Workspace {
         })
         .detach();
         true
+    }
+
+    /// `general.name_with_claude` changed while the dialog is open (a hand edit of settings.json): off stops a
+    /// running call and a waiting Create (the dialog takes keys again; Enter creates with the first words).
+    pub(super) fn setup_naming_setting(&mut self, on: bool, cx: &mut Context<Self>) {
+        let Some(Modal::Setup(s)) = &mut self.modal else { return };
+        s.claude_naming = on;
+        if !on && let Some((stop, _)) = s.naming_run.take() {
+            stop.kill();
+            s.naming = false;
+            s.create_pending = false;
+        }
+        self.setup_derive();
+        cx.notify();
     }
 
     /// A prefix picked (list, ↑↓ in the open list, ←/→): remembered for the project; `close` closes the list.
@@ -839,14 +887,22 @@ impl Workspace {
             .flex()
             .flex_col()
             .gap(z(space::XS))
-            .child(text_input(&s.name, s.focus == Field::Name, "Session name (shown in the sidebar and notifications)"))
+            .child(text_input(
+                &s.name,
+                s.focus == Field::Name,
+                if s.naming { "naming…" } else { "Session name (shown in the sidebar and notifications)" },
+            ))
             .when(from_prompt, |d| {
                 d.child(div().text_size(z(text_size::XS)).text_color(t.text.dim).child(if s.naming {
                     "From the first prompt · claude is naming it…"
+                } else if !s.claude_naming {
+                    "From the first prompt's first words (naming with Claude is off in Settings)"
+                } else if s.generated.is_none() && s.name_failed {
+                    "From the first prompt's first words (claude couldn't name it)"
                 } else if s.named_for == Some(s.gen_seq) {
                     "From the first prompt (typing here keeps your name)"
                 } else {
-                    "From the first prompt's first words; claude names it when you leave the prompt or create"
+                    "claude names it from the first prompt when you paste, leave the prompt or create"
                 }))
             });
         rows.push(row(Field::Name, "Name", name.into_any_element()).into_any_element());
@@ -973,7 +1029,7 @@ impl Workspace {
                 .child(div().flex().gap(z(space::SM)).child(prefix).child(div().flex_1().min_w_0().child(text_input(
                     &s.branch,
                     s.focus == Field::Branch,
-                    "new branch name",
+                    if s.naming && !s.branch_edited { "naming…" } else { "new branch name" },
                 ))))
                 .when(!s.branch.text.trim().is_empty(), |d| {
                     d.child(
@@ -1411,7 +1467,7 @@ mod tests {
     use super::*;
 
     fn setup() -> Setup {
-        let mut s = Setup::new(PathBuf::from("/c/app"), true, 0);
+        let mut s = Setup::new(PathBuf::from("/c/app"), true, 0, true);
         s.worktree = true;
         s
     }
@@ -1435,22 +1491,71 @@ mod tests {
     }
 
     #[test]
-    fn first_prompt_names_until_typed() {
+    fn claude_names_first_words_only_when_it_failed() {
         let mut s = setup();
-        prompt(&mut s, "Fix the Esc/Ctrl+C interrupt in the terminal");
-        assert_eq!(s.name.text, "Fix the Esc/Ctrl+C interrupt in", "no claude yet: the first words");
-        assert_eq!(s.branch.text, "fix-the-esc-ctrl-c-interrupt-in");
-        s.generated = Some(("Esc interrupt".into(), "esc-interrupt".into()));
+        let real = "Switch to plan mode first and show me the plan.\n\n## Task\nFix the Esc/Ctrl+C interrupt in the \
+                    terminal";
+        prompt(&mut s, real);
+        assert_eq!((s.name.text.as_str(), s.branch.text.as_str()), ("", ""), "claude hasn't named it yet");
+        s.naming = true;
         s.derive(None);
-        assert_eq!((s.name.text.as_str(), s.full_branch().as_str()), ("Esc interrupt", "feat/esc-interrupt"));
+        assert_eq!(s.name.text, "", "naming…: no first words meanwhile");
+        s.naming = false;
+        s.name_failed = true;
+        s.derive(None);
+        assert_eq!(s.name.text, "Fix the Esc/Ctrl+C interrupt in", "claude failed: first words, plan mode skipped");
+        assert_eq!(s.full_branch(), "feat/fix-the-esc-ctrl-c-interrupt-in");
+        s.generated = Some(("Esc interrupt".into(), 1, "esc-interrupt".into()));
+        s.derive(None);
+        assert_eq!((s.name.text.as_str(), s.full_branch().as_str()), ("Esc interrupt", "fix/esc-interrupt"));
+        s.generated = Some(("Esc interrupt".into(), PREFIXES.len() - 1, "esc-interrupt".into()));
+        s.derive(None);
+        assert_eq!(s.full_branch(), "feat/esc-interrupt", "no prefix from claude: the project's");
+        s.generated = Some(("Try".into(), PREFIXES.len() - 1, "jakub/try".into()));
+        s.derive(None);
+        assert_eq!(s.full_branch(), "jakub/try", "an unknown prefix stays as written");
+        s.generated = Some(("Esc interrupt".into(), 1, "esc-interrupt".into()));
+        s.naming = true; // a new paste: the old name gives way to the placeholder
+        s.derive(None);
+        assert_eq!((s.name.text.as_str(), s.branch.text.as_str(), PREFIXES[s.prefix]), ("", "", "feat/"));
+        s.naming = false;
         s.name = LineEdit::new("Mine");
         s.name_edited = true;
+        s.naming = true;
         prompt(&mut s, "Something else entirely");
-        assert_eq!((s.name.text.as_str(), s.branch.text.as_str()), ("Mine", "mine"), "a typed name stays");
-        s.claude = false;
+        assert_eq!((s.name.text.as_str(), s.full_branch().as_str()), ("Mine", "feat/mine"), "a typed name stays");
         s.name_edited = false;
+        s.naming = false;
+        s.branch = LineEdit::new("my-branch");
+        s.branch_edited = true;
+        s.derive(None);
+        assert_eq!(
+            (s.name.text.as_str(), s.full_branch().as_str()),
+            ("Esc interrupt", "feat/my-branch"),
+            "typed branch"
+        );
+        s.claude = false;
         s.derive(None);
         assert_eq!(s.name.text, "", "no claude: no first prompt");
+    }
+
+    #[test]
+    fn naming_with_claude_off_makes_no_call() {
+        let real = "Switch to plan mode first and show me the plan.\n\n## Branch\nCreate feat/windows from main\n\n\
+                    ## Task\nPort the app to Windows 11.";
+        for on in [true, false] {
+            let mut s = setup();
+            s.claude_naming = on;
+            prompt(&mut s, real);
+            s.gen_seq += 1; // as a prompt change does
+            assert_eq!(s.wants_name(), on, "a claude call only when on");
+            assert_eq!(s.full_branch(), "feat/windows", "the explicit branch either way (on: {on})");
+            let first_words = if on { "" } else { "Port the app to Windows" };
+            assert_eq!(s.name.text, first_words, "on: claude names it; off: first words, boilerplate skipped");
+            s.generated = Some(("Windows port".into(), 0, "windows-port".into())); // left from before it was off
+            s.derive(None);
+            assert_eq!(s.name.text, if on { "Windows port" } else { "Port the app to Windows" });
+        }
     }
 
     #[test]
@@ -1476,10 +1581,13 @@ mod tests {
         let mut s = setup();
         s.prefix_saved = 2; // chore/ remembered
         prompt(&mut s, "Branch: fix/esc-key from main.\nMake Esc work.");
-        assert_eq!((s.full_branch().as_str(), s.name.text.as_str()), ("fix/esc-key", "Make Esc work"));
-        s.generated = Some(("Esc key".into(), "esc-key-handling".into()));
+        assert_eq!(s.full_branch(), "fix/esc-key", "before claude answers");
+        s.generated = Some(("Esc key".into(), 0, "esc-key-handling".into()));
         s.derive(None);
-        assert_eq!(s.full_branch(), "fix/esc-key", "the explicit line beats claude's slug");
+        assert_eq!((s.full_branch().as_str(), s.name.text.as_str()), ("fix/esc-key", "Esc key"), "beats claude's");
+        prompt(&mut s, "Switch to plan mode first.\n\n## Branch\nCreate feat/windows from main\n\n## Task\nPort it.");
+        assert_eq!(s.full_branch(), "feat/windows", "a ## Branch section beats claude's too");
+        s.generated = None;
         prompt(&mut s, "Branch: jakub/try");
         assert_eq!(s.full_branch(), "jakub/try", "unknown prefix: as written, prefix none");
         prompt(&mut s, "No branch line");
