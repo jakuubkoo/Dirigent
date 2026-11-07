@@ -244,7 +244,7 @@ fn open_log(state_path: &std::path::Path) -> std::io::Result<std::fs::File> {
 mod win {
     use std::os::windows::io::IntoRawHandle;
     use windows_sys::Win32::System::Console::{
-        ATTACH_PARENT_PROCESS, AttachConsole, STD_ERROR_HANDLE, STD_OUTPUT_HANDLE, SetStdHandle,
+        ATTACH_PARENT_PROCESS, AttachConsole, FreeConsole, STD_ERROR_HANDLE, STD_OUTPUT_HANDLE, SetStdHandle,
     };
 
     /// Started from a console (`dirigent <dir>` in a terminal): our messages (usage, errors) go there.
@@ -253,8 +253,12 @@ mod win {
         unsafe { AttachConsole(ATTACH_PARENT_PROCESS) };
     }
 
-    /// From now on stdout/stderr go to `dirigent.log` (std looks the handles up on every write).
+    /// We are the app: leave the caller's console (closing that terminal or Ctrl+C there would end us, like the
+    /// process group Linux's `detach` leaves), and from now on stdout/stderr go to `dirigent.log` (std looks the
+    /// handles up on every write).
     pub fn log_to(state_path: &std::path::Path) {
+        // SAFETY: no arguments; a no-op without a console.
+        unsafe { FreeConsole() };
         match super::open_log(state_path) {
             Ok(f) => {
                 let h = f.into_raw_handle(); // kept open for the process's lifetime
