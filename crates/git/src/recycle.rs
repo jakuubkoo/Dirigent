@@ -5,6 +5,7 @@
 use std::ffi::c_void;
 use std::os::windows::ffi::OsStrExt as _;
 use std::path::{Component, Path, PathBuf, Prefix};
+use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 
 use windows_sys::Win32::Foundation::{E_NOINTERFACE, E_POINTER, RPC_E_CHANGED_MODE, S_OK};
@@ -34,8 +35,24 @@ pub(crate) enum NotRecycled {
     Failed(HRESULT),
 }
 
-/// Moves `path` (absolute, no `\\?\`) to the Recycle Bin. Blocking; `owner` (an HWND) owns any shell window.
+/// One recycle at a time: while the first recycles on a volume create its `$Recycle.Bin`, the shell refuses others
+/// there (3 of 8 concurrent trashes on a fresh volume on CI). Never taken on the UI thread: `trash` refuses there.
+static ONE_AT_A_TIME: Mutex<()> = Mutex::new(());
+
+/// Moves `path` (absolute, no `\\?\`) to the Recycle Bin. Blocking; `owner` (an HWND) owns any shell window. A
+/// refusal (`NoBin`, nothing touched) is retried once after 200 ms: another process may be creating the bin.
 pub(crate) fn recycle(path: &Path, owner: Option<isize>) -> Result<(), NotRecycled> {
+    let _one = ONE_AT_A_TIME.lock().unwrap_or_else(|e| e.into_inner()); // a panic in a previous recycle doesn't block
+    match recycle_once(path, owner) {
+        Err(NotRecycled::NoBin) => {
+            std::thread::sleep(std::time::Duration::from_millis(200));
+            recycle_once(path, owner)
+        }
+        done => done,
+    }
+}
+
+fn recycle_once(path: &Path, owner: Option<isize>) -> Result<(), NotRecycled> {
     let _com = Com::init()?; // declared first: dropped last, after every interface below is released
     let wide: Vec<u16> = unsubst(path).as_os_str().encode_wide().chain([0]).collect();
     let mut item = Unknown::null();
