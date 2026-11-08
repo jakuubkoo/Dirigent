@@ -126,27 +126,23 @@ pub fn trash(path: &Path) -> Result<()> {
     }
 }
 
-/// The app's main window (owner of the Recycle Bin's "delete permanently?" question) and its UI thread.
+/// The app's main window (owner of any shell window `trash` shows) and its UI thread.
 #[cfg(windows)]
 static UI_OWNER: std::sync::OnceLock<(isize, std::thread::ThreadId)> = std::sync::OnceLock::new();
 
-/// Windows: call once on the UI thread with the main window's HWND. A Recycle Bin question is then owned by that
+/// Windows: call once on the UI thread with the main window's HWND. Shell windows of `trash` are then owned by that
 /// window (on top of it, never hidden behind it), and `trash` refuses to run on that thread.
 #[cfg(windows)]
 pub fn set_ui_owner(hwnd: isize) {
     let _ = UI_OWNER.set((hwnd, std::thread::current().id()));
 }
 
-/// Moves a file or directory to the Recycle Bin; never deletes. A drive without a Recycle Bin (network share) is
-/// an error and the file stays. If Windows would still delete it outright (e.g. bigger than the bin), it asks
-/// the user first. Blocking: never on the UI thread (an error there).
+/// Moves a file or directory to the Recycle Bin; never deletes. If the shell can't recycle it (a drive without a
+/// Recycle Bin such as a network share, or too big for the bin) it's an error and the file stays. Blocking: never on
+/// the UI thread (an error there).
 #[cfg(windows)]
 pub fn trash(path: &Path) -> Result<()> {
-    use std::os::windows::ffi::OsStrExt as _;
-    use windows_sys::Win32::UI::Shell::{
-        FO_DELETE, FOF_ALLOWUNDO, FOF_NOCONFIRMATION, FOF_NOERRORUI, FOF_SILENT, FOF_WANTNUKEWARNING, SHFILEOPSTRUCTW,
-        SHFileOperationW, SHQUERYRBINFO, SHQueryRecycleBinW,
-    };
+    use crate::recycle::NotRecycled;
     let owner = UI_OWNER.get();
     if owner.is_some_and(|(_, ui)| *ui == std::thread::current().id()) {
         return Err(GitError::Failed("trash must not run on the UI thread".into()));
@@ -156,29 +152,14 @@ pub fn trash(path: &Path) -> Result<()> {
         return Err(fail("files inside WSL have no Recycle Bin. Nothing was deleted"));
     }
     let abs = crate::plain_path(std::path::absolute(path).map_err(GitError::Io)?);
-    let wide = |p: &Path| p.as_os_str().encode_wide().chain([0, 0]).collect::<Vec<u16>>();
-    let root = abs.ancestors().last().unwrap_or(&abs).to_path_buf();
-    let mut info = SHQUERYRBINFO { cbSize: std::mem::size_of::<SHQUERYRBINFO>() as u32, i64Size: 0, i64NumItems: 0 };
-    // SAFETY: a NUL-terminated path and a sized out struct.
-    if unsafe { SHQueryRecycleBinW(wide(&root).as_ptr(), &mut info) } < 0 {
-        return Err(fail("this drive has no Recycle Bin. Nothing was deleted"));
+    match crate::recycle::recycle(&abs, owner.map(|(h, _)| *h).filter(|h| *h != 0)) {
+        Ok(()) => Ok(()),
+        Err(NotRecycled::NoBin) => {
+            Err(fail("this drive has no Recycle Bin, or the item is too big for it. Nothing was deleted"))
+        }
+        Err(NotRecycled::Aborted) => Err(fail("cancelled")),
+        Err(NotRecycled::Failed(hr)) => Err(fail(&format!("error {:#010x}", hr as u32))),
     }
-    let from = wide(&abs); // double-NUL terminated list of one
-    // SAFETY: all-zero is a valid SHFILEOPSTRUCTW (null handles and pointers); the fields we need are set below.
-    let mut op: SHFILEOPSTRUCTW = unsafe { std::mem::zeroed() };
-    op.hwnd = owner.map_or(0, |(h, _)| *h) as _;
-    op.wFunc = FO_DELETE;
-    op.pFrom = from.as_ptr();
-    op.fFlags = (FOF_ALLOWUNDO | FOF_NOCONFIRMATION | FOF_SILENT | FOF_NOERRORUI | FOF_WANTNUKEWARNING) as u16;
-    // SAFETY: `op` points at `from`, alive for the call.
-    let rc = unsafe { SHFileOperationW(&mut op) };
-    if rc != 0 {
-        return Err(fail(&format!("error {rc:#x}")));
-    }
-    if op.fAnyOperationsAborted != 0 {
-        return Err(fail("cancelled"));
-    }
-    Ok(())
 }
 
 /// Back to HEAD, index and worktree. Files HEAD doesn't have (untracked, or added in the index) go to the trash.
