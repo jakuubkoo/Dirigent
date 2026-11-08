@@ -4,10 +4,11 @@
 
 use std::ffi::c_void;
 use std::os::windows::ffi::OsStrExt as _;
-use std::path::Path;
+use std::path::{Component, Path, PathBuf, Prefix};
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 
 use windows_sys::Win32::Foundation::{E_NOINTERFACE, E_POINTER, RPC_E_CHANGED_MODE, S_OK};
+use windows_sys::Win32::Storage::FileSystem::QueryDosDeviceW;
 use windows_sys::Win32::System::Com::{
     CLSCTX_ALL, COINIT_APARTMENTTHREADED, COINIT_DISABLE_OLE1DDE, CoCreateInstance, CoInitializeEx, CoUninitialize,
 };
@@ -36,7 +37,7 @@ pub(crate) enum NotRecycled {
 /// Moves `path` (absolute, no `\\?\`) to the Recycle Bin. Blocking; `owner` (an HWND) owns any shell window.
 pub(crate) fn recycle(path: &Path, owner: Option<isize>) -> Result<(), NotRecycled> {
     let _com = Com::init()?; // declared first: dropped last, after every interface below is released
-    let wide: Vec<u16> = path.as_os_str().encode_wide().chain([0]).collect();
+    let wide: Vec<u16> = unsubst(path).as_os_str().encode_wide().chain([0]).collect();
     let mut item = Unknown::null();
     // SAFETY: a NUL-terminated path; `item` receives an IShellItem.
     check(unsafe { SHCreateItemFromParsingName(wide.as_ptr(), std::ptr::null_mut(), &IID_ISHELLITEM, &mut item.0) })?;
@@ -67,6 +68,46 @@ pub(crate) fn recycle(path: &Path, owner: Option<isize>) -> Result<(), NotRecycl
         }
     }
     Ok(())
+}
+
+/// `path` on a `subst` drive as the folder that drive stands for (nested substs too, up to 8 levels): the shell
+/// recycles nothing on a subst drive, but does on the volume behind it. Any other drive (a volume, a mapped network
+/// drive) stays as it is.
+fn unsubst(path: &Path) -> PathBuf {
+    unsubst_with(path, dos_device)
+}
+
+/// `unsubst` with `dos` (a drive letter's DOS device target) pluggable, for tests.
+fn unsubst_with(path: &Path, dos: impl Fn(u8) -> Option<String>) -> PathBuf {
+    let mut p = path.to_path_buf();
+    for _ in 0..8 {
+        let mut parts = p.components();
+        let Some(Component::Prefix(prefix)) = parts.next() else { break };
+        let (Prefix::Disk(letter) | Prefix::VerbatimDisk(letter)) = prefix.kind() else { break };
+        let Some(target) = dos(letter).as_deref().and_then(subst_target) else { break };
+        let rest: PathBuf = parts.filter(|c| !matches!(c, Component::RootDir)).collect();
+        p = target.join(rest);
+    }
+    p
+}
+
+/// What drive `letter:` maps to in the DOS device namespace (`\??\C:\dir` for a subst drive).
+fn dos_device(letter: u8) -> Option<String> {
+    let name = [letter as u16, b':' as u16, 0];
+    let mut buf = [0u16; 1024];
+    // SAFETY: a NUL-terminated name and a buffer of the length passed.
+    let n = unsafe { QueryDosDeviceW(name.as_ptr(), buf.as_mut_ptr(), buf.len() as u32) } as usize;
+    let first = &buf[..n.min(buf.len())];
+    let end = first.iter().position(|&c| c == 0).unwrap_or(first.len());
+    (end > 0).then(|| String::from_utf16(&first[..end]).ok()).flatten()
+}
+
+/// The folder of a subst mapping (`\??\<drive>:` with an optional path); `None` for anything else.
+fn subst_target(dos: &str) -> Option<PathBuf> {
+    let rest = dos.strip_prefix(r"\??\")?;
+    let b = rest.as_bytes();
+    let drive = b.len() >= 2 && b[0].is_ascii_alphabetic() && b[1] == b':' && (b.len() == 2 || b[2] == b'\\');
+    drive.then(|| PathBuf::from(if b.len() == 2 { format!("{rest}\\") } else { rest.to_owned() }))
 }
 
 fn check(hr: HRESULT) -> Result<(), NotRecycled> {
@@ -292,6 +333,35 @@ mod tests {
     fn vtbl(p: Raw) -> &'static UnknownVtbl {
         // SAFETY: `p` is a live Sink.
         unsafe { &(*(p as *const Sink)).vtbl.unknown }
+    }
+
+    #[test]
+    fn subst_targets() {
+        assert_eq!(subst_target(r"\??\C:\work\dir"), Some(PathBuf::from(r"C:\work\dir")));
+        assert_eq!(subst_target(r"\??\d:"), Some(PathBuf::from(r"d:\")));
+        assert_eq!(subst_target(r"\Device\HarddiskVolume3"), None);
+        assert_eq!(subst_target(r"\Device\LanmanRedirector\;Z:0000000000012345\srv\share"), None);
+        assert_eq!(subst_target(r"\??\UNC\srv\share"), None);
+        assert_eq!(subst_target(r"\??\CD:\x"), None);
+    }
+
+    #[test]
+    fn unsubst_follows_nested_and_verbatim_drives() {
+        let dos = |l: u8| match l {
+            b'Z' => Some(r"\??\Y:\inner".to_owned()),
+            b'Y' => Some(r"\??\C:\work".to_owned()),
+            b'N' => Some(r"\Device\LanmanRedirector\;N:0000000000012345\srv\share".to_owned()),
+            b'L' => Some(r"\??\L:\".to_owned()), // a loop: stops after 8 steps
+            _ => Some(r"\Device\HarddiskVolume3".to_owned()),
+        };
+        let real = PathBuf::from(r"C:\work\inner\a\b.txt");
+        assert_eq!(unsubst_with(Path::new(r"Z:\a\b.txt"), dos), real);
+        assert_eq!(unsubst_with(Path::new(r"\\?\Z:\a\b.txt"), dos), real);
+        assert_eq!(unsubst_with(Path::new(r"Y:\"), dos), PathBuf::from(r"C:\work"));
+        for kept in [r"C:\x\y.txt", r"N:\x.txt", r"\\srv\share\x.txt", r"\\?\UNC\srv\share\x.txt"] {
+            assert_eq!(unsubst_with(Path::new(kept), dos), PathBuf::from(kept));
+        }
+        assert_eq!(unsubst_with(Path::new(r"L:\x.txt"), dos), PathBuf::from(r"L:\x.txt"));
     }
 
     #[test]

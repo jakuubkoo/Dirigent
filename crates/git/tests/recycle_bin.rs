@@ -40,8 +40,8 @@ fn letters() -> Vec<char> {
     ('A'..='Z').filter(|c| Path::new(&format!("{c}:\\")).exists()).collect()
 }
 
-fn free_letter() -> char {
-    ('M'..='Z').rev().find(|c| !Path::new(&format!("{c}:\\")).exists()).expect("a free drive letter")
+fn free_letters() -> Vec<char> {
+    ('M'..='Z').rev().filter(|c| !Path::new(&format!("{c}:\\")).exists()).collect()
 }
 
 /// Tests that attach drives run one at a time: each picks a free letter, and diskpart runs one script at a time.
@@ -153,6 +153,8 @@ fn concurrent_trashes_on_a_fresh_volume_all_recycle() {
     }
 }
 
+/// The shell recycles nothing on a subst drive: `trash` goes through to the folder behind it, also behind a subst of
+/// a subst, and the item lands in the bin of the real volume.
 #[test]
 fn subst_drive_trash_is_recycled() {
     if !enabled() {
@@ -160,15 +162,23 @@ fn subst_drive_trash_is_recycled() {
     }
     let _drives = drives();
     let target = tmp("subst");
-    let letter = free_letter();
-    let drive = format!("{letter}:");
-    assert!(Command::new("subst").arg(&drive).arg(&target).status().unwrap().success());
-    let root = PathBuf::from(format!("{drive}\\"));
-    std::fs::write(root.join("s.txt"), "x").unwrap();
-    let res = write::trash(&root.join("s.txt"));
-    let _ = Command::new("subst").arg(&drive).arg("/d").status();
-    res.unwrap();
-    assert!(!target.join("s.txt").exists());
+    std::fs::create_dir_all(target.join("inner")).unwrap();
+    let free = free_letters();
+    let (outer, nested) = (format!("{}:", free[0]), format!("{}:", free[1]));
+    let subst = |args: &[&str]| Command::new("subst").args(args).status().unwrap().success();
+    assert!(subst(&[&outer, target.to_str().unwrap()]));
+    let nested_ok = subst(&[&nested, &format!("{outer}\\inner")]);
+    std::fs::write(target.join("s.txt"), "x").unwrap();
+    std::fs::write(target.join("inner").join("n.txt"), "x").unwrap();
+    let res =
+        (write::trash(Path::new(&format!("{outer}\\s.txt"))), write::trash(Path::new(&format!("{nested}\\n.txt"))));
+    let _ = (subst(&[&nested, "/d"]), subst(&[&outer, "/d"]));
+    assert!(nested_ok, "subst of a subst drive");
+    res.0.unwrap();
+    res.1.unwrap();
+    assert!(!target.join("s.txt").exists() && !target.join("inner").join("n.txt").exists());
+    assert!(recycled(&target).contains(&"s".into()), "{:?}", recycled(&target));
+    assert!(recycled(&target.join("inner")).contains(&"n".into()), "{:?}", recycled(&target.join("inner")));
 }
 
 #[test]
