@@ -5,6 +5,8 @@ mod exec;
 mod fs;
 pub mod index;
 pub mod layout;
+#[cfg(windows)]
+mod recycle;
 pub mod remote;
 pub mod search;
 pub mod text;

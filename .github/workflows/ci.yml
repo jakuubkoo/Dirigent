@@ -62,8 +62,11 @@ jobs:
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
       - run: cargo clippy --all-targets --locked -- -D warnings
       # ConPTY sessions, PowerShell/cmd cwd reports, named pipes; window tests are #[ignore]d. All crates even when
-      # one fails: the Windows suite still finds its gaps.
+      # one fails: the Windows suite still finds its gaps. DIRIGENT_TEST_VHD: Recycle Bin tests attach a fresh VHD and a
+      # subst drive (admin, which the runner has).
       - run: cargo test --locked --no-fail-fast
+        env:
+          DIRIGENT_TEST_VHD: "1"
       # Release builds compile gpui's shaders with fxc.exe (Windows SDK): checked here, not first at a release.
       - run: cargo build --release --locked
 
