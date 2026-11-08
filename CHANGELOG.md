@@ -80,6 +80,13 @@ All notable changes to Dirigent are recorded here. The format follows
   a double click selects a word, the field scrolls to keep the cursor visible, and Ctrl+C / X / V / A, Ctrl+Z / Y
   (undo, redo) and Ctrl+←/→ (word moves) work.
 
+### Fixed
+
+- Windows: discarding new files could be refused with "this drive has no Recycle Bin" when several discards ran at
+  once, and always on a `subst` drive. Now they go to the Recycle Bin. A drive that really has none (a network share)
+  still refuses and keeps the file, and so does an item too big for the bin (before, Windows asked whether to delete
+  it permanently).
+
 ## [0.3.0] - 2026-11-06
 
 Find in the terminal, check progress in the PR/MR strip, and a round of fixes.
