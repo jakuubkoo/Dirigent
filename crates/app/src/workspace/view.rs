@@ -872,7 +872,7 @@ impl Workspace {
                 let id = f.entity_id();
                 let active = id == shown;
                 let name = f.read(cx).path.file_name().map_or(String::new(), |n| n.to_string_lossy().into_owned());
-                let glyph = ui::file_icon(&name);
+                let (glyph, glyph_color) = (ui::file_icon(&name), ui::file_color(&name));
                 let view = f.clone();
                 div()
                     .id(gpui::ElementId::NamedInteger("file-tab".into(), id.as_u64()))
@@ -884,7 +884,8 @@ impl Workspace {
                     .h_full()
                     .pl(z(space::MD))
                     .pr(z(space::SM))
-                    .border_b_2()
+                    // Like VS Code: the shown tab joins the editor below, an accent line on top.
+                    .border_t_2()
                     .when(active, |d| d.bg(t.bg.base).border_color(t.accent).text_color(t.text.primary))
                     .when(!active, |d| {
                         d.text_color(t.text.muted)
@@ -892,7 +893,7 @@ impl Workspace {
                             .cursor_pointer()
                             .hover(|s| s.bg(t.bg.hover))
                     })
-                    .child(ui::icon(glyph, 13., if active { t.text.primary } else { t.text.dim }))
+                    .child(ui::icon(glyph, 13., glyph_color))
                     .child(div().max_w(z(200.)).truncate().child(name))
                     .child(
                         div()
@@ -928,9 +929,9 @@ impl Workspace {
             .flex_none()
             .h(z(height::TAB_BAR))
             .overflow_x_scroll()
-            .bg(t.bg.elevated)
+            .bg(t.bg.panel)
             .border_b_1()
-            .border_color(t.border.strong)
+            .border_color(t.border.subtle)
             .text_size(z(text_size::SM))
             .children(tabs)
     }
