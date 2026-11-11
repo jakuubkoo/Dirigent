@@ -366,8 +366,8 @@ struct Editor {
     _wake: Task<()>,
 }
 
-/// The file preview over the terminal; text files up to `editor::MAX_BYTES` are edited right here. Esc closes it
-/// (asking first while there are unsaved edits).
+/// The file preview over the terminal, one per file tab; text files up to `editor::MAX_BYTES` are edited right
+/// here. Esc goes back to the terminal, Ctrl+W closes the tab (each asking first while there are unsaved edits).
 pub struct FileView {
     pub path: PathBuf,
     /// The repo it's in: its status entry enables "Show diff" (and re-reads a read-only file on refreshes).
@@ -467,6 +467,11 @@ impl FileView {
     /// Unsaved edits.
     pub fn dirty(&self) -> bool {
         self.editor.as_ref().is_some_and(|e| e.buf.dirty())
+    }
+
+    /// What a new view of the same file is made from: its path, repo and tree root.
+    pub fn origin(&self) -> (PathBuf, Option<PathBuf>, Option<PathBuf>) {
+        (self.path.clone(), self.repo.clone(), self.base.clone())
     }
 
     /// The user chose to discard the edits (the view is about to close).
@@ -1247,8 +1252,8 @@ impl Render for FileView {
         });
         let hint = match &self.editor {
             Some(e) if e.compare.is_some() => "Esc back to the editor",
-            Some(_) => "Ctrl+S save · Esc close",
-            None => "Esc to close",
+            Some(_) => "Ctrl+S save · Ctrl+W close tab · Esc terminal",
+            None => "Ctrl+W close tab · Esc terminal",
         };
         let header = ui::overlay_header()
             .child(ui::icon(ui::file_icon(&name), 14., icon_color))
@@ -1324,6 +1329,16 @@ impl Render for FileView {
                         if !matches!(compare, Ok(Some(()))) {
                             let _ = ws.update(cx, |w, cx| w.close_overlay(window, cx));
                         }
+                        cx.stop_propagation();
+                    } else if ks.key == "w"
+                        && ks.modifiers.control
+                        && !ks.modifiers.shift
+                        && !ks.modifiers.alt
+                        && !ks.modifiers.platform
+                    {
+                        // Its file tab (Ctrl+Shift+W stays the session's).
+                        let id = me.entity_id();
+                        let _ = ws.update(cx, |w, cx| w.close_file(id, window, cx));
                         cx.stop_propagation();
                     } else if me.update(cx, |v, cx| v.editor_key(ks, cx)).unwrap_or(false) {
                         cx.stop_propagation();
