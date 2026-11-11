@@ -1088,7 +1088,9 @@ impl SettingsView {
                 error,
                 focused,
             ))
-            .child(div().flex_none().child(control))
+            // Its own id scope: the four dock rows share segment ids ("Left", "Right"), and gpui keeps a click's
+            // pending mouse down per global id, so without it only the first row's segments took clicks.
+            .child(div().id(gpui::ElementId::Name(format!("ctl-{}", item.label).into())).flex_none().child(control))
             .child(Self::reset(gpui::ElementId::Name(format!("reset-{}", item.label).into()), val != def).on_click(
                 move |_: &ClickEvent, window, cx| {
                     if val != def {
