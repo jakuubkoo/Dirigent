@@ -110,12 +110,13 @@ impl FilesPanel {
             Some(k) => theme::git_kind(k),
             None => t.text.primary,
         };
+        // Like VS Code: the icon keeps its file type's color, the name carries the git status.
         let icon_color = if row.ignored {
             t.text.faint
-        } else if kind.is_some() {
-            color
+        } else if e.is_dir {
+            t.file.folder
         } else {
-            t.text.dim
+            ui::file_color(&e.name)
         };
         let (chevron, file_icon) = match (e.is_dir, row.expanded) {
             (true, true) => (Some(icon::CHEVRON_DOWN), icon::FOLDER_OPEN),
@@ -123,8 +124,19 @@ impl FilesPanel {
             (false, _) => (None, ui::file_icon(&e.name)),
         };
         let (path, is_dir, ws, focus) = (e.path.clone(), e.is_dir, self.workspace.clone(), self.focus.clone());
+        // Indent guides: a hairline under each ancestor's chevron.
+        let guides = (0..row.depth).map(|level| {
+            div()
+                .absolute()
+                .top_0()
+                .bottom_0()
+                .left(z(space::MD + INDENT * level as f32 + 6.))
+                .border_l_1()
+                .border_color(t.border.subtle)
+        });
         div()
             .id(("tree-row", ix))
+            .relative()
             .w_full()
             .overflow_hidden()
             .h(z(height::LIST_ROW))
@@ -138,6 +150,7 @@ impl FilesPanel {
             .when(selected, |d| d.bg(t.bg.selected_focus))
             .when(!selected && open, |d| d.bg(t.bg.selected))
             .when(!selected && !open, |d| d.hover(|s| s.bg(t.bg.hover)))
+            .children(guides)
             .on_click(move |_: &ClickEvent, window, cx| {
                 window.focus(&focus, cx);
                 let path = path.clone();
@@ -1239,7 +1252,7 @@ impl Render for FileView {
                 })
         });
         let name = self.path.file_name().map_or(String::new(), |n| n.to_string_lossy().into_owned());
-        let icon_color = self.change.as_ref().map_or(t.text.dim, |c| theme::git_kind(c.kind));
+        let icon_color = ui::file_color(&name);
         let dirty = self.dirty();
         crate::perf::event_with(|| {
             let banner = self.editor.as_ref().and_then(|e| e.banner.as_ref()).is_some();
