@@ -229,7 +229,7 @@ pub struct Theme {
 
 /// Built-in themes: (id, JSON); the first one is the default.
 const BUILTIN: [(&str, &str); 7] = [
-    ("modern", include_str!("../themes/modern.json")),
+    ("dirigent-dark", include_str!("../themes/dirigent-dark.json")),
     ("slate", include_str!("../themes/slate.json")),
     ("neutral", include_str!("../themes/neutral.json")),
     ("recessed", include_str!("../themes/recessed.json")),
