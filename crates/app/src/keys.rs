@@ -97,6 +97,7 @@ pub const EXTRA: &[(&str, &str)] = &[
     ("Enter", "Picker: open the setup dialog · exited session: restart it"),
     ("Ctrl+Enter / Shift+Enter", "Picker: open a session at once (Shift: the other claude choice)"),
     ("Tab", "Picker: complete a path"),
+    ("Ctrl+W", "File preview: close the file's tab (or middle click it)"),
     ("Ctrl+S", "Editor: save the file (asks before overwriting a change made on disk)"),
     ("Ctrl+Z / Ctrl+Y, Ctrl+Shift+Z", "Editor: undo / redo"),
     ("Tab / Shift+Tab", "Editor: indent / outdent (every selected line)"),

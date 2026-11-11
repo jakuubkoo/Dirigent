@@ -27,7 +27,13 @@ impl Render for Workspace {
 
         let main = match (&self.overlay, self.tabs.get(self.active)) {
             (Some(Overlay::Diff(v)), _) => v.clone().cached(StyleRefinement::default().size_full()).into_any_element(),
-            (Some(Overlay::File(v)), _) => v.clone().cached(StyleRefinement::default().size_full()).into_any_element(),
+            (Some(Overlay::File(v)), _) => div()
+                .size_full()
+                .flex()
+                .flex_col()
+                .child(self.file_tab_bar(v.entity_id(), cx))
+                .child(div().flex_1().min_h_0().child(v.clone().cached(StyleRefinement::default().size_full())))
+                .into_any_element(),
             (Some(Overlay::Settings(v)), _) => {
                 v.clone().cached(StyleRefinement::default().size_full()).into_any_element()
             }
@@ -856,6 +862,79 @@ impl Workspace {
 
     /// A dock's tabs: one icon per panel living there (always shown, even alone: drag it or right click it to move
     /// the panel to the other dock).
+    /// The open files above the preview: click shows one, its x or a middle click closes it (also Ctrl+W).
+    fn file_tab_bar(&self, shown: gpui::EntityId, cx: &mut Context<Self>) -> impl IntoElement + use<> {
+        let t = theme::get();
+        let tabs: Vec<_> = self
+            .file_tabs()
+            .iter()
+            .map(|f| {
+                let id = f.entity_id();
+                let active = id == shown;
+                let name = f.read(cx).path.file_name().map_or(String::new(), |n| n.to_string_lossy().into_owned());
+                let glyph = ui::file_icon(&name);
+                let view = f.clone();
+                div()
+                    .id(gpui::ElementId::NamedInteger("file-tab".into(), id.as_u64()))
+                    .group("file-tab")
+                    .flex()
+                    .flex_none()
+                    .items_center()
+                    .gap(z(space::SM))
+                    .h_full()
+                    .pl(z(space::MD))
+                    .pr(z(space::SM))
+                    .border_b_2()
+                    .when(active, |d| d.bg(t.bg.base).border_color(t.accent).text_color(t.text.primary))
+                    .when(!active, |d| {
+                        d.text_color(t.text.muted)
+                            .border_color(gpui::transparent_black())
+                            .cursor_pointer()
+                            .hover(|s| s.bg(t.bg.hover))
+                    })
+                    .child(ui::icon(glyph, 13., if active { t.text.primary } else { t.text.dim }))
+                    .child(div().max_w(z(200.)).truncate().child(name))
+                    .child(
+                        div()
+                            .id(gpui::ElementId::NamedInteger("file-tab-close".into(), id.as_u64()))
+                            .flex_none()
+                            .p(z(space::XXS))
+                            .rounded(z(radius::SM))
+                            .cursor_pointer()
+                            .hover(|s| s.bg(t.bg.selected))
+                            .when(!active, |d| d.invisible().group_hover("file-tab", |s| s.visible()))
+                            .tooltip(tip("Close  Ctrl+W"))
+                            .child(ui::icon(icon::CLOSE, 11., t.text.muted))
+                            .on_click(cx.listener(move |w, _: &ClickEvent, window, cx| {
+                                cx.stop_propagation();
+                                w.close_file(id, window, cx);
+                            })),
+                    )
+                    .on_click(
+                        cx.listener(move |w, _: &ClickEvent, window, cx| w.show_file_tab(view.clone(), window, cx)),
+                    )
+                    .on_mouse_down(
+                        MouseButton::Middle,
+                        cx.listener(move |w, _: &MouseDownEvent, window, cx| {
+                            cx.stop_propagation();
+                            w.close_file(id, window, cx);
+                        }),
+                    )
+            })
+            .collect();
+        div()
+            .id("file-tabs")
+            .flex()
+            .flex_none()
+            .h(z(height::TAB_BAR))
+            .overflow_x_scroll()
+            .bg(t.bg.elevated)
+            .border_b_1()
+            .border_color(t.border.strong)
+            .text_size(z(text_size::SM))
+            .children(tabs)
+    }
+
     fn panel_tabs(&self, d: Dock, shown: Panel, cx: &mut Context<Self>) -> impl IntoElement + use<> {
         let t = theme::get();
         let lay = self.settings.layout;

@@ -89,6 +89,9 @@ struct Tab {
     dir_missing: bool,
     /// None until the tab is first viewed (restored tabs spawn lazily).
     view: Option<Entity<TerminalView>>,
+    /// The file tabs above the preview, in order (the shown one is the overlay). Only the shown one may have
+    /// unsaved edits: leaving it asks first, like any other way out of the editor.
+    files: Vec<Entity<FileView>>,
     claude_session: Option<String>,
     claude_args: Vec<String>,
     /// The git repo `cwd` is in (resolved off-thread when the tab spawns and on every cwd change).
@@ -260,6 +263,8 @@ enum Leave {
     /// Tab ids (indices move meanwhile).
     Activate(usize),
     CloseTab(usize),
+    /// A file tab (its view's entity id).
+    CloseFile(EntityId),
     FindInTerminal(Option<String>),
     Quit,
 }
@@ -1204,6 +1209,7 @@ impl Workspace {
             cwd,
             dir_missing,
             view: None,
+            files: Vec::new(),
             claude_session,
             claude_args,
             repo: TabRepo::Unknown,
@@ -2905,10 +2911,73 @@ impl Workspace {
             _ => None,
         };
         let base = tab.and_then(Self::tree_root).filter(|r| git::path_under(&path, r));
+        // Already in a tab: show that one (its scroll position and cursor kept).
+        if let Some(view) = tab.and_then(|t| t.files.iter().find(|f| f.read(cx).path == path)).cloned() {
+            self.show_overlay(Overlay::File(view), window, cx);
+            return;
+        }
+        // Its tab is added once the preview really switches (the unsaved-edits dialog may be cancelled).
+        let view = self.new_file_view(path, repo, base, cx);
+        self.show_overlay(Overlay::File(view), window, cx);
+    }
+
+    fn new_file_view(
+        &self,
+        path: PathBuf,
+        repo: Option<PathBuf>,
+        base: Option<PathBuf>,
+        cx: &mut Context<Self>,
+    ) -> Entity<FileView> {
         let ws = cx.entity().downgrade();
         let m = self.metrics.clone();
-        let view = cx.new(|cx| FileView::new(path, repo, base, &m, ws, cx));
+        cx.new(|cx| FileView::new(path, repo, base, &m, ws, cx))
+    }
+
+    /// Puts a file view about to be shown into the active session's tabs, right after the shown one (else last).
+    fn add_file_tab(&mut self, view: &Entity<FileView>, after: Option<EntityId>) {
+        let Some(tab) = self.tabs.get_mut(self.active) else { return };
+        if tab.files.iter().any(|f| f == view) {
+            return;
+        }
+        let at =
+            after.and_then(|id| tab.files.iter().position(|f| f.entity_id() == id)).map_or(tab.files.len(), |i| i + 1);
+        tab.files.insert(at, view.clone());
+    }
+
+    /// The file tabs of the active session (the bar above the preview).
+    pub(super) fn file_tabs(&self) -> &[Entity<FileView>] {
+        self.tabs.get(self.active).map_or(&[], |t| &t.files)
+    }
+
+    /// A file tab clicked: show it.
+    pub(super) fn show_file_tab(&mut self, view: Entity<FileView>, window: &mut Window, cx: &mut Context<Self>) {
+        // Not after its x closed it (that click may reach the tab too).
+        if matches!(&self.overlay, Some(Overlay::File(f)) if *f == view) || !self.file_tabs().contains(&view) {
+            return;
+        }
         self.show_overlay(Overlay::File(view), window, cx);
+    }
+
+    /// Ctrl+W, the tab's x or a middle click: closes a file tab (asking first while it has unsaved edits). The
+    /// shown one gives way to its right neighbour (else its left one); the last one closes the preview.
+    pub fn close_file(&mut self, id: EntityId, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(i) = self.tabs.get(self.active).and_then(|t| t.files.iter().position(|f| f.entity_id() == id)) else {
+            return;
+        };
+        let shown = matches!(&self.overlay, Some(Overlay::File(f)) if f.entity_id() == id);
+        if shown && self.unsaved(Leave::CloseFile(id), window, cx) {
+            return;
+        }
+        let files = &mut self.tabs[self.active].files;
+        files.remove(i);
+        if !shown {
+            cx.notify();
+            return;
+        }
+        match files.get(i).or_else(|| i.checked_sub(1).and_then(|j| files.get(j))).cloned() {
+            Some(next) => self.show_overlay(Overlay::File(next), window, cx),
+            None => self.close_overlay(window, cx),
+        }
     }
 
     fn show_overlay(&mut self, overlay: Overlay, window: &mut Window, cx: &mut Context<Self>) {
@@ -2919,6 +2988,13 @@ impl Workspace {
             && let Some(term) = self.tabs.get(self.active).and_then(|t| t.view.as_ref())
         {
             term.read(cx).session.set_visible(false); // not on screen: wakes only for the unread flip
+        }
+        let before = match &self.overlay {
+            Some(Overlay::File(f)) => Some(f.entity_id()),
+            _ => None,
+        };
+        if let Overlay::File(f) = &overlay {
+            self.add_file_tab(f, before);
         }
         self.drop_overlay();
         let focus = match &overlay {
@@ -3001,7 +3077,11 @@ impl Workspace {
 
     /// The confirm dialog said discard: drop the editor's edits and do what was asked.
     fn leave(&mut self, leave: Leave, window: &mut Window, cx: &mut Context<Self>) {
-        if let Some(Overlay::File(f)) = &self.overlay {
+        let discarded = match &self.overlay {
+            Some(Overlay::File(f)) => Some(f.clone()),
+            _ => None,
+        };
+        if let Some(f) = &discarded {
             f.update(cx, |f, _| f.forget_edits());
         }
         match leave {
@@ -3017,8 +3097,25 @@ impl Workspace {
                     self.close_tab(i, window, cx);
                 }
             }
+            Leave::CloseFile(id) => self.close_file(id, window, cx),
             Leave::FindInTerminal(q) => self.find_in_terminal(q, window, cx),
             Leave::Quit => cx.quit(),
+        }
+        // Its buffer still holds the discarded text: a tab still open gets a fresh view, read again when shown.
+        if let Some(f) = discarded {
+            self.renew_file_tab(&f, cx);
+        }
+    }
+
+    /// Replaces a file tab's view with a new one of the same file (in whichever session has it).
+    fn renew_file_tab(&mut self, old: &Entity<FileView>, cx: &mut Context<Self>) {
+        let (path, repo, base) = old.read(cx).origin();
+        let fresh = self.new_file_view(path, repo, base, cx);
+        for t in &mut self.tabs {
+            if let Some(slot) = t.files.iter_mut().find(|f| *f == old) {
+                *slot = fresh;
+                return;
+            }
         }
     }
 
