@@ -31,6 +31,9 @@ All notable changes to Dirigent are recorded here. The format follows
   credentials); it refreshes after the agent's steps and at every prompt, or on a click, since Windows can't watch
   files inside WSL. One long-running helper per distro runs those git commands, so a refresh doesn't start WSL for
   each one. A `cd /mnt/c/…` there is the same folder as `C:\…`, with Windows git.
+- **File tabs**: every file opened in the preview gets a tab above it (per session); click one to switch, keeping
+  its scroll position and cursor. Ctrl+W, the tab's x or a middle click closes it, and asks first while it has
+  unsaved edits. Esc still goes back to the terminal, and the tabs are there again with the next file.
 - **Edit files in the preview**: type, select with the mouse or Shift+keys, copy/cut/paste, undo/redo, auto-indent
   on Enter, Tab / Shift+Tab (also over selected lines), Ctrl+S saves. A dot next to the name marks unsaved edits;
   Esc, switching or closing the session, opening another file and closing the window ask before dropping them.
