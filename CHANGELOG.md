@@ -86,6 +86,7 @@ All notable changes to Dirigent are recorded here. The format follows
   once, and always on a `subst` drive. Now they go to the Recycle Bin. A drive that really has none (a network share)
   still refuses and keeps the file, and so does an item too big for the bin (before, Windows asked whether to delete
   it permanently).
+- Settings → Layout: Left / Right for Files, Changes and Search did nothing; only Sessions changed its dock.
 
 ## [0.3.0] - 2026-11-06
 
