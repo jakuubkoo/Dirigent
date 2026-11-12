@@ -163,6 +163,43 @@ impl Syntax {
     }
 }
 
+/// File icon colors by file type (Files tree, preview header, file tabs); `ui::file_kind` picks one.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct FileColors {
+    pub folder: Rgba,
+    pub rust: Rgba,
+    pub javascript: Rgba,
+    pub typescript: Rgba,
+    pub python: Rgba,
+    pub go: Rgba,
+    /// C, C++, C#.
+    pub c: Rgba,
+    /// Java, Kotlin, Scala, Swift, Ruby.
+    pub java: Rgba,
+    /// HTML, Vue, Svelte, templates.
+    pub web: Rgba,
+    /// CSS, SCSS, Less.
+    pub style: Rgba,
+    pub php: Rgba,
+    pub json: Rgba,
+    pub markdown: Rgba,
+    /// TOML, YAML, INI, .env, XML, Makefile.
+    pub config: Rgba,
+    pub shell: Rgba,
+    pub image: Rgba,
+    pub archive: Rgba,
+    pub lock: Rgba,
+    pub docker: Rgba,
+    /// .gitignore, .gitattributes, …
+    pub git: Rgba,
+    /// Other source code (Lua, Zig, SQL, …).
+    pub code: Rgba,
+    /// Plain text and logs.
+    pub text: Rgba,
+    pub other: Rgba,
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Theme {
@@ -179,6 +216,7 @@ pub struct Theme {
     pub meter: Meter,
     pub terminal: Terminal,
     pub syntax: Syntax,
+    pub file: FileColors,
     /// The window close button's hover background.
     pub danger_hover: Rgba,
     /// A search match (Search panel results, the matched text in the preview).
@@ -190,7 +228,8 @@ pub struct Theme {
 }
 
 /// Built-in themes: (id, JSON); the first one is the default.
-const BUILTIN: [(&str, &str); 6] = [
+const BUILTIN: [(&str, &str); 7] = [
+    ("dirigent-dark", include_str!("../themes/dirigent-dark.json")),
     ("slate", include_str!("../themes/slate.json")),
     ("neutral", include_str!("../themes/neutral.json")),
     ("recessed", include_str!("../themes/recessed.json")),
@@ -429,7 +468,7 @@ pub mod height {
     pub const HEADER: f32 = 28.;
     pub const SESSION_ROW: f32 = 44.;
     pub const GROUP_HEADER: f32 = 26.;
-    pub const LIST_ROW: f32 = 24.;
+    pub const LIST_ROW: f32 = 22.;
     pub const TAB_BAR: f32 = 32.;
 }
 
@@ -513,6 +552,35 @@ mod tests {
             ] {
                 rules.extend([bg.panel, bg.hover].map(|b| (format!("git.{name}"), c, b, 4.5)));
             }
+            // File icons are marks, not text: 3:1 on the lists and their hover.
+            let f = &t.file;
+            for (name, c) in [
+                ("folder", f.folder),
+                ("rust", f.rust),
+                ("javascript", f.javascript),
+                ("typescript", f.typescript),
+                ("python", f.python),
+                ("go", f.go),
+                ("c", f.c),
+                ("java", f.java),
+                ("web", f.web),
+                ("style", f.style),
+                ("php", f.php),
+                ("json", f.json),
+                ("markdown", f.markdown),
+                ("config", f.config),
+                ("shell", f.shell),
+                ("image", f.image),
+                ("archive", f.archive),
+                ("lock", f.lock),
+                ("docker", f.docker),
+                ("git", f.git),
+                ("code", f.code),
+                ("text", f.text),
+                ("other", f.other),
+            ] {
+                rules.extend([bg.panel, bg.hover, bg.base].map(|b| (format!("file.{name}"), c, b, 3.)));
+            }
             let st = &t.state;
             for (name, c) in [
                 ("working", st.working),
@@ -586,7 +654,7 @@ mod tests {
 
     #[test]
     fn resolve_unknown_falls_back() {
-        assert!(std::ptr::eq(resolve("paper", &[]).0, builtins()[5].1));
+        assert!(std::ptr::eq(resolve("paper", &[]).0, builtins()[6].1));
         let (t, note) = resolve("nope", &[]);
         assert!(std::ptr::eq(t, default_theme()));
         assert!(note.unwrap().contains("no theme \"nope\""));

@@ -118,24 +118,112 @@ pub fn icon(path: &'static str, size: f32, color: Rgba) -> Svg {
     svg().path(path).flex_none().size(z(size)).text_color(color)
 }
 
-/// A generic icon for a file name.
-pub fn file_icon(name: &str) -> &'static str {
+/// What a file name is, for its icon and color (VS Code's Seti-style coloring, by extension or well-known name).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FileKind {
+    Rust,
+    JavaScript,
+    TypeScript,
+    Python,
+    Go,
+    C,
+    Java,
+    Web,
+    Style,
+    Php,
+    Code,
+    Json,
+    Markdown,
+    Text,
+    Config,
+    Shell,
+    Image,
+    Archive,
+    Lock,
+    Docker,
+    Git,
+    Other,
+}
+
+pub fn file_kind(name: &str) -> FileKind {
+    use FileKind::*;
     let lower = name.to_ascii_lowercase();
     let ext = lower.rsplit_once('.').map_or("", |(_, e)| e);
-    match ext {
-        _ if lower.ends_with(".lock") || lower == "package-lock.json" => icon::FILE_LOCK,
-        "rs" | "c" | "h" | "cc" | "cpp" | "hpp" | "go" | "py" | "js" | "jsx" | "ts" | "tsx" | "java" | "kt"
-        | "swift" | "rb" | "php" | "cs" | "zig" | "lua" | "html" | "css" | "scss" | "vue" | "svelte" | "sql" => {
-            icon::FILE_CODE
+    match (lower.as_str(), ext) {
+        (n, _) if n.ends_with(".lock") || n == "package-lock.json" || n == "pnpm-lock.yaml" => Lock,
+        ("dockerfile" | "containerfile" | ".dockerignore", _) => Docker,
+        (n, _) if n.starts_with("dockerfile.") || n.starts_with("docker-compose") || n.starts_with("compose.") => {
+            Docker
         }
-        "md" | "txt" | "rst" | "adoc" | "log" => icon::FILE_TEXT,
-        "json" | "jsonc" | "json5" => icon::FILE_JSON,
-        "toml" | "yaml" | "yml" | "ini" | "conf" | "cfg" | "env" | "xml" => icon::FILE_CONFIG,
-        "png" | "jpg" | "jpeg" | "gif" | "svg" | "webp" | "ico" | "bmp" | "avif" => icon::FILE_IMAGE,
-        "sh" | "bash" | "zsh" | "fish" | "ps1" => icon::FILE_SHELL,
-        "zip" | "tar" | "gz" | "tgz" | "xz" | "zst" | "7z" | "rar" | "bz2" => icon::FILE_ARCHIVE,
-        _ if lower == "makefile" || lower == "dockerfile" => icon::FILE_CONFIG,
-        _ => icon::FILE,
+        (".gitignore" | ".gitattributes" | ".gitmodules" | ".gitkeep" | ".mailmap", _) => Git,
+        ("makefile" | "justfile" | "cmakelists.txt" | ".editorconfig", _) => Config,
+        ("license" | "licence" | "copying" | "notice", _) => Text,
+        (_, "rs") => Rust,
+        (_, "js" | "jsx" | "mjs" | "cjs") => JavaScript,
+        (_, "ts" | "tsx" | "mts" | "cts") => TypeScript,
+        (_, "py" | "pyi") => Python,
+        (_, "go") => Go,
+        (_, "c" | "h" | "cc" | "cpp" | "cxx" | "hpp" | "hh" | "cs") => C,
+        (_, "java" | "kt" | "kts" | "scala" | "swift" | "rb") => Java,
+        (_, "html" | "htm" | "vue" | "svelte" | "astro" | "twig" | "hbs") => Web,
+        (_, "css" | "scss" | "sass" | "less") => Style,
+        (_, "php") => Php,
+        (_, "zig" | "lua" | "sql" | "dart" | "ex" | "exs" | "hs" | "ml" | "nim" | "r" | "pl") => Code,
+        (_, "json" | "jsonc" | "json5") => Json,
+        (_, "md" | "mdx" | "rst" | "adoc") => Markdown,
+        (_, "txt" | "log") => Text,
+        (_, "toml" | "yaml" | "yml" | "ini" | "conf" | "cfg" | "env" | "xml" | "properties") => Config,
+        (n, _) if n.starts_with(".env") => Config,
+        (_, "sh" | "bash" | "zsh" | "fish" | "ps1" | "bat" | "cmd") => Shell,
+        (_, "png" | "jpg" | "jpeg" | "gif" | "svg" | "webp" | "ico" | "bmp" | "avif") => Image,
+        (_, "zip" | "tar" | "gz" | "tgz" | "xz" | "zst" | "7z" | "rar" | "bz2") => Archive,
+        _ => Other,
+    }
+}
+
+/// A generic icon for a file name.
+pub fn file_icon(name: &str) -> &'static str {
+    use FileKind::*;
+    match file_kind(name) {
+        Lock => icon::FILE_LOCK,
+        Rust | JavaScript | TypeScript | Python | Go | C | Java | Web | Style | Php | Code => icon::FILE_CODE,
+        Markdown | Text => icon::FILE_TEXT,
+        Json => icon::FILE_JSON,
+        Config | Docker | Git => icon::FILE_CONFIG,
+        Image => icon::FILE_IMAGE,
+        Shell => icon::FILE_SHELL,
+        Archive => icon::FILE_ARCHIVE,
+        Other => icon::FILE,
+    }
+}
+
+/// The theme's icon color for a file name.
+pub fn file_color(name: &str) -> Rgba {
+    use FileKind::*;
+    let f = &theme::get().file;
+    match file_kind(name) {
+        Rust => f.rust,
+        JavaScript => f.javascript,
+        TypeScript => f.typescript,
+        Python => f.python,
+        Go => f.go,
+        C => f.c,
+        Java => f.java,
+        Web => f.web,
+        Style => f.style,
+        Php => f.php,
+        Code => f.code,
+        Json => f.json,
+        Markdown => f.markdown,
+        Text => f.text,
+        Config => f.config,
+        Shell => f.shell,
+        Image => f.image,
+        Archive => f.archive,
+        Lock => f.lock,
+        Docker => f.docker,
+        Git => f.git,
+        Other => f.other,
     }
 }
 
@@ -536,7 +624,32 @@ mod tests {
         assert_eq!(file_icon("Cargo.toml"), icon::FILE_CONFIG);
         assert_eq!(file_icon("README.md"), icon::FILE_TEXT);
         assert_eq!(file_icon("build.sh"), icon::FILE_SHELL);
-        assert_eq!(file_icon("LICENSE"), icon::FILE);
+        assert_eq!(file_icon("LICENSE"), icon::FILE_TEXT);
+        assert_eq!(file_icon("notes.bin"), icon::FILE);
+    }
+
+    #[test]
+    fn file_kinds() {
+        use FileKind::*;
+        for (name, kind) in [
+            ("main.rs", Rust),
+            ("App.TSX", TypeScript),
+            ("index.mjs", JavaScript),
+            ("Dockerfile", Docker),
+            ("docker-compose.yml", Docker),
+            (".gitignore", Git),
+            ("Makefile", Config),
+            (".env.local", Config),
+            ("Cargo.lock", Lock),
+            ("package-lock.json", Lock),
+            ("package.json", Json),
+            ("style.scss", Style),
+            ("query.sql", Code),
+            ("photo.JPG", Image),
+            ("README", Other),
+        ] {
+            assert_eq!(file_kind(name), kind, "{name}");
+        }
     }
 }
 

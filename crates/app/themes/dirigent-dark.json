@@ -1,0 +1,145 @@
+{
+  "name": "Dirigent Dark",
+  "bg": {
+    "base": "#1f1f1f",
+    "panel": "#181818",
+    "panel_translucent": "#181818b8",
+    "elevated": "#252526",
+    "hover": "#2a2d2e",
+    "selected": "#37373d",
+    "selected_focus": "#04395e",
+    "input": "#313131",
+    "scrim": "#00000080"
+  },
+  "border": {
+    "subtle": "#ffffff12",
+    "strong": "#ffffff24"
+  },
+  "text": {
+    "primary": "#cccccc",
+    "muted": "#bdbdbd",
+    "dim": "#a6a6a6",
+    "faint": "#858585",
+    "on_accent": "#111111"
+  },
+  "accent": "#4daafc",
+  "state": {
+    "working": "#3794ff",
+    "needs_you": "#cca700",
+    "done": "#89d185",
+    "done_seen": "#6e6e6e",
+    "error": "#f47067"
+  },
+  "git": {
+    "added": "#81b88b",
+    "modified": "#e2c08d",
+    "deleted": "#f47067",
+    "renamed": "#75beff",
+    "conflict": "#f0a868"
+  },
+  "diff": {
+    "add_bg": "#1e3523",
+    "add_fg": "#c3e8c9",
+    "del_bg": "#3d1f20",
+    "del_fg": "#f6c3c3",
+    "add_word_bg": "#2d5c33",
+    "del_word_bg": "#73302f",
+    "hunk": "#7a8fb0",
+    "context": "#cccccc",
+    "filler": "#1a1a1a",
+    "clean_del": "#f47067",
+    "clean_add": "#81d18b",
+    "clean_del_bg": "#f4706729",
+    "clean_add_bg": "#81d18b29",
+    "moved": "#3794ff",
+    "moved_bg": "#3794ff29",
+    "gutter": "#7d8590"
+  },
+  "scrollbar": {
+    "thumb": "#79797966",
+    "active": "#bfbfbf66"
+  },
+  "meter": {
+    "track": "#ffffff14",
+    "ok": "#4daafc",
+    "warn": "#cca700",
+    "crit": "#f47067"
+  },
+  "terminal": {
+    "bg": "#1f1f1f",
+    "fg": "#cccccc",
+    "cursor": "#aeafad",
+    "selection": "#264f78",
+    "ansi": [
+      "#000000",
+      "#cd3131",
+      "#0dbc79",
+      "#e5e510",
+      "#2472c8",
+      "#bc3fbc",
+      "#11a8cd",
+      "#e5e5e5",
+      "#666666",
+      "#f14c4c",
+      "#23d18b",
+      "#f5f543",
+      "#3b8eea",
+      "#d670d6",
+      "#29b8db",
+      "#e5e5e5"
+    ]
+  },
+  "syntax": {
+    "keyword": "#569cd6",
+    "string": "#ce9178",
+    "number": "#b5cea8",
+    "comment": "#6a9955",
+    "function": "#dcdcaa",
+    "type": "#4ec9b0",
+    "variable": "#9cdcfe",
+    "constant": "#4fc1ff",
+    "property": "#9cdcfe",
+    "punctuation": "#b4b4b4",
+    "operator": "#d4d4d4",
+    "tag": "#569cd6",
+    "attribute": "#9cdcfe"
+  },
+  "file": {
+    "folder": "#dcb67a",
+    "rust": "#dea584",
+    "javascript": "#cbcb41",
+    "typescript": "#519aba",
+    "python": "#4fa3d1",
+    "go": "#29beb0",
+    "c": "#a074c4",
+    "java": "#e06c75",
+    "web": "#e37933",
+    "style": "#56b6c2",
+    "php": "#a074c4",
+    "json": "#cbcb41",
+    "markdown": "#519aba",
+    "config": "#7f939b",
+    "shell": "#8dc149",
+    "image": "#a074c4",
+    "archive": "#cc6d2e",
+    "lock": "#7f939b",
+    "docker": "#519aba",
+    "git": "#e44d26",
+    "code": "#519aba",
+    "text": "#a6a6a6",
+    "other": "#a6a6a6"
+  },
+  "danger_hover": "#c42b1c",
+  "search_match": "#623315",
+  "search_current": "#9e6a03",
+  "project": [
+    "#81b88b",
+    "#dcb67a",
+    "#f47067",
+    "#4ec9b0",
+    "#c586c0",
+    "#ce9178",
+    "#e9a3d4",
+    "#4daafc"
+  ]
+}

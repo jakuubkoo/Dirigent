@@ -110,12 +110,13 @@ impl FilesPanel {
             Some(k) => theme::git_kind(k),
             None => t.text.primary,
         };
+        // Like VS Code: the icon keeps its file type's color, the name carries the git status.
         let icon_color = if row.ignored {
             t.text.faint
-        } else if kind.is_some() {
-            color
+        } else if e.is_dir {
+            t.file.folder
         } else {
-            t.text.dim
+            ui::file_color(&e.name)
         };
         let (chevron, file_icon) = match (e.is_dir, row.expanded) {
             (true, true) => (Some(icon::CHEVRON_DOWN), icon::FOLDER_OPEN),
@@ -123,8 +124,19 @@ impl FilesPanel {
             (false, _) => (None, ui::file_icon(&e.name)),
         };
         let (path, is_dir, ws, focus) = (e.path.clone(), e.is_dir, self.workspace.clone(), self.focus.clone());
+        // Indent guides: a hairline under each ancestor's chevron.
+        let guides = (0..row.depth).map(|level| {
+            div()
+                .absolute()
+                .top_0()
+                .bottom_0()
+                .left(z(space::MD + INDENT * level as f32 + 6.))
+                .border_l_1()
+                .border_color(t.border.subtle)
+        });
         div()
             .id(("tree-row", ix))
+            .relative()
             .w_full()
             .overflow_hidden()
             .h(z(height::LIST_ROW))
@@ -138,6 +150,7 @@ impl FilesPanel {
             .when(selected, |d| d.bg(t.bg.selected_focus))
             .when(!selected && open, |d| d.bg(t.bg.selected))
             .when(!selected && !open, |d| d.hover(|s| s.bg(t.bg.hover)))
+            .children(guides)
             .on_click(move |_: &ClickEvent, window, cx| {
                 window.focus(&focus, cx);
                 let path = path.clone();
@@ -366,8 +379,8 @@ struct Editor {
     _wake: Task<()>,
 }
 
-/// The file preview over the terminal; text files up to `editor::MAX_BYTES` are edited right here. Esc closes it
-/// (asking first while there are unsaved edits).
+/// The file preview over the terminal, one per file tab; text files up to `editor::MAX_BYTES` are edited right
+/// here. Esc goes back to the terminal, Ctrl+W closes the tab (each asking first while there are unsaved edits).
 pub struct FileView {
     pub path: PathBuf,
     /// The repo it's in: its status entry enables "Show diff" (and re-reads a read-only file on refreshes).
@@ -467,6 +480,11 @@ impl FileView {
     /// Unsaved edits.
     pub fn dirty(&self) -> bool {
         self.editor.as_ref().is_some_and(|e| e.buf.dirty())
+    }
+
+    /// What a new view of the same file is made from: its path, repo and tree root.
+    pub fn origin(&self) -> (PathBuf, Option<PathBuf>, Option<PathBuf>) {
+        (self.path.clone(), self.repo.clone(), self.base.clone())
     }
 
     /// The user chose to discard the edits (the view is about to close).
@@ -1239,7 +1257,7 @@ impl Render for FileView {
                 })
         });
         let name = self.path.file_name().map_or(String::new(), |n| n.to_string_lossy().into_owned());
-        let icon_color = self.change.as_ref().map_or(t.text.dim, |c| theme::git_kind(c.kind));
+        let icon_color = ui::file_color(&name);
         let dirty = self.dirty();
         crate::perf::event_with(|| {
             let banner = self.editor.as_ref().and_then(|e| e.banner.as_ref()).is_some();
@@ -1247,8 +1265,8 @@ impl Render for FileView {
         });
         let hint = match &self.editor {
             Some(e) if e.compare.is_some() => "Esc back to the editor",
-            Some(_) => "Ctrl+S save · Esc close",
-            None => "Esc to close",
+            Some(_) => "Ctrl+S save · Ctrl+W close tab · Esc terminal",
+            None => "Ctrl+W close tab · Esc terminal",
         };
         let header = ui::overlay_header()
             .child(ui::icon(ui::file_icon(&name), 14., icon_color))
@@ -1324,6 +1342,16 @@ impl Render for FileView {
                         if !matches!(compare, Ok(Some(()))) {
                             let _ = ws.update(cx, |w, cx| w.close_overlay(window, cx));
                         }
+                        cx.stop_propagation();
+                    } else if ks.key == "w"
+                        && ks.modifiers.control
+                        && !ks.modifiers.shift
+                        && !ks.modifiers.alt
+                        && !ks.modifiers.platform
+                    {
+                        // Its file tab (Ctrl+Shift+W stays the session's).
+                        let id = me.entity_id();
+                        let _ = ws.update(cx, |w, cx| w.close_file(id, window, cx));
                         cx.stop_propagation();
                     } else if me.update(cx, |v, cx| v.editor_key(ks, cx)).unwrap_or(false) {
                         cx.stop_propagation();
