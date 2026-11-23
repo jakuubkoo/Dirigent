@@ -250,7 +250,9 @@ pub(crate) fn server(distro: &str) -> Option<gitserve::Client> {
     count_spawn();
     crate::perf(|| format!("wsl {distro}: starting the git server"));
     let mut c = crate::cmd("wsl.exe");
-    c.args(["-d", distro, "--cd", "~", "-e", &helper, "git-server"]).env_remove("WSL_UTF8");
+    // The helper is a copy on NTFS: a DrvFs mount with `metadata` and an fmask can show it non-executable.
+    let run = r#"chmod +x "$0" 2>/dev/null; exec "$0" git-server"#;
+    c.args(["-d", distro, "--cd", "~", "-e", "sh", "-c", run, &helper]).env_remove("WSL_UTF8");
     let started = gitserve::Client::start(c, Duration::from_secs(20), gitserve::CAP);
     let client = with_distro(&key, |d| match started {
         Ok(c) => {
