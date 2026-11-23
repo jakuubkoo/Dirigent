@@ -1,6 +1,7 @@
-# Checks every PR and every push to main. `fmt`, `clippy-test` and `deny` are the ruleset's required status checks:
-# keep their names. `windows`, `musl-hook` and `windows-wsl` (the Windows preview) are not required yet. `advisories`
-# (RustSec) is informational: it also runs weekly, so new advisories show up without blocking merges.
+# Checks every PR and every push to main. `fmt`, `clippy-test`, `deny`, `windows`, `musl-hook` and `windows-wsl` are
+# the ruleset's required status checks: keep their names, and don't reuse them for jobs in other workflows (a skipped
+# job of the same name would stand in for the check). `advisories` (RustSec) is informational: it also runs weekly,
+# so new advisories show up without blocking merges.
 name: CI
 
 on:
@@ -70,7 +71,8 @@ jobs:
       # Release builds compile gpui's shaders with fxc.exe (Windows SDK): checked here, not first at a release.
       - run: cargo build --release --locked
 
-  # The Linux helper WSL sessions run (static musl: any distro), for windows-wsl and later the Windows zip.
+  # The Linux helper WSL sessions run (static musl: any distro), for windows-wsl. release.yml builds its own
+  # (`wsl-hook`) for the Windows zip.
   musl-hook:
     if: github.event_name != 'schedule'
     runs-on: ubuntu-24.04
@@ -88,7 +90,7 @@ jobs:
           if-no-files-found: error
 
   # WSL sessions against a real distro (Ubuntu on WSL 2): git through wsl.exe, the helper relaying to the app's
-  # pipe, a session's shim and cwd reports, and what one panel refresh costs. Not required yet.
+  # pipe, a session's shim and cwd reports, and what one panel refresh costs.
   windows-wsl:
     if: github.event_name != 'schedule'
     needs: musl-hook
