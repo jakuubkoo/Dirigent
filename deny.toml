@@ -45,6 +45,7 @@ ignore = [
     { id = "RUSTSEC-2026-0371", reason = "zbus_names: folded into zbus upstream; we and gpui use zbus 5" },
     { id = "RUSTSEC-2026-0370", reason = "zvariant: folded into zbus upstream; we and gpui use zbus 5" },
     { id = "RUSTSEC-2026-0372", reason = "zvariant_derive: folded into zbus upstream; we and gpui use zbus 5" },
+    { id = "RUSTSEC-2026-0543", reason = "chrono: gpui and its scheduler use it; follows gpui" },
 ]
 
 [bans]
