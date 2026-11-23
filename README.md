@@ -4,7 +4,7 @@ A native desktop app for conducting many [Claude Code](https://claude.com/claude
 session is a real terminal; Dirigent watches what the agents in them are doing, tells you which one needs you, shows
 what each agent changed in git, and lets you stage, commit or put an agent in its own git worktree, without leaving
 the window. Written in Rust on [gpui](https://github.com/zed-industries/zed) (GPU-rendered, no web view), built to
-stay at zero lag and 0 % CPU when idle. Linux (Wayland and X11) for now.
+stay at zero lag and 0 % CPU when idle. Linux (Wayland and X11) and Windows 11 (preview).
 
 <!-- TODO: add docs/screenshot.png, then uncomment:
 ![Dirigent](docs/screenshot.png)
@@ -78,7 +78,7 @@ Download `dirigent-X.Y.Z-x86_64-linux.tar.gz` and `SHA256SUMS` from
 [Releases](https://github.com/jakuubkoo/Dirigent/releases) (Linux x86_64, glibc 2.35+, e.g. Ubuntu 22.04 or newer):
 
 ```sh
-sha256sum -c SHA256SUMS
+sha256sum -c --ignore-missing SHA256SUMS
 tar xzf dirigent-*-x86_64-linux.tar.gz
 dirigent-*-x86_64-linux/install.sh --prebuilt
 ```
@@ -99,6 +99,29 @@ scripts/install.sh
 
 This builds a release and installs `~/.local/bin/dirigent` (the binaries live in `~/.local/lib/dirigent/`) plus a
 launcher entry with its icon. `dirigent --version` shows the installed build.
+
+### Windows 11 (preview)
+
+Download `dirigent-X.Y.Z-x86_64-windows.zip` and `SHA256SUMS` from
+[Releases](https://github.com/jakuubkoo/Dirigent/releases), check the hash and unpack it anywhere, for example:
+
+```powershell
+(Get-FileHash dirigent-*-x86_64-windows.zip).Hash   # compare with its line in SHA256SUMS
+Expand-Archive dirigent-*-x86_64-windows.zip "$env:LOCALAPPDATA\Programs"
+```
+
+Run `dirigent.exe` from the unpacked folder; keep `dirigent-hook.exe` and the `wsl` folder next to it. Add the folder
+to your PATH for `dirigent C:\some\dir` from a terminal (it opens the session in the running window). The exe isn't
+signed yet: SmartScreen asks once (More info → Run anyway).
+
+- **Shells:** new sessions start PowerShell 7 when installed (recommended: `winget install Microsoft.PowerShell`),
+  else Windows PowerShell; Settings → Terminal → Shell picks Command Prompt or Git Bash instead.
+- **State:** settings in `%APPDATA%\dirigent`, sessions, state and the log in `%LOCALAPPDATA%\dirigent`.
+- **WSL:** your WSL 2 distros show up in the New session picker. Install git and `claude` inside the distro: the
+  git panel runs git there (your Linux config, ssh and credentials). Windows can't watch files inside WSL, so the
+  panel refreshes after the agent's steps, at every prompt and on a click.
+- **Update:** quit Dirigent, unpack the new zip and point PATH at its folder; settings and sessions stay.
+  **Uninstall:** delete the folder (and the two state folders above to drop your settings and sessions).
 
 ## Update
 
@@ -168,7 +191,8 @@ group.
 
 Preferences live in `~/.config/dirigent/settings.json` (`$XDG_CONFIG_HOME`): change them on the Settings page
 (Ctrl+, or the gear) or edit the file, both apply at once. Tabs, layout and projects live in
-`~/.local/state/dirigent/state.json` (`$XDG_STATE_HOME`). Your
+`~/.local/state/dirigent/state.json` (`$XDG_STATE_HOME`); on Windows `%APPDATA%\dirigent\settings.json` and
+`%LOCALAPPDATA%\dirigent\state.json`. Your
 `~/.claude/settings.json` is never modified: Dirigent passes its hooks to each claude it starts with `--settings`.
 
 ## License

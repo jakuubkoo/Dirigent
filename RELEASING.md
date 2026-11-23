@@ -17,8 +17,10 @@ Versions follow [semver](https://semver.org). There is one version for everythin
    ```
 
 4. The `Release` workflow builds Linux x86_64 binaries and checks that the tag matches the version and that the
-   changelog has that section. It then publishes a GitHub Release with
-   `dirigent-X.Y.Z-x86_64-linux.tar.gz`, `SHA256SUMS`, and the changelog section as its notes.
+   changelog has that section. It also builds the Windows x86_64 zip (`dirigent.exe`, `dirigent-hook.exe` and the
+   static musl `wsl/dirigent-hook` for WSL sessions). It then publishes a GitHub Release with
+   `dirigent-X.Y.Z-x86_64-linux.tar.gz`, `dirigent-X.Y.Z-x86_64-windows.zip`, `SHA256SUMS` over all release files,
+   and the changelog section as its notes.
 
 The same run attaches `dirigent_X.Y.Z_amd64.deb` to the release. It then rebuilds the APT repository on GitHub
 Pages from the `.deb`s of the last 5 releases and signs it with the repository key. Re-running the workflow by hand
@@ -78,5 +80,6 @@ The key never expires, so there is no renewal date to track.
 
 A PR from a `release/*` branch, or one that changes the release workflow, `scripts/install.sh`,
 `scripts/build-deb.sh`, `scripts/apt-repo.sh` or `packaging/`, runs the same build and packaging as a dry run
-(the `gate` job decides; other PRs show the release jobs as skipped): the tarball and the `.deb` are workflow artifacts, and nothing is released. The dry run also installs and
+(the `gate` job decides; other PRs show the release jobs as skipped): the tarball, the `.deb`, the Windows zip and
+`SHA256SUMS` are workflow artifacts, and nothing is released. The dry run also installs and
 upgrades the `.deb` from a throwaway-key repository in clean Ubuntu 22.04 and 24.04 containers.
