@@ -18,7 +18,7 @@ use alacritty_terminal::Term;
 use alacritty_terminal::event::{Event, EventListener, WindowSize};
 use alacritty_terminal::grid::{Dimensions, Scroll};
 use alacritty_terminal::sync::FairMutex;
-use alacritty_terminal::term::Config;
+use alacritty_terminal::term::{ClipboardType, Config};
 use alacritty_terminal::vte::ansi::{Processor, Rgb};
 use async_channel::{Receiver, TrySendError};
 pub use portable_pty::CommandBuilder;
@@ -65,6 +65,7 @@ pub struct Listener {
     writer: Writer,
     size: Arc<Mutex<Size>>,
     title: Arc<Mutex<Option<String>>>,
+    clipboard: Arc<Mutex<Option<String>>>,
 }
 
 impl EventListener for Listener {
@@ -91,6 +92,11 @@ impl EventListener for Listener {
             }
             Event::ResetTitle => {
                 *self.title.lock().unwrap() = None;
+                return;
+            }
+            // OSC 52 copy (Claude Code copies its own mouse selection this way; reading the clipboard stays denied).
+            Event::ClipboardStore(ClipboardType::Clipboard, text) => {
+                *self.clipboard.lock().unwrap() = Some(text);
                 return;
             }
             _ => return,
@@ -142,6 +148,8 @@ pub struct Session {
     /// Closed when the shell exits.
     pub wakeups: Receiver<()>,
     pub title: Arc<Mutex<Option<String>>>,
+    /// Text the app asked to copy (OSC 52), for the UI to put on the system clipboard.
+    pub clipboard: Arc<Mutex<Option<String>>>,
     flags: Arc<Flags>,
     writer: Writer,
     /// `None` once a Windows pseudoconsole was closed after its shell exited (`watch_exit`).
@@ -203,7 +211,13 @@ impl Session {
 
         let size_shared = Arc::new(Mutex::new(size));
         let title = Arc::new(Mutex::new(None));
-        let listener = Listener { writer: writer.clone(), size: size_shared.clone(), title: title.clone() };
+        let clipboard = Arc::new(Mutex::new(None));
+        let listener = Listener {
+            writer: writer.clone(),
+            size: size_shared.clone(),
+            title: title.clone(),
+            clipboard: clipboard.clone(),
+        };
         let term = Arc::new(FairMutex::new(Term::new(Config::default(), &size, listener)));
         let flags = Arc::new(Flags::default());
 
@@ -263,7 +277,7 @@ impl Session {
         let master = Arc::new(Mutex::new(Some(pair.master)));
         #[cfg(windows)]
         watch_exit(&child, &master)?;
-        Ok(Self { term, wakeups, title, flags, writer, master, child, size: size_shared })
+        Ok(Self { term, wakeups, title, clipboard, flags, writer, master, child, size: size_shared })
     }
 
     /// Answers a prompt once: when `needle` (whitespace ignored, escapes stripped) appears in the output before
@@ -441,6 +455,16 @@ mod tests {
         assert!(!s.resize(Size { cols: 20, rows: 3, ..SIZE }), "same size is a no-op");
         let term = s.term.lock();
         assert_eq!((term.columns(), term.screen_lines()), (20, 3));
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn osc52_copy_reaches_the_clipboard_slot() {
+        // "aGk=" = "hi"; the primary selection ('p') is ignored.
+        let s = Session::spawn_command(sh(r"printf '\033]52;p;eA==\a\033]52;c;aGk=\a'; sleep 2"), Path::new("/"), SIZE)
+            .unwrap();
+        wait_until("copy", || s.clipboard.lock().unwrap().is_some());
+        assert_eq!(s.clipboard.lock().unwrap().take().as_deref(), Some("hi"));
     }
 
     #[test]

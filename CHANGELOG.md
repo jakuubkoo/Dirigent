@@ -92,6 +92,9 @@ All notable changes to Dirigent are recorded here. The format follows
 
 ### Fixed
 
+- Copying a selection made in Claude Code (it selects with the mouse itself and copies via OSC 52) now reaches the
+  system clipboard; before, it was dropped. On Windows, Ctrl+C copies a selection (without one it stays ^C) and
+  Ctrl+V pastes text, like Windows Terminal; with an image on the clipboard Ctrl+V still goes to Claude Code.
 - Windows: discarding new files could be refused with "this drive has no Recycle Bin" when several discards ran at
   once, and always on a `subst` drive. Now they go to the Recycle Bin. A drive that really has none (a network share)
   still refuses and keeps the file, and so does an item too big for the bin (before, Windows asked whether to delete
