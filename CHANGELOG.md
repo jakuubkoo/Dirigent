@@ -31,6 +31,8 @@ All notable changes to Dirigent are recorded here. The format follows
   credentials); it refreshes after the agent's steps and at every prompt, or on a click, since Windows can't watch
   files inside WSL. One long-running helper per distro runs those git commands, so a refresh doesn't start WSL for
   each one. A `cd /mnt/c/…` there is the same folder as `C:\…`, with Windows git.
+- Windows (preview): releases include `dirigent-X.Y.Z-x86_64-windows.zip` (`dirigent.exe`, `dirigent-hook.exe` and
+  the Linux helper for WSL sessions); see README → Install.
 - **File tabs**: every file opened in the preview gets a tab above it (per session); click one to switch, keeping
   its scroll position and cursor. Ctrl+W, the tab's x or a middle click closes it, and asks first while it has
   unsaved edits. Esc still goes back to the terminal, and the tabs are there again with the next file.
@@ -90,6 +92,9 @@ All notable changes to Dirigent are recorded here. The format follows
 
 ### Fixed
 
+- Copying a selection made in Claude Code (it selects with the mouse itself and copies via OSC 52) now reaches the
+  system clipboard; before, it was dropped. On Windows, Ctrl+C copies a selection (without one it stays ^C) and
+  Ctrl+V pastes text, like Windows Terminal; with an image on the clipboard Ctrl+V still goes to Claude Code.
 - Windows: discarding new files could be refused with "this drive has no Recycle Bin" when several discards ran at
   once, and always on a `subst` drive. Now they go to the Recycle Bin. A drive that really has none (a network share)
   still refuses and keeps the file, and so does an item too big for the bin (before, Windows asked whether to delete

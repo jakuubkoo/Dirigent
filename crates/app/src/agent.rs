@@ -668,6 +668,9 @@ fn wsl_setup(dir: &Path, helper: &Path) -> Option<(String, bool)> {
 /// interop is off: then the Windows helper can't run and Claude Code's states don't reach the app.
 #[cfg(windows)]
 const WSL_START: &str = r#"# dirigent: your login shell inside WSL, with the claude shim first on PATH and cwd reports
+# The helpers are copies on NTFS: a DrvFs mount with `metadata` and an fmask can show them non-executable.
+# ponytail: chmod can't help on a mount without `metadata` whose fmask drops x; copy them into the distro if that shows up.
+chmod +x "$DIRIGENT_BIN"/* 2>/dev/null
 if ! [ -e /proc/sys/fs/binfmt_misc/WSLInterop ] && ! [ -e /proc/sys/fs/binfmt_misc/WSLInterop-late ]; then
   printf '%s
 ' "dirigent: WSL interop is off in this distro ([interop] in /etc/wsl.conf): Claude Code's states won't show."

@@ -123,6 +123,10 @@ impl TerminalView {
                 let Ok((visible, moved, id)) = this.update(cx, |this, cx| {
                     let visible = this.session.is_visible();
                     crate::perf::event(if visible { "wakeup (visible)" } else { "wakeup (unread flip)" });
+                    let copied = this.session.clipboard.lock().unwrap().take();
+                    if let Some(text) = copied {
+                        cx.write_to_clipboard(ClipboardItem::new_string(text));
+                    }
                     if visible {
                         // The text under the pointer may have changed: look again (no extra frame, this one paints).
                         if let Some((pos, ctrl)) = this.pointer {
@@ -229,6 +233,23 @@ impl TerminalView {
             }
             cx.stop_propagation();
             return;
+        }
+        // Windows Terminal's keys too: Ctrl+C copies a selection (none: ^C), Ctrl+V pastes text (an image: ^V, so
+        // Claude Code reads it from the clipboard itself).
+        #[cfg(windows)]
+        if m.control && !m.shift && !m.alt {
+            if ks.key == "c" && self.has_selection() {
+                self.copy(cx);
+                self.session.term.lock().selection = None;
+                cx.notify();
+                cx.stop_propagation();
+                return;
+            }
+            if ks.key == "v" && cx.read_from_clipboard().and_then(|c| c.text()).is_some() {
+                self.paste_clipboard(cx);
+                cx.stop_propagation();
+                return;
+            }
         }
         if m.shift && !m.control && !m.alt && matches!(ks.key.as_str(), "pageup" | "pagedown") {
             let page = self.session.size().rows as i32 - 1;
